@@ -1,6 +1,6 @@
 {
   "name": "verify-claims",
   "description": "Adversarial verification of claims against primary records by an independent model family",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": { "name": "Anton de la Fuente" }
 }
