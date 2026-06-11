@@ -1,0 +1,15 @@
+#!/bin/bash
+# aar-skills pre-commit: this repo is destined PUBLIC — block instance secrets/specifics.
+# Install once per clone: git config core.hooksPath .githooks
+PATTERNS='ghp_[A-Za-z0-9]|sk-ant-|sk-proj-|AKIA[A-Z0-9]|r2:mats|antondelafuente:|100\.107\.231|lrj2kw2jvm|RUNPOD_TEAM_API_KEY=.+[A-Za-z0-9]'
+FAILED=0
+while read -r f; do
+  [ -f "$f" ] || continue
+  [ "$f" = ".githooks/pre-commit" ] && continue
+  if git show ":$f" | grep -nE "$PATTERNS" >/dev/null 2>&1; then
+    echo "BLOCKED: staged $f matches an instance-secret pattern:" >&2
+    git show ":$f" | grep -nE "$PATTERNS" | head -3 >&2
+    FAILED=1
+  fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+exit $FAILED
