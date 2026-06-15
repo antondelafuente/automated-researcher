@@ -99,6 +99,18 @@ kill_tree(){ # kill_tree <pid> [signal=TERM] — kill a child + descendants WITH
   kill -"$sig" "$pid" 2>/dev/null || true
 }
 
+alive_check(){ # alive_check <output-file> <staleness-min> — true iff <file> exists AND its mtime
+               # advanced within the last <staleness-min> minutes (positive-progress liveness).
+               # USE THIS, not `pgrep -f <token>`, to answer "is the job still working?": a -f
+               # process probe self-matches the probing shell (≥6 incidents — masked-dead jobs,
+               # killed own ssh, never-exiting relaunch loops) AND a hung-but-not-exited process
+               # reads as "alive" though it stopped progressing. A growing output file is the real
+               # signal. Pair with kill_tree (kill by PID, never `pkill -f`).
+  local f=$1 stale=$2
+  [ -e "$f" ] || return 1
+  [ -z "$(find "$f" -mmin +"$stale" 2>/dev/null)" ]  # empty ⇒ newer than stale-min ⇒ alive
+}
+
 env_get(){ # env_get <VAR> [file=/workspace/.env] — read VAR tolerating `export VAR=…`; dies if empty
   local var=$1 file=${2:-/workspace/.env} val
   val=$(grep -E "^(export )?${var}=" "$file" 2>/dev/null | tail -1 | sed 's/^export //' \
