@@ -22,11 +22,13 @@
 #        audit_experiment.sh --design <experiment-dir> [design-file] [out-file]   # PRE-LAUNCH design audit
 #        audit_experiment.sh --data <experiment-dir> [manifest] [out-file]        # MID-RUN data audit
 #        audit_experiment.sh --scaffold <proposal.md> [context-dir] [out-file]    # SCAFFOLD/PRODUCT design review
-# --scaffold reviews a PROPOSAL doc for a scaffold/product change (skills, conventions, migrations) against
-# ARCHITECTURE dimensions (right seam, DRY/canonical-home, blast radius, reversibility, instance<->product
-# leak, contract clarity, simplest-thing, convention-match) — the design-review counterpart to /code-review
-# on the resulting diff. Same cross-family harness as --design; the foreign family reads the proposal AND the
-# real tree (context-dir) to check its claims. Default context = the proposal file's dir.
+#        audit_experiment.sh --code <diff-file> [context-dir] [out-file]          # DIFF code review (implementation)
+# --scaffold reviews a PROPOSAL doc for a scaffold/product change against ARCHITECTURE dimensions (right seam,
+# DRY/canonical-home, blast radius, reversibility, instance<->product leak, contract clarity, simplest-thing,
+# convention-match). --code reviews a DIFF against IMPLEMENTATION dimensions (correctness, edge-cases, regression,
+# security, simplify) — the design and code review halves of the SWE pipeline. Both require AAR_SUBSTRATE = the
+# AUTHOR's family (cross-family enforced) and read the context repo's AGENTS.md (fail loud if absent). Default
+# context: --scaffold = the proposal file's git root; --code = the CWD's git root (the diff is transient).
 # --data audits the ACTUAL generated/transformed data against the design intent (the 'facts→logic→
 #   DATA→evidence' ladder): the deterministic full-pool layer is `pipelines/eval/audit_data.py`
 #   (counts/truncation/schema/dupes/balance → data_audit*.json + a stratified high-risk sample); this
@@ -48,15 +50,19 @@ set -euo pipefail
 MODE=close
 if [ "${1:-}" = "--design" ]; then MODE=design; shift;
 elif [ "${1:-}" = "--data" ]; then MODE=data; shift;
-elif [ "${1:-}" = "--scaffold" ]; then MODE=scaffold; shift; fi
-if [ "$MODE" = scaffold ]; then
-  PROPOSAL=${1:?usage: audit_experiment.sh --scaffold <proposal.md> [context-dir] [out-file]}
-  [ -f "$PROPOSAL" ] || { echo "BLOCKED: proposal file missing: $PROPOSAL" >&2; exit 1; }
-  # Context = the dir the auditor reads to CHECK the proposal vs the real tree. Default to the GIT/WORKTREE
-  # ROOT (a proposal in proposals/ must not blind the auditor to the scaffold it touches), else the proposal's dir.
+elif [ "${1:-}" = "--scaffold" ]; then MODE=scaffold; shift;
+elif [ "${1:-}" = "--code" ]; then MODE=code; shift; fi
+if [ "$MODE" = scaffold ] || [ "$MODE" = code ]; then
+  # --scaffold reviews a PROPOSAL.md (design); --code reviews a DIFF file (implementation). Both: file input +
+  # context repo + author family. Cross-family + context-constitution handling below is shared by both.
+  PROPOSAL=${1:?usage: audit_experiment.sh --scaffold <proposal.md> | --code <diff-file> [context-dir] [out-file]}
+  [ -f "$PROPOSAL" ] || { echo "BLOCKED: input file missing: $PROPOSAL" >&2; exit 1; }
+  [ "$MODE" != code ] || [ -s "$PROPOSAL" ] || { echo "BLOCKED: --code given an EMPTY diff ($PROPOSAL) — a failed or no-op diff generation would otherwise pass review without reviewing any code. Regenerate the diff." >&2; exit 1; }
+  # Context = the dir the auditor reads to CHECK against the real tree. Default to the GIT/WORKTREE ROOT, else the file's dir.
   if [ -n "${2:-}" ]; then EXP=$2;
+  elif [ "$MODE" = code ]; then EXP=$(git rev-parse --show-toplevel 2>/dev/null) || EXP=$(pwd);   # a diff is transient (often /tmp) → context = the CWD's repo, not the diff's dir
   else EXP=$(git -C "$(dirname "$PROPOSAL")" rev-parse --show-toplevel 2>/dev/null) || EXP=$(cd "$(dirname "$PROPOSAL")" && pwd); fi
-  OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}   # proposal-specific sidecar — no root collision across proposals
+  if [ "$MODE" = scaffold ]; then OUT=${3:-${PROPOSAL%.md}.SCAFFOLD_AUDIT.md}; else OUT=${3:-${PROPOSAL}.CODE_REVIEW.md}; fi   # append (don't %.*-strip — that mangles a no-ext diff under a dotted dir)
   PROPOSAL_REL=$(realpath --relative-to="$EXP" "$PROPOSAL" 2>/dev/null || realpath "$PROPOSAL" 2>/dev/null || echo "$PROPOSAL")  # never degrade to a bare basename
 else
 EXP=${1:?usage: audit_experiment.sh [--design|--data|--scaffold] <experiment-dir|proposal> [args...]}
@@ -85,12 +91,12 @@ if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
     *claude*) AUDITOR_FAMILY=claude ;; *codex*) AUDITOR_FAMILY=codex ;; *) AUDITOR_FAMILY=custom ;;
   esac
 fi
-if [ "$MODE" = scaffold ]; then
+if [ "$MODE" = scaffold ] || [ "$MODE" = code ]; then
   case "${AAR_SUBSTRATE:-}" in
     claude|codex) ;;   # exact match only — a typo (e.g. 'codx') must NOT slip a same-family review past the gate
-    *) echo "BLOCKED: --scaffold requires AAR_SUBSTRATE = the proposal AUTHOR's family, exactly 'claude' or 'codex'" >&2
+    *) echo "BLOCKED: --$MODE requires AAR_SUBSTRATE = the AUTHOR's family, exactly 'claude' or 'codex'" >&2
        echo "  (got '${AAR_SUBSTRATE:-<unset>}'). No default: the experiment default (claude) or a typo would let a" >&2
-       echo "  Codex author be reviewed by Codex (same family = not cross-family). Set it to whoever wrote the proposal." >&2
+       echo "  Codex author be reviewed by Codex (same family = not cross-family). Set it to whoever wrote the change." >&2
        exit 1 ;;
   esac
 fi
@@ -102,16 +108,16 @@ if [ "$AUDITOR_FAMILY" = "$RUNNER_FAMILY" ]; then
   exit 1
 fi
 
-if [ "$MODE" = scaffold ]; then
-  # Portable default: the CONTEXT repo's AGENTS.md (an outsider's scaffold conventions), not $HOME's.
+if [ "$MODE" = scaffold ] || [ "$MODE" = code ]; then
+  # Portable default: the CONTEXT repo's AGENTS.md (an outsider's conventions), not $HOME's.
   CONSTITUTION=${AUDIT_CONSTITUTION:-${EXP%/}/AGENTS.md}
 else
   CONSTITUTION=${AUDIT_CONSTITUTION:-$HOME/AGENTS.md}
 fi
 CONSTI_TEXT=""
 [ -f "$CONSTITUTION" ] && CONSTI_TEXT=$(cat "$CONSTITUTION")
-if [ "$MODE" = scaffold ] && [ -z "$CONSTI_TEXT" ]; then
-  echo "BLOCKED: no constitution found for --scaffold (looked at $CONSTITUTION). A scaffold review without the" >&2
+if { [ "$MODE" = scaffold ] || [ "$MODE" = code ]; } && [ -z "$CONSTI_TEXT" ]; then
+  echo "BLOCKED: no constitution found for --$MODE (looked at $CONSTITUTION). A review without the" >&2
   echo "  program's conventions is toothless — set AUDIT_CONSTITUTION to your AGENTS.md (or add one to the context repo)." >&2
   exit 1
 fi
@@ -226,6 +232,39 @@ SUMMARY: high=<n> med=<n> low=<n>
 $(cat "$MANIFEST" 2>/dev/null)
 
 === THE PROGRAM CONSTITUTION (audit against this) ===
+$CONSTI_TEXT"
+elif [ "$MODE" = code ]; then
+PROMPT="You are an INDEPENDENT CODE REVIEWER from a different model family than the agent (author) that wrote
+this change. Review the DIFF below. The DESIGN was reviewed separately (--scaffold) — do NOT re-litigate the
+design/architecture or naming preference. Your job is the IMPLEMENTATION: real defects in the changed lines.
+You may read the surrounding tree (the current directory) for context on conventions and on what the changed
+code calls.
+
+Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say 'no material
+finding' — do NOT invent issues. False findings destroy this tool's value.
+1. CORRECTNESS — does the changed code do what it intends? Logic errors, wrong conditions, off-by-one, wrong
+   variable, broken control flow, a guard that doesn't guard.
+2. EDGE CASES — unset/empty vars (esp. under 'set -u'), quoting/word-splitting, missing files, non-zero exits
+   swallowed, locale/whitespace, a fallback that silently degrades, partial-failure leaving bad state.
+3. REGRESSION — does the change break an existing path it touches (other modes/branches/callers)? Check the
+   dispatch and shared code it modifies against the surrounding tree.
+4. SECURITY / SAFETY — secrets/tokens leaked into output or logs, an injection via unsanitized input, a
+   destructive op (rm/force-push/delete) without the guard the convention requires, a gate that can be bypassed.
+5. SIMPLIFY — a genuinely simpler/clearer form that removes a real bug-surface (not style nits).
+
+Output (exactly), most severe first:
+FINDING <n>: <HIGH|MED|LOW> [<correctness|edge-case|regression|security|simplify>]
+  issue: <one sentence>
+  evidence: <file/hunk>: \"<short quote from the diff>\"
+  recommendation: <one sentence>
+...
+NO-FINDING AREAS: <list dimensions with nothing material>
+SUMMARY: high=<n> med=<n> low=<n>
+
+=== THE DIFF UNDER REVIEW ($PROPOSAL_REL) ===
+$(cat "$PROPOSAL")
+
+=== THE PROGRAM CONSTITUTION (conventions to check against) ===
 $CONSTI_TEXT"
 elif [ "$MODE" = scaffold ]; then
 PROMPT="You are an INDEPENDENT ADVERSARIAL REVIEWER from a different model family than the agent that

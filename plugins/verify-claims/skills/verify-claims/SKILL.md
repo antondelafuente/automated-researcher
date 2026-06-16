@@ -70,9 +70,22 @@ material was found. "No material finding" is allowed and common — it does NOT 
 calibration discipline as the claim checker; the close mode validated 2026-06-12 catching a repro gap
 + in-sample steering + overclaim from a cold read, zero false findings).
 
+## SWE-pipeline review: `--scaffold` (design) + `--code` (implementation)
+
+The four modes above audit EXPERIMENTS (product QA). `--scaffold` and `--code` reuse the SAME cross-family
+harness for **changes to the product's code** (the SWE pipeline) — `--scaffold` reviews the DESIGN of a change
+(a proposal doc), `--code` reviews the IMPLEMENTATION (a diff). Both require `AAR_SUBSTRATE` = the change AUTHOR's
+family (cross-family enforced, blocks otherwise) and read the context repo's `AGENTS.md` (fail loud if absent).
+
+- **`audit_experiment.sh --code <diff-file> [context-dir] [out]`** → `<diff>.CODE_REVIEW.md`. Reviews a diff
+  against IMPLEMENTATION dimensions: correctness · edge-cases (unset/empty under `set -u`, quoting, silent
+  degrade) · regression (does it break a path it touches) · security/safety (leaks, destructive ops without the
+  guarded form, bypassable gates) · simplify. Does NOT re-litigate design (that was `--scaffold`). Context
+  defaults to the CWD's git root (the diff is transient). Used by the `ship-change` pipeline at PR time.
+
 ## Scaffold/product design review (`audit_experiment.sh --scaffold`)
 
-The four modes above audit EXPERIMENTS. `--scaffold` reuses the SAME cross-family harness for **product
+`--scaffold` reuses the SAME cross-family harness for **product
 changes** — a skill edit, a new convention, a migration, a CLAUDE.md/AGENTS.md change. It reviews a
 **proposal doc** (the design-of-the-change, which also serves as the ADR + PR description) against
 ARCHITECTURE dimensions instead of experiment-validity ones: right seam/abstraction · DRY (does a
