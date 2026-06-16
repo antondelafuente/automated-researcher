@@ -1,7 +1,7 @@
 {
   "name": "experiment-lifecycle",
-  "description": "Design and dispatch GPU experiments like a researcher: a pre-registration + cross-family validity-gate workflow. Propose with taste, write a DESIGN.md pre-registration, clear it with the human through verify-claims gates (facts + design logic), emit a thin START.md brief + CHECKLIST.md verification gates, then dispatch the locked brief to a fresh-context executor. Pairs with verify-claims (the gates) and run-experiment (execution).",
-  "version": "0.1.0",
+  "description": "Run GPU experiments like a researcher — the full lifecycle in two skills. design-experiment: propose with taste, write a DESIGN.md pre-registration, clear it with the human through verify-claims gates, emit a thin START.md brief + CHECKLIST.md gates, dispatch to a fresh-context executor. run-experiment: the zero-context executor — arm a self-wake, acquire compute (gpu-job), provision + drive + collect + close (RESULTS vs pre-registered rules, cross-family audit, teardown). Instance specifics live in an execution profile; pairs with gpu-job (backend) and verify-claims (gates).",
+  "version": "0.2.0",
   "author": {
     "name": "Anton de la Fuente"
   }

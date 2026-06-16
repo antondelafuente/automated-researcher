@@ -18,7 +18,7 @@
     {
       "name": "experiment-lifecycle",
       "source": "./plugins/experiment-lifecycle",
-      "description": "Design and dispatch GPU experiments like a researcher: pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a thin START.md brief + CHECKLIST.md gates, then dispatch the locked brief to a fresh-context executor. Pairs with verify-claims (the gates) and run-experiment (execution)."
+      "description": "Run GPU experiments like a researcher — the full lifecycle: design-experiment (pre-register a DESIGN.md, clear it with the human through cross-family validity gates, emit a START.md brief + CHECKLIST.md, dispatch to a fresh-context executor) and run-experiment (the zero-context executor: self-wake, acquire/provision/drive/collect/close). Instance specifics live in an execution profile; pairs with gpu-job and verify-claims."
     }
   ]
 }
