@@ -358,15 +358,20 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   [ "$LOCAL_SHA" = "$REMOTE_SHA" ] || die "branch $BR remote head ($REMOTE_SHA) != local HEAD ($LOCAL_SHA) — the reviewed diff is not what would merge. Re-push / reconcile before finishing."
   # 0c. Refresh the PR body from the now-final committed design doc (#24 F1): the doc may have been revised
   #     during review since `open`, so re-render before merge to keep the durable record == the landed doc.
-  #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge.
+  #     Best-effort — a cosmetic body refresh must never block an otherwise-clean merge. Uses the REST API
+  #     (gh api PATCH), NOT `gh pr edit`: the latter issues a GraphQL query needing read:org, which a minimal
+  #     repo-scoped token lacks, so it silently no-op'd the refresh (#43). REST pulls PATCH needs only `repo`.
   FDOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   if [ -n "$FDOC" ]; then
     FISSUE=$(basename "$FDOC" | sed -E 's/^([0-9]+)-.*/\1/')
-    if render_pr_body "$WT" "$FDOC" "$FISSUE" | gh -R "$REPO" pr edit "$PR" --body-file - >/dev/null 2>&1; then
+    BODYTMP="${TMPDIR:-/tmp}/wf_prbody_${BR//\//_}.md"
+    render_pr_body "$WT" "$FDOC" "$FISSUE" > "$BODYTMP"
+    if gh api --method PATCH "repos/$REPO/pulls/$PR" -F body=@"$BODYTMP" >/dev/null 2>&1; then
       note "refreshed PR #$PR body from the final design doc"
     else
       note "WARN: could not refresh PR #$PR body (cosmetic — proceeding to merge)"
     fi
+    rm -f "$BODYTMP"
   fi
   # 1. deterministic checks + behavior smoke, on the BRANCH's actual content (the worktree)
   [ -f "$WT/.aar-ci/checks.sh" ] || die "repo has no tracked check profile ($WT/.aar-ci/checks.sh)"
