@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 proposals/*SCAFFOLD_AUDIT*.md
 *.run.log
+
+# instance-specific secret/leak patterns for the pre-commit hook (never committed)
+.githooks/patterns.local

@@ -1,13 +1,38 @@
 #!/bin/bash
-# aar-skills pre-commit: this repo is destined PUBLIC — block instance secrets/specifics.
+# aar-skills pre-commit: this repo is PUBLIC — block committing secrets or instance specifics.
 # Install once per clone: git config core.hooksPath .githooks
-PATTERNS='ghp_[A-Za-z0-9]|sk-ant-|sk-proj-|AKIA[A-Z0-9]|r2:mats|antondelafuente:|100\.107\.231|lrj2kw2jvm|RUNPOD_TEAM_API_KEY=.+[A-Za-z0-9]'
+#
+# Committed here: GENERIC secret regexes only — no instance values (the rule this repo follows). Instance-
+# specific patterns (your bucket name, IPs, volume IDs, handles) go in a LOCAL, gitignored file so they
+# protect your commits WITHOUT entering the public history themselves — one regex per line, '#' comments ok:
+#   printf 'r2:mybucket\n10\\.0\\.0\\.\n' > .githooks/patterns.local
+PATTERNS='ghp_[A-Za-z0-9]|gho_[A-Za-z0-9]|ghu_[A-Za-z0-9]|ghs_[A-Za-z0-9]|github_pat_[A-Za-z0-9]|sk-ant-|sk-proj-|AKIA[A-Z0-9]{12}|-----BEGIN[A-Z ]*PRIVATE KEY|RUNPOD[A-Z_]*API_KEY=.+[A-Za-z0-9]|AIza[0-9A-Za-z_-]{20}|xox[baprs]-[A-Za-z0-9]'
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+LOCAL="$ROOT/.githooks/patterns.local"
+if [ -f "$LOCAL" ]; then
+  extra=$(grep -vE '^[[:space:]]*(#|$)' "$LOCAL" | paste -sd '|' -)
+  [ -n "$extra" ] && PATTERNS="$PATTERNS|$extra"
+fi
+
+# FAIL CLOSED if the combined regex is invalid: a bad local pattern makes `grep -E` exit 2 (error), which the
+# match test below would read as "no match" — silently disabling ALL secret detection. Validate once on empty
+# input: a valid regex returns 1 (no match); an invalid one returns >=2.
+printf '' | grep -E "$PATTERNS" >/dev/null 2>&1
+[ $? -ge 2 ] && { echo "BLOCKED: pre-commit secret-scan regex is invalid — check .githooks/patterns.local" >&2; exit 1; }
+
+# the local pattern file is instance-only and must NEVER be committed. Guard by PATH (its escaped-regex lines
+# may not self-match the content scan, so a force-staged copy could otherwise slip through).
+if git diff --cached --name-only | grep -qxF '.githooks/patterns.local'; then
+  echo "BLOCKED: .githooks/patterns.local is instance-local — never commit it." >&2
+  exit 1
+fi
+
 FAILED=0
 while read -r f; do
   [ -f "$f" ] || continue
   [ "$f" = ".githooks/pre-commit" ] && continue
   if git show ":$f" | grep -nE "$PATTERNS" >/dev/null 2>&1; then
-    echo "BLOCKED: staged $f matches an instance-secret pattern:" >&2
+    echo "BLOCKED: staged $f matches a secret/instance pattern:" >&2
     git show ":$f" | grep -nE "$PATTERNS" | head -3 >&2
     FAILED=1
   fi
