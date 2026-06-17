@@ -9,7 +9,8 @@
 #   1. A NON-CONFIGURABLE protected floor (hardcoded below) — the CI policy itself, the constitution, the secrets
 #      gate. The adjustable config CANNOT remove these, so a change to the policy can't downgrade itself (the
 #      self-referential bypass a review caught). The config can only ADD more.
-#   2. The adjustable .aar-ci/classifier.conf (ALWAYS_ARCHITECTURAL) — the tunable part.
+#   2. The adjustable .aar-ci/classifier.conf — a plain glob-per-line DATA file (PARSED, never sourced, so it
+#      has no code-execution surface and cannot weaken the floor) — the tunable part.
 #
 # Usage: classify.sh [--mechanical "<reason>"] <changed-path>...
 #   --mechanical "<reason>" downgrades to mechanical, recorded with the reason — honored ONLY if no
@@ -25,12 +26,25 @@ PROTECTED_FLOOR=(
 )
 
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-# 2. the adjustable config (best-effort). Initialize first so a missing/broken config is nounset-safe -> floor only.
-ALWAYS_ARCHITECTURAL=()
-# shellcheck source=/dev/null
-source "$ROOT/.aar-ci/classifier.conf" 2>/dev/null || true
 
-# the effective always-architectural set = floor (always) + config (additive)
+# 2. the adjustable config is ADDITIVE-ONLY and must NOT be able to weaken the floor. We do NOT execute it as
+#    shell — a sourced config is arbitrary code (it could `PROTECTED_FLOOR=()` to empty the "non-configurable"
+#    floor, or run a `$(...)` side effect just by being read). Instead the config is a plain DATA file: one
+#    glob pattern per line, `#` comments and blank lines ignored. We PARSE it (never execute it), so its
+#    content is only ever matched as a glob — there is no code-execution surface at all, and it can only ADD
+#    architectural globs, never touch the floor.
+ALWAYS_ARCHITECTURAL=()
+CONF="$ROOT/.aar-ci/classifier.conf"
+if [ -f "$CONF" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"                              # strip trailing/whole-line comments
+    line="${line#"${line%%[![:space:]]*}"}"         # ltrim
+    line="${line%"${line##*[![:space:]]}"}"         # rtrim
+    [ -n "$line" ] && ALWAYS_ARCHITECTURAL+=("$line")
+  done < "$CONF"
+fi
+
+# the effective always-architectural set = floor (always, never weakenable) + config (additive)
 EFFECTIVE=("${PROTECTED_FLOOR[@]}" "${ALWAYS_ARCHITECTURAL[@]}")
 
 # parse a --mechanical override (a missing/empty reason is just ignored -> fail-closed, never aborts)
@@ -43,6 +57,17 @@ if [ ${#PATHS[@]} -eq 0 ]; then
   echo "EVIDENCE: no changed paths given -> fail-closed to architectural"
   exit 0
 fi
+
+# normalize every input to a repo-relative path so a protected file can't dodge the globs by being passed as
+# ./AGENTS.md, from a subdir, or as an absolute path (the globs are repo-relative; git diff --name-only is too,
+# but a caller may not be). Strip a leading ./ and rebase an under-$ROOT absolute path onto $ROOT.
+norm=()
+for p in "${PATHS[@]}"; do
+  q="${p#./}"
+  case "$q" in "$ROOT"/*) q="${q#"$ROOT"/}";; esac
+  norm+=("$q")
+done
+PATHS=("${norm[@]}")
 
 # hard rules: any changed path matching the effective always-architectural set => architectural (can't downgrade)
 hits=()
