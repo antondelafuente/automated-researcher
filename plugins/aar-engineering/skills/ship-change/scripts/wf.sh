@@ -53,10 +53,15 @@ ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "
 need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — set GH_TOKEN (this instance: source ~/.env) before invoking; wf.sh sources no env file"; }
 
-locate_audit(){
+locate_audit(){  # locate_audit [context-repo-dir]
   if [ -n "${AUDIT_EXPERIMENT:-}" ] && [ -f "$AUDIT_EXPERIMENT" ]; then echo "$AUDIT_EXPERIMENT"; return; fi
-  local hit; hit=$(find "$HOME/.claude/plugins/cache" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1)
-  [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (install verify-claims, or set AUDIT_EXPERIMENT)"
+  local repo=${1:-} hit=""
+  # 1. installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs (symlink or copy)
+  hit=$(find "$HOME/.claude/plugins/cache" "$HOME/.claude/skills" "$HOME/.codex/skills" \
+        -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1)
+  # 2. fallback: the context repo's OWN in-tree copy (a repo-only checkout with no install still works)
+  [ -n "$hit" ] || { [ -n "$repo" ] && hit=$(find "$repo/plugins" -path '*verify-claims*scripts/audit_experiment.sh' 2>/dev/null | sort -V | tail -1); }
+  [ -n "$hit" ] || die "cannot locate verify-claims audit_experiment.sh (searched the plugin cache, Claude/Codex skills, and ${repo:-the repo}/plugins; install verify-claims or set AUDIT_EXPERIMENT)"
   echo "$hit"
 }
 
@@ -69,6 +74,10 @@ check_author(){  # cross-family: claude|codex; the Codex->Claude reverse reviewe
 }
 
 wt_branch(){ git -C "$1" rev-parse --abbrev-ref HEAD; }                       # branch of a worktree
+# the INTEGRATION BASE: prefer origin/main (the true base the PR merges onto) over local main, which can go
+# stale after a rebase-onto-newer-origin/main. Used consistently for PATHS, review diffs, and the version base
+# so they never disagree. Falls back to local main if there's no origin/main remote-tracking ref.
+base_ref(){ git -C "$1" rev-parse --verify -q origin/main >/dev/null 2>&1 && echo origin/main || echo main; }
 # the reviewed + merged content must be the COMMITTED content: refuse to act on a dirty tree (uncommitted or
 # untracked changes would make checks/review see content that isn't what merges, and --force removal would
 # then destroy it).
@@ -92,7 +101,7 @@ count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*
 # whole script, instead of being swallowed by a command-substitution subshell).
 run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
   local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6
-  local audit rev; audit=$(locate_audit)
+  local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
   note "$mode review (author=$author, reviewer=opposite family)…"
   AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
@@ -171,14 +180,15 @@ open)   # wf.sh open <worktree>   — commit the design doc, push, open the DRAF
   [ -d "$WT" ] || die "no such worktree: $WT"
   BR=$(wt_branch "$WT")
   DOC=$(cd "$WT" && git status --porcelain proposals/ | sed 's/^...//' | head -1)
-  [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
+  [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no design doc under proposals/ found (write proposals/<issue>-<slug>.md first)"
   ISSUE=$(basename "$DOC" | sed -E 's/^([0-9]+)-.*/\1/')
   # attribution comes from the committer's git identity + the PR — don't hardcode an author family here
   # (this is product code; a Codex- or other-authored change must not get a Claude trailer).
+  # Commit ONLY the doc: the `-- "$DOC"` pathspec on commit means a pre-staged unrelated file can't ride in.
   ( cd "$WT" && git add -- "$DOC" && git commit -q -m "design: $(basename "$DOC" .md) (#${ISSUE})
 
-Namespaced design doc for the scaffold change. Reviewed by --scaffold next." )
+Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- "$DOC" )
   ( cd "$WT" && git push -q -u origin "$BR" ) || die "push failed"
   PRURL=$(gh -R "$(gh_repo "$WT")" pr create --draft --base main --head "$BR" \
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
@@ -193,7 +203,7 @@ Lifecycle (shadow mode): draft PR -> --scaffold design review -> implement -> --
 design-review)  # wf.sh design-review <worktree> <author>
   need_gh; WT=${1:?usage: wf.sh design-review <worktree> <author>}; AUTHOR=${2:?author: claude|codex}
   check_author "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
-  DOC=$(cd "$WT" && git diff --name-only main...HEAD -- proposals/ | head -1)
+  DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
   [ -n "$DOC" ] || die "no committed design doc under proposals/ (run: wf.sh open $WT)"
   PR=$(wt_pr_required "$WT")
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
@@ -207,7 +217,7 @@ code-review)    # wf.sh code-review <worktree> <author>
   # push first so the PR (what the human + reviewer see) reflects the reviewed commits — no local/remote gap
   ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a diff the PR doesn't reflect"
   DIFF="${TMPDIR:-/tmp}/wf_code_$(wt_branch "$WT" | tr '/' '_').diff"
-  ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
+  ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   [ -s "$DIFF" ] || die "empty diff main...$(wt_branch "$WT") — implement + commit the change first"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Code review (\`--code\`)"
   note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
@@ -218,7 +228,7 @@ classify)       # wf.sh classify <worktree>   — shadow-mode record (never bloc
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
   require_clean "$WT"
-  mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
+  mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD"
   OUT=$( cd "$WT" && .aar-ci/classify.sh "${PATHS[@]}" )
   CLASS=$(echo "$OUT" | sed -nE 's/^CLASSIFICATION: //p' | head -1)
@@ -239,7 +249,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
   REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
   BR=$(wt_branch "$WT"); PR=$(wt_pr_required "$WT")
-  mapfile -t PATHS < <(cd "$WT" && git diff --name-only main...HEAD)
+  mapfile -t PATHS < <(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD)
   [ ${#PATHS[@]} -gt 0 ] || die "no changed paths main...HEAD — nothing to merge"
   # 0a. BASE FRESHNESS: origin/main may have ADVANCED since `start` (a peer PR merged). The merge would land
   #     on that newer main, but checks/review run against this branch's base — so the integrated tree that
@@ -262,7 +272,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   ( cd "$WT" && bash .aar-ci/checks.sh "${PATHS[@]}" ) || die "deterministic checks/behavior-smoke FAILED — fix before merging"
   # 2. the authoritative merge gate: re-run --code on the FINAL diff, fail-closed, NO HIGH
   DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
-  ( cd "$WT" && git diff main...HEAD ) > "$DIFF"
+  ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)"
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
   # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced) — shadow

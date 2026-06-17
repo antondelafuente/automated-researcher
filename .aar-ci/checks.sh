@@ -37,7 +37,7 @@ esac; done
 # main (old flow → base==HEAD==main) OR already committed on a branch (worktree-from-the-start flow → HEAD
 # already has the new version; only the merge-base holds the prior one). Using HEAD broke the committed flow
 # (it compared the new version against itself). Falls back to HEAD when there's no main (e.g. a fresh repo).
-BASE=$(git merge-base HEAD main 2>/dev/null || git rev-parse HEAD 2>/dev/null || echo HEAD)
+BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD main 2>/dev/null || git rev-parse HEAD 2>/dev/null || echo HEAD)
 for plugdir in $(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#(plugins/[^/]+)/.*#\1#' | sort -u); do
   nonmanifest=$(printf '%s\n' "${PATHS[@]}" | grep "^$plugdir/" | grep -v '\.claude-plugin/plugin.json' || true)
   [ -n "$nonmanifest" ] || continue
