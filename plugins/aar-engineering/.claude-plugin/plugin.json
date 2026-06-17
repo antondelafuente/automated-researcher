@@ -1,7 +1,7 @@
 {
   "name": "aar-engineering",
-  "description": "The SWE pipeline for building the AAR product (the engineering layer, not a shipped research plugin). ship-change drives a scaffold change through a GitHub-backed lifecycle: Issue → worktree branch → namespaced design doc → draft PR → --scaffold design review (posted) → implement → --code review (posted) → classifier (records mechanical|architectural with evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Worktree-from-the-start (no shared-checkout races). Phase 1 = shadow mode (runs/posts/records; branch protection not yet enforced). Pairs with verify-claims (the review primitives) and a per-repo .aar-ci/ profile.",
-  "version": "0.2.1",
+  "description": "The SWE pipeline for building the AAR product (the engineering layer, not a shipped research plugin). ship-change drives a scaffold change through a GitHub-backed lifecycle: Issue → worktree branch → namespaced design doc → draft PR → --scaffold design review (posted) → implement → --code review (posted) → classifier (records mechanical|architectural with evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Worktree-from-the-start (no shared-checkout races). The cross-family --code review posts a NATIVE GitHub review through a separate reviewer identity (WF_REVIEWER_TOKEN_CMD) — Approve only at finish after the full gate, request-changes/comment during iteration — so branch protection can require a real opposite-family approval; falls back to comments when no reviewer identity is set. Pairs with verify-claims (the review primitives) and a per-repo .aar-ci/ profile.",
+  "version": "0.3.0",
   "author": {
     "name": "Anton de la Fuente"
   }

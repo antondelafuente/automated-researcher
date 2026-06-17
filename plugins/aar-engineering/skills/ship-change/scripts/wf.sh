@@ -113,11 +113,27 @@ sum_line(){ grep -E '^SUMMARY:' "$1" | tail -1; }
 count_high(){ sum_line "$1" | sed -E 's/.*high=([0-9]+).*/\1/'; }
 count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
+# resolve a fresh token for the REVIEWER identity (a different identity than the author's GH_TOKEN), used to
+# post a NATIVE cross-family review. WF_REVIEWER_TOKEN_CMD prints the token (a GitHub App installation token —
+# minted fresh because they expire ~1h — or `echo <PAT>`). Empty when unset -> comment fallback (shadow). A
+# configured-but-FAILING command is fail-closed (never silently drop to an unsigned comment when enforcement
+# is expected). The reviewer is the opposite family from the author; today only author=claude -> codex is
+# wired (author=codex is blocked upstream), so the single cmd is the codex reviewer identity.
+reviewer_token(){
+  [ -n "${WF_REVIEWER_TOKEN_CMD:-}" ] || { echo ""; return 0; }
+  local t; t=$(eval "$WF_REVIEWER_TOKEN_CMD") || die "WF_REVIEWER_TOKEN_CMD failed — can't get the reviewer-identity token (failing closed)"
+  [ -n "$t" ] || die "WF_REVIEWER_TOKEN_CMD produced an empty token (failing closed)"
+  echo "$t"
+}
+
 # run a cross-family review (mode = --scaffold|--code) on TARGET, write REV, post it to the PR.
 # Sets the globals REVIEW_HIGH / REVIEW_ALL (NOT via $(...) — so a fail-closed `die` here hard-stops the
 # whole script, instead of being swallowed by a command-substitution subshell).
-run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
-  local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6
+# `approving=1` (passed ONLY by finish's merge-gate review) lets a clean --code review post a native APPROVE;
+# every other call posts request-changes (HIGH>0) / a comment (clean interim) — never an approval, so an early
+# review can't satisfy branch protection before finish's checks + final-SHA review have run.
+run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [approving]
+  local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6 approving=${7:-0}
   local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
   note "$mode review (author=$author, reviewer=opposite family)…"
@@ -127,14 +143,24 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
   require_valid_review "$rev"
   REVIEW_HIGH=$(count_high "$rev"); REVIEW_ALL=$(count_all "$rev")
   note "$mode verdict: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH -> $rev"
-  if [ -n "$pr" ]; then
-    # the posted review IS the durable record — fail CLOSED if it can't be written (don't silently skip it)
-    { echo "## $heading"; echo; echo "_Cross-family \`$mode\` review — author \`$author\`, reviewer = opposite family. Posted by the workflow driver (shadow mode)._"; echo; echo '```'; cat "$rev"; echo '```'; } \
-      | gh -R "$(gh_repo "$wt")" pr comment "$pr" --body-file - >/dev/null \
-      || die "could not post the $mode review to PR #$pr — the durable record is the point; failing closed (verdict was: $REVIEW_ALL finding(s), $REVIEW_HIGH HIGH; see $rev)"
-    note "posted $mode review to PR #$pr"
+  [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
+  local repo body; repo=$(gh_repo "$wt")
+  body=$(printf '## %s\n\n_Cross-family `%s` review — author `%s`, reviewer = opposite family._\n\n```\n%s\n```\n' "$heading" "$mode" "$author" "$(cat "$rev")")
+  # NATIVE review via the reviewer identity — ONLY for --code (the merge-gating review). --scaffold/other = comment.
+  local rtok=""; [ "$mode" = --code ] && rtok=$(reviewer_token)
+  if [ -n "$rtok" ]; then
+    local action
+    if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then action=--approve          # finish gate, clean -> APPROVE
+    elif [ "$REVIEW_HIGH" != 0 ]; then action=--request-changes                        # any blocking finding
+    else action=--comment; fi                                                          # clean interim -> comment, not approve
+    # GitHub rejects self-approval; if the reviewer identity == the PR author this errors -> we fail closed (loud).
+    GH_TOKEN="$rtok" gh -R "$repo" pr review "$pr" "$action" --body "$body" >/dev/null \
+      || die "could not post the native '$action' review to PR #$pr as the reviewer identity — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
+    note "posted NATIVE review ($action) to PR #$pr as the reviewer identity"
   else
-    note "no PR yet — $mode review NOT posted (verdict above; $rev)"
+    echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
+      || die "could not post the $mode review comment to PR #$pr — failing closed (verdict: $REVIEW_ALL findings, $REVIEW_HIGH HIGH; see $rev)"
+    note "posted $mode review COMMENT to PR #$pr"
   fi
 }
 
@@ -294,7 +320,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   # 2. the authoritative merge gate: re-run --code on the FINAL diff, fail-closed, NO HIGH
   DIFF="${TMPDIR:-/tmp}/wf_finish_${BR//\//_}.diff"
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
-  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)"
+  run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1   # approving=1: clean -> native APPROVE
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
   # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced) — shadow
   #    mode: agent merge after the gate; branch protection not required yet.

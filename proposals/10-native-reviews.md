@@ -15,24 +15,28 @@ the reviewer run under the same token. So native review needs a SECOND, distinct
 
 ## Approach
 
-Add a **reviewer-identity seam**, `WF_REVIEWER_GH_TOKEN` (a token for a different account/App than the
-author's `GH_TOKEN`), and make the `--code` review post a native review through it:
+Add a **reviewer-identity seam**, `WF_REVIEWER_TOKEN_CMD` — a shell command that prints a fresh token for the
+reviewer identity (a *different* identity than the author's `GH_TOKEN`). A command, not a static token,
+because the reviewer is a GitHub App and its installation tokens expire (~1h) — the instance points this at a
+mint-on-demand helper (App JWT → installation token); a static PAT is just `echo $PAT`. Make the `--code`
+review post a native review through it:
 
-- **`--code` review** (the merge-gating one): if `WF_REVIEWER_GH_TOKEN` is set, post a native review as that
-  identity — `gh pr review --approve` when the cross-family verdict is clean (`HIGH=0`), `--request-changes`
-  when there are blocking findings (`HIGH>0`) — with the full findings as the review BODY (the detail stays).
-  If no reviewer token is set, fall back to the current PR **comment** (backward-compatible / shadow mode).
+- **Approve ONLY at `finish`, never at interim `code-review`** (design-review F1 HIGH). An approval emitted at
+  interim review would satisfy branch protection *before* `finish` has run the checks + the final-SHA review —
+  letting a stale/early state merge. So: interim `code-review` posts **request-changes** (HIGH>0) or a plain
+  **comment** (HIGH=0, "clean, will approve at finish") as the reviewer identity — never an approval. Only
+  `finish`, AFTER checks pass and the final-SHA `--code` review is clean (HIGH=0), posts the native
+  **`--approve`** on the exact merged SHA. Pair with branch-protection "dismiss stale approvals on new
+  commits" so the approval is bound to its reviewed SHA.
+- **Reviewer selected by AUTHOR FAMILY** (design-review F2). `author=claude` → the codex reviewer identity;
+  `author=codex` has no wired Claude reviewer yet, so it stays comment-only / blocked (fail closed for an
+  unsupported direction, never a silent pass). The resolved reviewer login is recorded in the review body.
 - **`--scaffold` design review and `classify`** stay as posted comments — they're the design dialogue and the
-  shadow-mode record, not the branch-protection gate. (The architectural/design gate is the human's, carried
-  separately; this PR is only about the cross-family CODE approval.)
-- **Self-approval guard:** before approving, resolve the reviewer token's login and the author's login; if
-  they're the same account, FAIL CLOSED (an identity can't approve its own PR — better a loud block than a
-  silent fallback that looks enforced but isn't).
-- The merge bar is unchanged (`HIGH=0`), so an `Approve` means exactly what the existing gate means. `finish`
-  already re-runs `--code` on the final synced SHA, so the approval lands on the SHA that merges; pairing this
-  with branch-protection "dismiss stale approvals on new commits" keeps an approval bound to its reviewed SHA.
+  shadow-mode record, not the branch-protection gate (the architectural/design gate is the human's, separate).
+- **Self-approval guard:** GitHub forbids approving your own PR; if the reviewer identity equals the PR author,
+  the approve call fails and we FAIL CLOSED (loud block, not a silent fallback that looks enforced but isn't).
 
-No behavior change when `WF_REVIEWER_GH_TOKEN` is unset — every current invocation keeps posting comments.
+No behavior change when `WF_REVIEWER_TOKEN_CMD` is unset — every current invocation keeps posting comments.
 
 ## Alternatives considered
 
