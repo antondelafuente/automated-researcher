@@ -1,7 +1,7 @@
 {
   "name": "aar-engineering",
   "description": "The SWE pipeline for building the AAR product (the engineering layer, not a shipped research plugin). ship-change drives a scaffold change through a GitHub-backed lifecycle: Issue → worktree branch → namespaced design doc → draft PR → --scaffold design review (posted) → implement → --code review (posted) → classifier (records mechanical|architectural with evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Worktree-from-the-start (no shared-checkout races). Phase 1 = shadow mode (runs/posts/records; branch protection not yet enforced). Pairs with verify-claims (the review primitives) and a per-repo .aar-ci/ profile.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Anton de la Fuente"
   }

@@ -23,14 +23,8 @@
 # `gh pr merge` after the script's fail-closed gate — the gate logic lives in this script for now, not in
 # branch protection. The classifier output is RECORDED on the PR (the human reads it), never blocks.
 #
-# Usage (see SKILL.md for the full lifecycle):
-#   wf.sh start  <issue#> <slug>            -> worktree + branch + design-doc skeleton   [then: write the doc]
-#   wf.sh open   <worktree>                 -> commit the doc, push, open the DRAFT PR
-#   wf.sh design-review <worktree> <author> -> --scaffold on the doc, post to PR (fail-closed verdict)
-#                                              [then: revise doc as needed; implement the change + commit]
-#   wf.sh code-review   <worktree> <author> -> --code on the diff, post to PR (fail-closed verdict)
-#   wf.sh classify      <worktree>          -> classifier on changed paths, post evidence (shadow record)
-#   wf.sh finish <worktree> <author>        -> checks + fail-closed --code gate + ready + merge + cleanup
+# Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
+# (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
 # Env: GH_TOKEN must be set (this instance: source ~/.env — wf.sh sources NO env file itself).
 #      AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> overrides auto-location.
@@ -41,6 +35,27 @@ set -euo pipefail
 die(){ echo "BLOCKED: $*" >&2; exit 1; }
 note(){ echo "[wf] $*" >&2; }
 REVIEW_HIGH=0; REVIEW_ALL=0   # set by run_review (globals, nounset-safe defaults)
+
+# the CANONICAL lifecycle short-list (single source — the header points here, help routes here). Prints to the
+# given stream (default stdout). Doc paths are computed from the script's own dir so they're concrete from any cwd.
+usage(){
+  local d; d=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
+  cat <<EOF
+wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, shadow mode).
+
+Lifecycle (the agent does the judgment steps BETWEEN these):
+  wf.sh start  <issue#> <slug>            worktree + branch + design-doc skeleton   [then: write the doc]
+  wf.sh open   <worktree>                 commit the doc, push, open the DRAFT PR
+  wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
+  wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
+  wf.sh classify      <worktree>          classifier on changed paths, post evidence (shadow record)
+  wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
+  wf.sh help                              this message
+
+<author> = claude | codex (the OPPOSITE family reviews). Auth: GH_TOKEN (this instance: source ~/.env).
+Full runbook: ${d:-<plugin>}/SKILL.md    Phase-2 + rollback: ${d:-<plugin>}/RUNBOOK.md
+EOF
+}
 
 # the main checkout that owns worktrees. When wf.sh runs from the INSTALLED PLUGIN CACHE, the script's own
 # dir is NOT the target repo — so default to the CWD's git root (the agent runs `start` from inside the repo
@@ -126,6 +141,8 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading>
 # =================================================================================================
 CMD=${1:-}; shift || true
 case "$CMD" in
+
+help|-h|--help|"")  usage; exit 0 ;;
 
 start)  # wf.sh start <issue#> <slug>
   ISSUE=${1:?usage: wf.sh start <issue#> <slug>}; SLUG=${2:?slug (kebab-case)}
@@ -292,5 +309,5 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   echo "SHIPPED: PR #$PR merged (shadow mode — clean cross-family review + checks). Worktree cleaned."
   ;;
 
-*) die "unknown subcommand '${CMD:-}'. Use: start|open|design-review|code-review|classify|finish (see SKILL.md)";;
+*) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;
 esac
