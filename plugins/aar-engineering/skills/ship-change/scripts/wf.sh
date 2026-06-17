@@ -1,5 +1,5 @@
 #!/bin/bash
-# wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, Phase 1 / SHADOW MODE).
+# wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, ENFORCED).
 #
 # Drives one scaffold change through its whole lifecycle, GitHub as the durable coordination layer:
 #   Issue -> worktree branch -> namespaced proposals/<issue>-<slug>.md -> draft PR -> --scaffold design
@@ -18,10 +18,13 @@
 # line; a missing/malformed summary BLOCKS. A reviewer process error BLOCKS. We also re-run --code as the
 # merge gate so the merged diff is the reviewed diff (a HIGH fix earlier this program slipped a re-review).
 #
-# SHADOW MODE (Phase 1): wf.sh RUNS + POSTS + RECORDS, but nothing is enforced by GitHub branch protection
-# yet (Phase 2 adds the per-family GitHub Apps + required checks). The merge here is the agent's own
-# `gh pr merge` after the script's fail-closed gate — the gate logic lives in this script for now, not in
-# branch protection. The classifier output is RECORDED on the PR (the human reads it), never blocks.
+# ENFORCED: the cross-family --code review is posted as a NATIVE `codex-engineer[bot]` review, and branch
+# protection on `main` REQUIRES that opposite-family approval (+ no force-push/deletion, include-admins so the
+# admin author token can't bypass) before any merge. wf.sh's own fail-closed gate (checks + final-SHA review,
+# no HIGH) runs first; `gh pr merge` then succeeds only because the required approval is present.
+# STILL ADVISORY: the classifier's architectural/mechanical classification is RECORDED on the PR (the human
+# reads it), not yet wired to a required `design-gate` check — so the design/architectural approval is the
+# human's judgment, recorded, not mechanically blocking. See RUNBOOK.md for the as-built config + escape hatches.
 #
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
@@ -41,14 +44,14 @@ REVIEW_HIGH=0; REVIEW_ALL=0   # set by run_review (globals, nounset-safe default
 usage(){
   local d; d=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)
   cat <<EOF
-wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, shadow mode).
+wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, enforced).
 
 Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh start  <issue#> <slug>            worktree + branch + design-doc skeleton   [then: write the doc]
   wf.sh open   <worktree>                 commit the doc, push, open the DRAFT PR
   wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
-  wf.sh classify      <worktree>          classifier on changed paths, post evidence (shadow record)
+  wf.sh classify      <worktree>          classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh help                              this message
 
@@ -115,7 +118,7 @@ count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*
 
 # resolve a fresh token for the REVIEWER identity (a different identity than the author's GH_TOKEN), used to
 # post a NATIVE cross-family review. WF_REVIEWER_TOKEN_CMD prints the token (a GitHub App installation token —
-# minted fresh because they expire ~1h — or `echo <PAT>`). Empty when unset -> comment fallback (shadow). A
+# minted fresh because they expire ~1h — or `echo <PAT>`). Empty when unset -> comment fallback (unenforced). A
 # configured-but-FAILING command is fail-closed (never silently drop to an unsigned comment when enforcement
 # is expected). The reviewer is the opposite family from the author; today only author=claude -> codex is
 # wired (author=codex is blocked upstream), so the single cmd is the codex reviewer identity.
@@ -169,7 +172,7 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
       || die "could not post the $mode review comment to PR #$pr as the reviewer identity — failing closed (see $rev)"
     note "posted $mode review COMMENT to PR #$pr as the reviewer identity"
   else
-    # no reviewer identity configured (shadow / unsupported direction): comment under the default token
+    # no reviewer identity configured (unenforced fallback / unsupported direction): comment under the default token
     echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
       || die "could not post the $mode review comment to PR #$pr — failing closed (see $rev)"
     note "posted $mode review COMMENT to PR #$pr (default token)"
@@ -251,7 +254,7 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- 
     --title "$(grep -m1 '^# ' "$WT/$DOC" | sed 's/^# Proposal: //; s/^# //')" \
     --body "Closes #${ISSUE}. Design doc: \`$DOC\` (on this branch; lands on main at merge).
 
-Lifecycle (shadow mode): draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. Reviews are posted as comments by the workflow driver.") \
+Lifecycle: draft PR -> --scaffold design review -> implement -> --code review -> classifier (recorded) -> checks -> merge-when-clean. The cross-family review is a native codex-engineer[bot] review; branch protection requires that approval before merge.") \
     || die "gh pr create failed"
   PR=$(basename "$PRURL")
   echo "PR=$PR"; note "draft PR #$PR opened: $PRURL"; note "next: wf.sh design-review $WT <author>"
@@ -266,7 +269,7 @@ design-review)  # wf.sh design-review <worktree> <author>
   # push so the reviewed doc == what the PR shows (consistency with code-review)
   ( cd "$WT" && git push -q origin HEAD ) || die "push failed — can't review a doc the PR doesn't reflect"
   run_review --scaffold "$WT" "$AUTHOR" "$WT/$DOC" "$PR" "Design review (\`--scaffold\`)"
-  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (shadow: recorded). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
+  note "design-review done (HIGH=$REVIEW_HIGH). Revise the doc for findings; the PM's design approval is the human gate (recorded, advisory — not a required check). Then implement + commit, and: wf.sh code-review $WT $AUTHOR"
   ;;
 
 code-review)    # wf.sh code-review <worktree> <author>
@@ -282,7 +285,7 @@ code-review)    # wf.sh code-review <worktree> <author>
   note "code-review done (HIGH=$REVIEW_HIGH). Triage findings (fix in $WT + commit, or respond on the PR). Then: wf.sh classify $WT ; wf.sh finish $WT $AUTHOR"
   ;;
 
-classify)       # wf.sh classify <worktree> [author]   — shadow-mode record (never blocks)
+classify)       # wf.sh classify <worktree> [author]   — advisory record (never blocks)
   need_gh; WT=${1:?usage: wf.sh classify <worktree> [author]}; AUTHOR=${2:-claude}   # author optional; only claude is wired
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
@@ -349,8 +352,8 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   ( cd "$WT" && git diff "$(base_ref "$WT")"...HEAD ) > "$DIFF"
   run_review --code "$WT" "$AUTHOR" "$DIFF" "$PR" "Final code review (merge gate)" 1   # approving=1: clean -> native APPROVE
   [ "$REVIEW_HIGH" = 0 ] || die "merge gate: $REVIEW_HIGH HIGH finding(s) remain — NOT merging. Fix in $WT + commit, then re-run finish."
-  # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced) — shadow
-  #    mode: agent merge after the gate; branch protection not required yet.
+  # 3. merge the EXACT reviewed SHA (--match-head-commit aborts if the head moved since we synced). The merge
+  #    succeeds only because the required codex-engineer[bot] approval is present on this SHA (branch protection).
   note "gate clean (no HIGH) + checks passed -> marking ready + merging PR #$PR @ $LOCAL_SHA"
   gh -R "$REPO" pr ready "$PR" >/dev/null 2>&1 || true
   gh -R "$REPO" pr merge "$PR" --squash --delete-branch --match-head-commit "$LOCAL_SHA" || die "merge failed (head may have moved since review — re-run finish)"
@@ -359,7 +362,7 @@ finish) # wf.sh finish <worktree> <author>   — checks + fail-closed --code gat
   git -C "$MAIN_CO" pull --ff-only -q origin main 2>/dev/null || note "WARN: could not ff-only pull main ($MAIN_CO) — reconcile manually"
   local_manifest=0; for p in "${PATHS[@]}"; do case "$p" in */plugin.json|*marketplace.json) local_manifest=1;; esac; done
   [ "$local_manifest" = 1 ] && note "a plugin manifest changed — refresh installs: claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills"
-  echo "SHIPPED: PR #$PR merged (shadow mode — clean cross-family review + checks). Worktree cleaned."
+  echo "SHIPPED: PR #$PR merged (required codex-engineer[bot] approval + checks). Worktree cleaned."
   ;;
 
 *) echo "BLOCKED: unknown subcommand '${CMD:-}'." >&2; echo >&2; usage >&2; exit 1 ;;

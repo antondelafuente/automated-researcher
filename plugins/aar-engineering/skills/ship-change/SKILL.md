@@ -6,8 +6,9 @@ description: >-
   implement → cross-family --code review (posted) → classifier (records mechanical vs architectural with
   evidence) → tracked .aar-ci checks + fake-HOME behavior smoke → fail-closed merge-when-clean. Use for any
   change to the product scaffold (skills, plugins, CI, the constitution). The agents ARE the engineers: a
-  change is authored by one family and reviewed by the OTHER. Phase 1 runs in SHADOW MODE (posts + records;
-  branch protection not yet enforced). Worktree-from-the-start — never disturbs the shared main checkout.
+  change is authored by one family and reviewed by the OTHER. ENFORCED: the --code review is a native
+  codex-engineer[bot] review that branch protection REQUIRES before merge. Worktree-from-the-start — never
+  disturbs the shared main checkout.
 ---
 
 # ship-change — the GitHub-backed scaffold-change lifecycle
@@ -22,11 +23,14 @@ staff-engineer / PM: sets direction (the Issue), gates the **architectural desig
 GitHub trail — but is not a gate on routine merges. This mirrors the research split: design *with* the
 human, execution *by* the agents.
 
-**Phase 1 = SHADOW MODE.** The lifecycle runs, posts reviews to the PR, and records the classification —
-but **nothing is enforced by GitHub branch protection yet**. The fail-closed gate logic lives in the driver
-(`wf.sh`) for now; the merge is the agent's own `gh pr merge` after that gate. Phase 2 adds per-family
-GitHub App identities + required status checks (the native Approve/merge buttons), and needs a one-time
-GitHub-UI step from the PM — see `RUNBOOK.md`.
+**ENFORCED.** The cross-family `--code` review is posted as a **native `codex-engineer[bot]` review**, and
+branch protection on `main` **requires** that opposite-family approval (plus no force-push/deletion, and
+*include administrators* so even the admin author token can't bypass) before any merge. `wf.sh`'s own
+fail-closed gate (checks + a final-SHA `--code` review, no HIGH) runs first; `gh pr merge` then succeeds only
+because the required approval is present. **Still advisory:** the classifier's architectural/mechanical
+classification is recorded on the PR, not yet wired to a required `design-gate` check — so the design
+approval is the human's judgment, recorded, not mechanically blocking. As-built config + escape hatches:
+`RUNBOOK.md`.
 
 ## The non-negotiable properties (the driver enforces them — don't work around them)
 
@@ -42,10 +46,10 @@ GitHub-UI step from the PM — see `RUNBOOK.md`.
 - **Tracked check profile + behavior smoke.** Every change runs `<repo>/.aar-ci/checks.sh` (deterministic:
   JSON/syntax/compile/version-bump) AND the fake-HOME behavior smoke for plugin/skill changes (an
   install/discovery break that deterministic checks can't catch).
-- **The classifier records, never blocks (shadow).** `.aar-ci/classify.sh` records mechanical vs
+- **The classifier records, never blocks (advisory).** `.aar-ci/classify.sh` records mechanical vs
   architectural WITH EVIDENCE and the driver posts it to the PR. Architectural = needs the PM's design
-  approval; mechanical merges on the cross-family review + checks alone. In Phase 2 this wires to a required
-  `design-gate` check; in Phase 1 it's recorded for the human to read.
+  approval; mechanical merges on the cross-family review + checks alone. This is recorded for the human to
+  read — not yet wired to a required `design-gate` check (a tracked follow-up).
 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
@@ -66,7 +70,7 @@ wf.sh open <WORKTREE>             # prints PR=<n>
 # 3. DESIGN REVIEW — cross-family --scaffold on the doc, posted to the PR
 wf.sh design-review <WORKTREE> <author>
 #   → revise the doc for findings. ARCHITECTURAL changes: this is where the PM's design approval belongs
-#     (shadow: recorded; the human reads the PR). Then:
+#     (recorded, advisory — the human reads the PR; not yet a required check). Then:
 
 # 4. IMPLEMENT — build the change IN the worktree, commit it (path-scoped) on the branch.
 
@@ -75,7 +79,7 @@ wf.sh code-review <WORKTREE> <author>
 #   → triage every finding as a PEER: fix HIGH/MED in the worktree + commit, or respond on the PR
 #     (gh pr comment) with accept/defer + reason. Re-run code-review after a HIGH fix.
 
-# 6. CLASSIFY — record mechanical|architectural with evidence, posted (shadow)
+# 6. CLASSIFY — record mechanical|architectural with evidence, posted (advisory)
 wf.sh classify <WORKTREE>
 
 # 7. FINISH — checks + smoke + fail-closed --code merge-gate + mark ready + merge + cleanup worktree
@@ -109,7 +113,7 @@ HIGH=0 into endless polish; the merge bar is HIGH=0 + checks green.)
 - **verify-claims `--scaffold` / `--code`** — the cross-family design + code reviewers (located from the
   installed plugin, or `AUDIT_EXPERIMENT=<path>`). Same engine the research audits use.
 - **gh** — Issues, draft PR, PR comments, merge (auth from `GH_TOKEN`; this instance: `source ~/.env`).
-- **`RUNBOOK.md`** (this dir) — Phase 2 enablement + the rollback/escape-hatch + token rotation.
+- **`RUNBOOK.md`** (this dir) — the as-built branch-protection config + the rollback/escape-hatch + token rotation.
 
 ## Bootstrap note
 

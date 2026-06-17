@@ -1,60 +1,68 @@
 # RUNBOOK — aar-engineering workflow operations
 
-Operational runbook for the GitHub-backed scaffold-change lifecycle (`ship-change` / `wf.sh`). Covers
-Phase 2 enablement (turning on enforcement) and — the load-bearing part — how to **escape** if the
-automation wedges. Branch protection is a **repo-wide gate**: if an engineer App or a required check
-breaks, it can block EVERY merge. So the rule is staged rollout + a standing admin bypass + this runbook.
+Operational record for the GitHub-backed scaffold-change lifecycle (`ship-change` / `wf.sh`): the **as-built
+enforcement config** now in force, the **escape hatches** if the automation wedges (the load-bearing part),
+and token rotation. Branch protection is a **repo-wide gate** — if the reviewer identity or a rule breaks it
+can block EVERY merge — so the escape hatches matter as much as the config.
 
-## Phases at a glance
+## What's enforced (as-built)
 
-- **Phase 1 — SHADOW MODE (current).** `wf.sh` runs the whole lifecycle, posts the `--scaffold` / `--code`
-  reviews and the classification to the PR, and merges after its own fail-closed gate (`gh pr merge`).
-  **Branch protection is NOT enabled.** Nothing GitHub-side blocks a merge; the gate logic lives in the
-  driver. This is deliberate: watch it work on real PRs before making anything mandatory.
-- **Phase 2 — ENFORCED.** Per-family GitHub App identities + branch protection make the cross-family
-  approval and the checks *required*. Native Approve / merge buttons. Needs the one-time setup below.
+The repo is **public**, and branch protection on `main` is **active** with:
 
-## Phase 2 enablement (one-time, PM / repo admin — GitHub UI)
+- **Require a pull request before merging.**
+- **Require 1 approving review** — satisfied by the cross-family **`codex-engineer[bot]`** native review
+  (author ≠ reviewer identity, so GitHub allows it). The driver posts `--code` as an Approve (clean) /
+  Request-changes (findings); only `finish`'s final-SHA review approves.
+- **Dismiss stale approvals when new commits are pushed** — an approval is bound to its reviewed SHA.
+- **Require conversation resolution** — our reviews post as review *bodies* (not line threads), so nothing
+  to resolve in practice; if it ever blocks a clean merge, drop just this rule (see escape hatches).
+- **Block force pushes + block deletions** on `main`.
+- **Include administrators (`enforce_admins`)** — **ON**. This is load-bearing: the agent *authors* under the
+  PM's `GH_TOKEN`, which is a repo admin; without this the admin token would bypass the whole gate. With it
+  on, even the admin must have the bot's approval to merge.
 
-1. **Create two GitHub Apps** (or fine-grained PATs to start): `claude-engineer` and `codex-engineer`,
-   each with `contents:write`, `pull_requests:write`, `checks:write` on the repo. The point is **distinct
-   identities** so a foreign-family review is a *real* approval by a different actor (author ≠ reviewer →
-   GitHub allows the approval; this is why the multi-engineer framing dissolves "can't approve your own PR").
-2. **Wire each family's reviewer to post its native review** (Approve on a clean valid `--code`; Request
-   changes on findings) as its own App identity — not as a PR comment.
-3. **Turn on branch protection on `main`**, requiring:
-   - **1 approving review from the opposite family** (the cross-family code gate).
-   - **Required status checks**: the `.aar-ci` deterministic checks + behavior smoke, AND the **`design-gate`**
-     check (carries the human's architectural-design approval — green for mechanical per the classifier,
-     red-until-PM-approval for architectural).
-   - **Include administrators: NO** — keep the admin bypass below.
-4. **Scope (v1):** enable enforcement only for the **productized direction** (Claude-authored → Codex
-   review). Until the Codex→Claude reverse reviewer is wired, Codex-authored changes use the documented
-   fallback (the current flow) so branch protection never blocks a direction with no reviewer.
+NOT enabled (deliberately): **required status checks**. The `.aar-ci` checks + behavior smoke run *driver-side*
+in `finish` (before the approval), not as GitHub-reported statuses — so there's nothing for branch protection
+to require yet. The classifier's `design-gate` is likewise **advisory** (recorded on the PR, not a required
+check). Wiring either as a GitHub-required status is a tracked follow-up (needs a small GitHub Action).
+
+## The reviewer identity (as-built)
+
+- **`codex-engineer`** — a GitHub App, installed on `aar-skills`. It reviews **Claude-authored** changes
+  (the only wired direction; `author=codex` is blocked upstream until a `claude-engineer` reviewer + the
+  reverse review path are built).
+- **Permissions: `contents: write` + `pull_requests: write`.** ⚠️ **Gotcha (cost a round-trip):** an App's
+  approval only **counts** toward "require approvals" if the App has **`contents: write`**. With
+  `pull_requests: write` *alone* it can *post* a review, but it reads as `author_association: NONE` and the
+  approval does **not** satisfy the gate (`reviewDecision: REVIEW_REQUIRED`). Grant `contents: write` and
+  re-accept the installation's permission request.
+- **Instance wiring (not product):** the App's id + private key live on the instance under
+  `~/.config/codex-engineer/`; `WF_REVIEWER_TOKEN_CMD` (in the instance env) mints a fresh installation token
+  per use (they expire ~1h). `wf.sh` consumes only that seam — no App specifics in product code.
 
 ## Escape hatches (when the automation wedges)
 
-- **Admin bypass (the standing one).** The PM stays a **repo admin** with "include administrators" OFF on
-  branch protection — so an admin can always merge, or temporarily lift protection, if the automation
-  jams. Branch protection never traps the team.
-- **Disable a required check fast.** Repo → Settings → Branches → branch-protection rule for `main` →
-  uncheck the offending required status check (or the required-review) → Save. Merges flow again
-  immediately; re-enable once fixed.
-- **Remove branch protection entirely (nuclear).** Delete the `main` protection rule. The repo reverts to
-  exactly Phase-1 behavior (driver-side gate only). Fully reversible — re-add the rule to restore Phase 2.
-- **Full fallback.** The Phase-1 flow still works unchanged: `wf.sh` + the agent's own `gh pr merge` after
-  the fail-closed gate. Every change is a revertible PR; the plugin uninstalls. The only new credentials are
-  the engineer App(s).
+Because `enforce_admins` is ON, there is **no standing admin merge-bypass** — that's intentional (the agent
+shouldn't be able to bypass its own gate). Instead the owner edits the rule:
 
-## Token / App rotation
+- **Disable a rule fast.** Repo → Settings → Branches → the `main` rule → uncheck the offending requirement
+  (e.g. require-approvals, or conversation-resolution) → Save. Or via API:
+  `gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input <relaxed.json>`. Merges flow again;
+  re-tighten once fixed. (Editing protection settings is available to the repo owner/admin even with
+  `enforce_admins` ON — that only gates push/merge to the branch, not the settings API.)
+- **Remove branch protection entirely (nuclear).** `gh api -X DELETE repos/<owner>/<repo>/branches/main/protection`.
+  The repo reverts to driver-side-gate-only behavior. Fully reversible — re-PUT the rule to restore.
+- **Revoke the reviewer App.** Uninstalling / revoking `codex-engineer` immediately stops it approving — the
+  clean unwind for a compromised reviewer identity (combined with relaxing require-approvals so merges aren't
+  trapped).
 
-- **Phase-1 `GH_TOKEN`** (this instance: `~/.env`). To rotate: mint a new fine-grained PAT (repo scope:
-  contents + pull_requests), replace it in `~/.env`, re-`source`. `wf.sh` sources no env file itself —
-  whatever auth is in the caller's environment is what it uses. NEVER print the token; scrub it from any
-  captured output (`sed "s/${GH_TOKEN}/***/g"`).
-- **Phase-2 App tokens.** Rotate the App's private key / installation token in the App settings; update the
-  reviewer wiring's secret. Revoking an engineer App immediately stops that family from approving/merging —
-  which, combined with the admin bypass, is the clean unwind for a compromised identity.
+## Token / identity rotation
+
+- **`GH_TOKEN`** (author/driver auth; this instance: `~/.env`). Rotate: mint a new fine-grained PAT (repo:
+  contents + pull_requests), replace in `~/.env`, re-`source`. `wf.sh` sources no env file itself. NEVER print
+  it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
+- **`codex-engineer` App** (reviewer identity). Rotate the App's private key in the App settings and replace
+  `~/.config/codex-engineer/key.pem`; the minter picks it up. Revoking the App stops approvals immediately.
 
 ## One-command revert of a merged change
 
@@ -63,17 +71,14 @@ A shipped change is one squash commit on `main`. To undo:
 ```
 git -C <repo> checkout main && git -C <repo> pull --ff-only
 git -C <repo> revert <merge-commit-sha>        # creates a revert commit
-# then ship the revert through the normal lifecycle (it's just another change), or push directly if urgent.
+# then ship the revert through the normal lifecycle (it's just another change).
 ```
 
 If a plugin manifest changed, after a revert/merge refresh installed plugins:
 `claude plugin marketplace update aar-skills && claude plugin update <name>@aar-skills`.
 
-## Required-check names (fill in at Phase-2 enablement)
+## Follow-ups (not yet built)
 
-Record the EXACT required status-check names here when you turn on branch protection, so a future operator
-knows precisely what to relax:
-
-- `aar-ci / checks` — _(deterministic checks + behavior smoke)_
-- `aar-ci / design-gate` — _(architectural-design human gate; green for mechanical)_
-- _(cross-family approving review is a branch-protection "require approvals" setting, not a status check)_
+- **`claude-engineer` App + reverse review path** — to let Codex *author* changes that Claude reviews.
+- **`.aar-ci` checks + `design-gate` as GitHub-required status checks** — a GitHub Action that runs the
+  checks and reports a status, so branch protection can require them (today they're driver-side only).
