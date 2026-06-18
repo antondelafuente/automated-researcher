@@ -238,11 +238,8 @@ count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*
 # a native reviewer token (finish's merge gate does this when WF_REQUIRE_NATIVE_REVIEW=1); configured-but-failing
 # commands always fail closed.
 reviewer_token(){  # reviewer_token <author> [required:0|1]
-  local author=$1 reviewer required=${2:-}
+  local author=$1 reviewer required=${2:-0}
   reviewer=$(opposite_family "$author")
-  if [ -z "$required" ]; then
-    [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && required=1 || required=0
-  fi
   engineer_token "$reviewer" "$required"
 }
 
@@ -256,6 +253,12 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   local mode=$1 wt=$2 author=$3 target=$4 pr=$5 heading=$6 approving=${7:-0}
   local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
+  local rtok="" require_reviewer=0
+  [ "$mode" = --code ] && [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
+  if [ -n "$pr" ]; then
+    rtok=$(reviewer_token "$author" "$require_reviewer")
+    [ -n "$rtok" ] || need_ambient_gh
+  fi
   note "$mode review (author=$author, reviewer=opposite family)…"
   AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
     bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
@@ -270,9 +273,6 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   # when configured, a COMMENT for --scaffold. Unconfigured installs fall back to ambient comments unless
   # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
   # identity is configured.
-  local rtok="" require_reviewer=0
-  [ "$mode" = --code ] && [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
-  rtok=$(reviewer_token "$author" "$require_reviewer")
   if [ "$mode" = --code ] && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
@@ -293,7 +293,6 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     note "posted $mode review COMMENT to PR #$pr as the reviewer identity"
   else
     # no reviewer identity configured (unenforced fallback / unsupported direction): comment under the default token
-    need_ambient_gh
     echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null \
       || die "could not post the $mode review comment to PR #$pr — failing closed (see $rev)"
     note "posted $mode review COMMENT to PR #$pr (default token)"
@@ -448,7 +447,7 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   if [ -n "$AUTHOR" ]; then
     RTOK=$(reviewer_token "$AUTHOR" 0)
   else
-    note "WARN: no author passed to classify; posting classification with ambient GitHub auth"
+    note "WARN: no author passed to classify; posting classification with ambient GitHub auth. Pass author to use an opposite-family reviewer identity when configured."
   fi
   [ -n "$RTOK" ] || need_ambient_gh
   PR=$(wt_pr_required "$WT" "$RTOK")
