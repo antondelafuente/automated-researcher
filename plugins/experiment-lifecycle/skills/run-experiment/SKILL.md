@@ -80,7 +80,8 @@ For an **autonomous detached run**, this is a capability requirement, not a best
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and proceed. Mark the
 `CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
 can own its wake or keep the work explicitly controller-supervised. Short controller-supervised probes may use weaker
-watching, but then they are not autonomous detached runs.
+watching, but then they are not autonomous detached runs; if they leave billable compute detached, still arm the
+idle-cost teardown backstop.
 
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
