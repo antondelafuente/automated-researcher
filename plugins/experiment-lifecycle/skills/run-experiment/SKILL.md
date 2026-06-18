@@ -214,7 +214,7 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - The controller has no GPU — work runs on the compute; you drive it.
 - Never reimplement deploys — call the `gpu-job` backend.
 - Acquired compute needs profile provisioning, not just the identity bootstrap.
-- **Arm the self-wake before any detached run; run to completion; never park silently.**
+- **Arm the self-wake / idle-cost backstop before detached billable work; run to completion; never park silently.**
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
