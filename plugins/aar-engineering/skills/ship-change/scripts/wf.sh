@@ -582,7 +582,14 @@ finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed
   # is --scaffold on the design doc (opposite-family native APPROVE), the same approval model as a code PR —
   # for a design-doc-only PR whose implementation lands later as spawned `ready` issues.
   need_gh; WT=${1:?usage: wf.sh finish <worktree> <author> [--design]}; AUTHOR=${2:?author: claude|codex}
-  DESIGN_MODE=0; [ "${3:-}" = --design ] && DESIGN_MODE=1
+  # Validate the optional 3rd arg explicitly — a typo (e.g. --desgin) must FAIL, not silently run plain finish
+  # (the wrong merge gate). Only "" or exactly --design are valid.
+  DESIGN_MODE=0
+  case "${3:-}" in
+    "") ;;
+    --design) DESIGN_MODE=1 ;;
+    *) die "finish: unknown 3rd argument '${3:-}' — only '--design' is valid (or omit it for a code PR)" ;;
+  esac
   check_author "$AUTHOR"; require_model_reviewer "$AUTHOR"; [ -d "$WT" ] || die "no such worktree: $WT"
   require_clean "$WT"   # everything must be committed: reviewed == checked == merged, and nothing lost on --force removal
   REPO=$(gh_repo "$WT"); MAIN_CO=$(main_checkout "$WT")
@@ -597,11 +604,15 @@ finish) # wf.sh finish <worktree> <author> [--design]   — checks + fail-closed
   # rest merged un-design-reviewed. Capture that one doc as the gate target.
   DESIGN_DOC=""
   if [ "$DESIGN_MODE" = 1 ]; then
-    NONDOC=$(printf '%s\n' "${PATHS[@]}" | grep -vE '^proposals/.*\.md$' || true)
+    # Use a RENAME-STABLE path list (--no-renames): with rename detection, a code->proposals/*.md rename shows
+    # only the NEW doc path, so the old code path could masquerade as doc-only and skip --code. --no-renames
+    # decomposes a rename into delete(old)+add(new), so the old code path surfaces in NONDOC and is rejected.
+    mapfile -t RPATHS < <(cd "$WT" && git diff --no-renames --name-only "$(base_ref "$WT")"...HEAD)
+    NONDOC=$(printf '%s\n' "${RPATHS[@]}" | grep -vE '^proposals/.*\.md$' || true)
     [ -z "$NONDOC" ] || die "finish --design is for design-doc-only PRs; this diff also touches non-doc paths:
 $NONDOC
 Use plain 'wf.sh finish $WT $AUTHOR' (gates on --code) for any PR with code."
-    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${PATHS[@]}" | grep -E '^proposals/.*\.md$')
+    mapfile -t DESIGN_DOCS < <(printf '%s\n' "${RPATHS[@]}" | grep -E '^proposals/.*\.md$')
     [ "${#DESIGN_DOCS[@]}" = 1 ] || die "finish --design expects EXACTLY ONE design doc (the --scaffold approval covers one doc); this diff changes ${#DESIGN_DOCS[@]}:
 $(printf '%s\n' "${DESIGN_DOCS[@]}")
 Split into one design PR per doc."
