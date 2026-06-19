@@ -18,6 +18,7 @@ WF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/wf.sh
 fail=0
 check(){ if eval "$2"; then echo "  PASS: $1"; else echo "  FAIL: $1" >&2; fail=1; fi; }
 
+unset AUDIT_EXPERIMENT                                # ambient override would short-circuit the resolver under test
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/locate-audit-smoke.XXXXXX") || exit 1
 trap 'rm -rf "$TMP"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"            # virgin HOME: no installed plugin cache unless we add one
@@ -98,6 +99,40 @@ got5=$(bash "$SELF/$WFREL" locate-audit "$CTX" 2>/dev/null); out5=$(bash "$got5"
 echo "  -> $got5"
 check "resolves from the self-repo base ref"       "[ \"$out5\" = SELF-REPO-BASE-REVIEWER ]"
 check "self-repo reviewer path is under the self repo, not the install" "case \"$got5\" in $SELF/*) true;; *) false;; esac"
+
+echo "=== (7) base ref present but un-inspectable (corrupt object DB) + installed present -> FAIL CLOSED (F1/F2) ==="
+# build a dedicated repo with verify-claims on main + an installed fallback in HOME, then corrupt the object DB
+# so the base ref resolves at the ref layer but cannot be enumerated/inspected.
+mkdir -p "$HOME/.claude/skills/$VC/scripts"
+printf '#!/bin/bash\necho INSTALLED-STALE-7\n' > "$HOME/.claude/skills/$VC/scripts/audit_experiment.sh"
+CORRUPT="$TMP/corrupt"; mkdir -p "$CORRUPT"; seed_vc "$CORRUPT" CORRUPT-BASE; git_repo_with_origin "$CORRUPT"
+assert_failclosed(){ local repo=$1 desc=$2 got rc out
+  got=$(bash "$WF" locate-audit "$repo" 2>/dev/null); rc=$?
+  out=""; [ -n "$got" ] && out=$(bash "$got" 2>/dev/null)
+  check "$desc: exits non-zero (fail closed)"        "[ $rc -ne 0 ]"
+  check "$desc: does NOT use the stale install"      "[ \"$out\" != INSTALLED-STALE-7 ]"
+}
+TREE=$(git -C "$CORRUPT" rev-parse 'main^{tree}'); COMMIT=$(git -C "$CORRUPT" rev-parse refs/heads/main)
+# 7a: ls-tree fails (tree object removed) while rev-parse still resolves the commit
+rm -f "$CORRUPT/.git/objects/${TREE:0:2}/${TREE:2}"
+assert_failclosed "$CORRUPT" "7a ls-tree failure"
+# 7b: ref present in the ref store but the commit object is gone too (rev-parse --verify fails)
+rm -f "$CORRUPT/.git/objects/${COMMIT:0:2}/${COMMIT:2}"
+assert_failclosed "$CORRUPT" "7b ref present but unresolvable"
+# 7c: origin/main present-but-corrupt while a DIVERGED local main still resolves -> must fail closed on the
+# canonical base, not silently fall back to the (possibly stale) local main.
+CRP2="$TMP/corrupt2"; mkdir -p "$CRP2"; seed_vc "$CRP2" CORRUPT2-BASE; git_repo_with_origin "$CRP2"
+OCOMMIT=$(git -C "$CRP2" rev-parse refs/remotes/origin/main)
+( cd "$CRP2" && echo y > extra && git add -A && git commit -qm "diverge local main" )   # local main moves ahead; origin/main stays at OCOMMIT
+rm -f "$CRP2/.git/objects/${OCOMMIT:0:2}/${OCOMMIT:2}"                                   # corrupt origin/main's commit
+assert_failclosed "$CRP2" "7c corrupt origin/main, intact local main"
+
+echo "=== (6) AUDIT_EXPERIMENT override honored when set; suite unsets it so cases test the resolver ==="
+OV="$TMP/override.sh"; printf '#!/bin/bash\necho OVERRIDE-REVIEWER\n' > "$OV"
+got6=$(AUDIT_EXPERIMENT="$OV" bash "$WF" locate-audit "$WT" 2>/dev/null); out6=$(bash "$got6" 2>/dev/null)
+check "override is returned when AUDIT_EXPERIMENT is set"  "[ \"$out6\" = OVERRIDE-REVIEWER ]"
+got6b=$(bash "$WF" locate-audit "$WT" 2>/dev/null); out6b=$(bash "$got6b" 2>/dev/null)
+check "with override cleared, resolver (not the override) is used" "[ \"$out6b\" != OVERRIDE-REVIEWER ] && [ -n \"$out6b\" ]"
 
 echo
 [ "$fail" = 0 ] && { echo "locate_audit smoke: ALL PASS"; exit 0; } || { echo "locate_audit smoke: FAILURES" >&2; exit 1; }

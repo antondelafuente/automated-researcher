@@ -91,17 +91,27 @@ need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
 # repo's git-common-dir (shared across worktrees, never in the worktree's tracked state) keyed by the base
 # commit, so repeated calls + review phases reuse one extraction.
 #   rc 0 + path  = resolved;  rc 0 + no output = no verify-claims at this base (legitimate fall-through);
-#   rc 2         = verify-claims IS present at base but could not be extracted -> caller FAILS CLOSED (never
-#                  silently downgrade a merge-gate reviewer to a stale installed copy).
+#   rc 2         = the base ref could not be safely inspected (present but unresolvable, or ls-tree failed), OR
+#                  verify-claims IS present but extraction failed -> caller FAILS CLOSED (never silently
+#                  downgrade a merge-gate reviewer to a stale installed copy).
 audit_from_base_ref(){  # audit_from_base_ref <repo>
-  local repo=$1 base relp skilldir cdir tgt tmp
+  local repo=$1 base tree relp skilldir cdir tgt tmp
   [ -n "$repo" ] || return 0
   command -v git >/dev/null 2>&1 || return 0                 # no git -> can't determine a base ref at all -> fall through
+  # Resolve the base: origin/main (the canonical integration base) then local main. `rev-parse --verify -q`
+  # returns a ref's SHA even when its object is MISSING/corrupt, and only "fails" (empty) when the ref is
+  # genuinely ABSENT. So this falls back to local main ONLY when origin/main is absent (the legitimate
+  # no-remote-tracking-ref case) — a present-but-corrupt origin/main yields its own (dangling) SHA and is NOT
+  # masked by a stale local main. An empty result means neither ref exists -> no base here -> fall through.
   base=$(git -C "$repo" rev-parse --verify -q refs/remotes/origin/main \
       || git -C "$repo" rev-parse --verify -q refs/heads/main || true)
   [ -n "$base" ] || return 0
-  relp=$(git -C "$repo" ls-tree -r --name-only "$base" 2>/dev/null \
-      | grep -m1 -E 'verify-claims.*/scripts/audit_experiment\.sh$' || true)
+  # Capture ls-tree separately from grep, keyed on its exit status: the base ref already exists (rev-parse
+  # --verify above), so a FAILED enumeration (corrupt/partial clone) is an error, not "nothing here" — fail
+  # closed (rc 2) rather than letting an empty result masquerade as "no verify-claims" and fall through to a
+  # stale install. A clean enumeration with no match keeps the legitimate rc-0 fall-through.
+  tree=$(git -C "$repo" ls-tree -r --name-only "$base" 2>/dev/null) || return 2
+  relp=$(printf '%s\n' "$tree" | grep -m1 -E 'verify-claims.*/scripts/audit_experiment\.sh$' || true)
   [ -n "$relp" ] || return 0                                 # no verify-claims at this base -> legitimate fall-through
   # verify-claims IS present at base from here on -> any inability to extract is fail-closed (rc 2), never a
   # silent fall-through to a stale installed reviewer. tar is checked here (not up top) so a missing tar with
@@ -139,7 +149,7 @@ locate_audit(){  # locate_audit [context-repo-dir]
     if out=$(audit_from_base_ref "$src"); then rc=0; else rc=$?; fi
     case "$rc" in
       0) [ -n "$out" ] && hit="$out" ;;
-      *) die "verify-claims is present at $src's base ref but could not be extracted (rc=$rc) — failing closed rather than silently using a stale installed reviewer; set AUDIT_EXPERIMENT to override" ;;
+      *) die "could not safely resolve verify-claims from $src's base ref (rc=$rc: the base ref couldn't be inspected, or verify-claims is present but extraction failed) — failing closed rather than silently using a stale installed reviewer; set AUDIT_EXPERIMENT to override" ;;
     esac
   done
   # 2. fallback: installed reviewer, highest version — Claude plugin cache AND Claude/Codex skill installs
