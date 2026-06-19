@@ -623,14 +623,17 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   # Allowlist: this is the engineer-AUTHORING path (#89), not general issue admin. Refuse anything but
   # create/comment so a typo or a broad call can't run close/edit/delete/lock under the engineer token.
   case "$GHSUB" in create|comment) ;; *) die "wf.sh issue: only 'create' and 'comment' are allowed (got '$GHSUB'); this is the engineer-authoring path, not general issue ops" ;; esac
-  # Flag denylist (#91): the subcommand allowlist isn't enough — the authoring path must reject every
-  # INTERACTIVE form (`--web/-w` browser, `--editor/-e` editor) and DESTRUCTIVE form (`--delete-last`,
-  # `--edit-last`) `gh issue create|comment` expose; only non-interactive title/body/label inputs belong
-  # here. Reject all of them (both spellings) anywhere in the args, fail closed. (A missing body/title makes
-  # gh prompt, which fails closed on this no-tty exec path — a usage error, not an action.)
+  # Flag ALLOWLIST (#91): the subcommand allowlist isn't enough, and a denylist is whack-a-mole (it misses
+  # short forms, `--web=true`, `-we` bundles, future interactive flags). Instead permit ONLY the
+  # non-interactive authoring flags and reject every other `-`-prefixed arg — fails CLOSED on all
+  # interactive/destructive/unknown forms at once (`--web`/`-w`/`--web=true`/`-we`, `--editor`/`-e`,
+  # `--delete-last`, `--edit-last`, …). Non-flag args (the issue number, flag values) pass through; a
+  # legit-but-wrong flag for the subcommand just fails at `gh`, harmlessly. Strip any `=value` before matching.
   for a in "$@"; do case "$a" in
-    --web|-w|--editor|-e|--delete-last|--edit-last)
-      die "wf.sh issue: flag '$a' is not allowed on the authoring path (no interactive/destructive ops under the engineer token; pass non-interactive -t/-b/-F/-l)" ;;
+    -*) case "${a%%=*}" in
+          -R|--repo|-t|--title|-b|--body|-F|--body-file|-l|--label|-a|--assignee|-m|--milestone|-p|--project) ;;
+          *) die "wf.sh issue: flag '$a' is not allowed on the authoring path; permitted (non-interactive create/comment): -R -t -b -F -l -a -m -p" ;;
+        esac ;;
   esac; done
   ATOK=$(author_token_optional "$AUTHOR")          # engineer token, or "" with the configured fallback
   [ -n "$ATOK" ] || need_ambient_gh

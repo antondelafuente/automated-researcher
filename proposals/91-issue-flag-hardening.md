@@ -12,22 +12,26 @@ wrapper claims to block: `gh issue comment <N> --delete-last --yes` (deletes a c
 
 ## Approach
 
-**Contract:** the authoring path accepts only non-interactive title/body/label inputs; it rejects every
-INTERACTIVE form (`--web`/`-w` browser, `--editor`/`-e` editor) and DESTRUCTIVE form (`--delete-last`,
-`--edit-last`) that `gh issue create|comment` expose — **both long and short spellings**. A flag denylist
-on the full arg vector (after the subcommand allowlist) enforces this, failing closed with a clear message.
-A *missing* `-b/-t` makes `gh` prompt interactively, which fails closed on this no-tty exec path — a usage
-error, not an action, so it needs no separate guard. Keeping it a targeted denylist (not a full positive
-parse of every benign flag) matches the actual risk without making the wrapper brittle to `gh` flag
-additions like `-a/--assignee` or `-m/--milestone`.
+**Contract:** the authoring path accepts only non-interactive title/body/label inputs. Enforce it with a
+flag **allowlist**, not a denylist: permit `-R/--repo -t/--title -b/--body -F/--body-file -l/--label
+-a/--assignee -m/--milestone -p/--project` and reject every other `-`-prefixed arg. A denylist is
+whack-a-mole — it misses short forms (`-w`, `-e`), `=value` forms (`--web=true`), bundles (`-we`), and any
+future interactive flag; an allowlist **fails closed on all of them at once**. `=value` is stripped before
+matching; non-flag args (the issue number, flag values) pass through; a flag that's valid for `gh` but
+wrong for the chosen subcommand just fails at `gh`, harmlessly. A *missing* `-b/-t` makes `gh` prompt, which
+fails closed on this no-tty exec path — a usage error, not an action.
 
 ## Alternatives considered
 
-- **Strict positive parse** — require `-b/--body`/`--body-file` and forbid everything else. Rejected:
-  brittle (breaks on every benign `gh` flag, e.g. `-a/--assignee`, `-m/--milestone`, `--body-file -`) for
-  no extra safety over denying the known-dangerous flags.
-- **Leave it (token scope limits blast radius).** Rejected: the wrapper advertises create/comment-only;
-  letting `--delete-last` through under the bot token contradicts that, and a typo shouldn't delete.
+- **Flag denylist** (first two attempts: reject `--web/--delete-last/--edit-last`, then add `-w/-e`).
+  Rejected on review: leaky — review found `--web=true`/`-we`-bundle bypasses, and it can never cover future
+  interactive flags. An allowlist fails closed on all of them; denying is the wrong default for a privileged
+  wrapper.
+- **Require `-b/--body` and forbid everything else.** Rejected: over-strict — breaks benign flags
+  (`-a/--assignee`, `-m/--milestone`, `--body-file -`). The allowlist permits the safe authoring flags and
+  rejects the rest, which is the right middle.
+- **Leave it (token scope limits blast radius).** Rejected: the wrapper advertises create/comment authoring;
+  letting an interactive/destructive flag through under the bot token contradicts that, and a typo shouldn't delete.
 
 ## Blast radius
 
