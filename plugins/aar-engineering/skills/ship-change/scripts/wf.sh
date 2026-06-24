@@ -631,10 +631,14 @@ help|-h|--help|"")  usage; exit 0 ;;
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
   locate_audit "${1:-}" ;;
 
-doctor)  # wf.sh doctor <author> [repo-or-worktree] — report identity readiness without printing tokens
+doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identity readiness without printing tokens
   need_gh; AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree]}; TARGET=${2:-$ORIGIN_REPO}
   check_author "$AUTHOR"
-  if [ -d "$TARGET" ]; then DREPO=$(gh_repo "$TARGET"); else DREPO=$TARGET; fi
+  if [ -d "$TARGET" ]; then
+    DREPO=$(gh_repo "$TARGET" 2>/dev/null) || die "doctor target is a directory but not a git repo/worktree with an origin remote: $TARGET (pass owner/repo instead)"
+  else
+    DREPO=$TARGET
+  fi
   REVIEWER=$(opposite_family "$AUTHOR")
   echo "wf.sh doctor"
   echo "  author: $AUTHOR"
@@ -673,9 +677,9 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] — report identity readines
   fi
   [ "$model_rc" = 0 ] || ready=0
   if [ "$ready" = 1 ]; then
-    echo "READY: protected workflow actions would proceed under current configuration"
+    echo "READY: the full ship-change workflow identity path would proceed under current configuration"
   else
-    echo "BLOCKED: protected workflow actions would fail under current configuration"
+    echo "BLOCKED: the full ship-change workflow identity path would fail under current configuration"
     echo "  $ambient_identity_hint"
     exit 1
   fi
@@ -890,8 +894,13 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
       gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
       # A second comment is the least invasive durable trail for arbitrary `gh issue comment` args.
       if [ -n "$INUM" ]; then
-        ambient_override_notice "wf.sh issue comment" | gh_author "$ATOK" issue comment "$INUM" -R "$IREPO" --body-file - >/dev/null 2>&1 \
+        if [[ "$INUM" == http://* || "$INUM" == https://* ]]; then
+          ambient_override_notice "wf.sh issue comment" | gh_author "$ATOK" issue comment "$INUM" --body-file - >/dev/null 2>&1 \
+            || note "WARN: could not post ambient-identity override note for issue URL $INUM (non-fatal; terminal warning already emitted)"
+        else
+          ambient_override_notice "wf.sh issue comment" | gh_author "$ATOK" issue comment "$INUM" -R "$IREPO" --body-file - >/dev/null 2>&1 \
           || note "WARN: could not post ambient-identity override note for issue #$INUM (non-fatal; terminal warning already emitted)"
+        fi
       else
         note "WARN: could not identify issue number for ambient-identity override note (non-fatal; terminal warning already emitted)"
       fi

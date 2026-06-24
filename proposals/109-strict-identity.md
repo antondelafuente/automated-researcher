@@ -23,8 +23,8 @@ Update `wf.sh` at the existing identity seams:
    applicable.
 4. Add `wf.sh doctor <author> [repo-or-worktree]`, implemented through the same helper predicates the workflow
    uses, reporting ambient gh login, author/reviewer bot logins, git-author readiness, Codex reviewer command
-   readiness, and whether the permissive override is enabled. Its exit contract is: exit 0 iff the protected
-   workflow path would proceed under the current configuration, including a deliberate
+   readiness, and whether the permissive override is enabled. Its exit contract is: exit 0 iff the full
+   ship-change workflow identity path would proceed under the current configuration, including a deliberate
    `WF_ALLOW_AMBIENT_IDENTITY=1` permissive run.
 5. When the permissive override is used for protected mutations, emit a terminal warning and leave a best-effort
    GitHub trail when a natural PR/Issue target exists.
