@@ -43,14 +43,16 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 - **Quiet review is normal.** Claude-family reviews can be quiet for several minutes. The underlying verifier
   writes findings atomically only after completion, so an absent or empty findings file is not by itself a hang
   signal; use the runbook's local thresholds before inspecting or retrying.
-- **Engineer identities auto-upgrade when configured.** `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
-  `WF_ENGINEER_TOKEN_CMD_CODEX` mint GitHub tokens for the family bot identities; `WF_ENGINEER_GIT_AUTHOR_*`
-  gives `Name <email>` for strict `open` commits. If identity config is absent, the driver warns and uses
-  ambient GitHub/git identity unless `WF_REQUIRE_ENGINEER_IDENTITY=1`. `WF_REVIEWER_TOKEN_CMD` remains a
-  backward-compatible alias for the Codex engineer token when `WF_ENGINEER_TOKEN_CMD_CODEX` is unset.
-- **Native review is configurable.** Missing reviewer identity falls back to comments for unenforced installs.
-  Set `WF_REQUIRE_NATIVE_REVIEW=1` to make the final merge-gate review block when the opposite-family reviewer
-  identity is absent.
+- **Engineer identities are strict by default for workflow writes.** Ambient `gh` is fine for inspection and
+  owner/admin maintenance, but protected `wf.sh` mutations that name an author use the family engineer bot
+  identities or fail before falling back to the owner account. `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
+  `WF_ENGINEER_TOKEN_CMD_CODEX` mint GitHub tokens for those bot identities; `WF_ENGINEER_GIT_AUTHOR_*` gives
+  `Name <email>` for strict `open` commits. `WF_REVIEWER_TOKEN_CMD` remains a backward-compatible alias for the
+  Codex engineer token when `WF_ENGINEER_TOKEN_CMD_CODEX` is unset. `WF_REQUIRE_ENGINEER_IDENTITY` and
+  `WF_REQUIRE_NATIVE_REVIEW` are legacy/no-longer-needed under the strict default.
+- **Ambient workflow fallback is explicit.** Set `WF_ALLOW_AMBIENT_IDENTITY=1` only for a deliberate permissive
+  workflow run on an install without engineer Apps. The driver logs the override and leaves a best-effort
+  GitHub trail when a natural PR/Issue target exists.
 - **Fail-closed.** A crashed or malformed review NEVER reads as "clean" — the verdict is parsed from the
   authoritative `SUMMARY: high=.. med=.. low=..` line; missing/garbled → BLOCK. The merge gate **re-runs
   `--code` on the final diff** so the merged diff is the reviewed diff, and merges **only with zero HIGH**.
@@ -65,8 +67,10 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
 You do the JUDGMENT steps (write the design doc, implement, triage findings) BETWEEN these subcommands.
-Authenticate `gh` first for ambient fallback — `gh auth login`, or export `GH_TOKEN`. Bot-token paths use the
-configured `WF_ENGINEER_TOKEN_CMD_*` commands. `wf.sh` is `scripts/wf.sh` in this skill.
+Ambient `gh` may be authenticated for convenience — `gh auth login`, or export `GH_TOKEN` — but protected
+workflow writes use the configured `WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*` seams by default.
+`wf.sh` sources no env file itself; source the instance engineer env or run `wf.sh doctor <author>` before the
+workflow if unsure. `wf.sh` is `scripts/wf.sh` in this skill.
 
 ```
 # 0. An Issue exists (the backlog item). Create it if not — author it as the ENGINEER identity, not the
@@ -80,7 +84,7 @@ wf.sh start <N> <slug>            # prints WORKTREE=… BRANCH=… DOC=proposals
 #     write those first paragraphs as plain English for a human opening the PR cold.
 
 # 2. OPEN — commit the doc, push, open the DRAFT PR (links the Issue)
-wf.sh open <WORKTREE> [author]    # prints PR=<n>; author=claude|codex enables bot identity when configured
+wf.sh open <WORKTREE> <author>    # prints PR=<n>; author=claude|codex is required by default
 
 # 3. DESIGN REVIEW — cross-family --scaffold on the doc, posted to the PR
 wf.sh design-review <WORKTREE> <author>
@@ -96,7 +100,7 @@ wf.sh code-review <WORKTREE> <author>
 #     identity, NOT your owner token — never a bare `gh pr comment`). Re-run code-review after a HIGH fix.
 
 # 6. CLASSIFY — record mechanical|architectural with evidence, posted (advisory)
-wf.sh classify <WORKTREE> [author]
+wf.sh classify <WORKTREE> <author>
 
 # 7. FINISH — checks + smoke + fail-closed --code merge-gate + mark ready + merge + cleanup worktree
 wf.sh finish <WORKTREE> <author>

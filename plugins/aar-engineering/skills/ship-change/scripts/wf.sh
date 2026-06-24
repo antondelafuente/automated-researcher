@@ -29,10 +29,14 @@
 # Usage: run `wf.sh help` (or `-h` / no args) for the lifecycle short-list; SKILL.md is the full runbook.
 # (The command list lives in ONE place — the usage() function below — not duplicated here.)
 #
-# Auth: authenticate gh (gh auth login) OR export GH_TOKEN — wf.sh sources NO env file itself.
+# Auth: authenticate gh (gh auth login) OR export GH_TOKEN for ordinary ambient GitHub access.
+#      Protected workflow mutations that name an author are strict by default: they use the engineer
+#      identity seams below, or fail before falling back to ambient auth.
+#      wf.sh sources NO env file itself.
 #      WF_ENGINEER_TOKEN_CMD_CLAUDE / _CODEX print GitHub tokens for engineer identities.
 #      WF_ENGINEER_GIT_AUTHOR_CLAUDE / _CODEX are "Name <email>" strings for strict open commits.
 #      WF_REVIEWER_TOKEN_CMD remains a legacy alias for WF_ENGINEER_TOKEN_CMD_CODEX.
+#      WF_ALLOW_AMBIENT_IDENTITY=1 explicitly restores ambient-auth fallback for workflow mutations.
 #      AUDIT_EXPERIMENT=<path to verify-claims audit_experiment.sh> overrides auto-location.
 #      WF_WORKTREE_ROOT=<dir> (default /tmp) where worktrees are created.
 #      ORIGIN_REPO=<path> the main checkout that owns the worktrees (default: this script's repo root).
@@ -51,20 +55,22 @@ wf.sh — the GitHub-backed scaffold-change workflow driver (SWE pipeline, enfor
 
 Lifecycle (the agent does the judgment steps BETWEEN these):
   wf.sh start  <issue#> <slug>            worktree + branch + design-doc skeleton   [then: write the doc]
-  wf.sh open   <worktree> [author]        commit the doc, push, open the DRAFT PR
+  wf.sh open   <worktree> <author>        commit the doc, push, open the DRAFT PR
   wf.sh design-review <worktree> <author> --scaffold on the doc, post to PR (fail-closed)
   wf.sh code-review   <worktree> <author> --code on the diff, post to PR (fail-closed)
   wf.sh comment <worktree> <author> [file] post an AUTHOR triage comment as the engineer identity (body: file|stdin)
   wf.sh issue   <author> <gh issue args…>  file/comment a GitHub Issue AS the engineer identity (no worktree)
-  wf.sh classify      <worktree> [author] classifier on changed paths, post evidence (advisory record)
+  wf.sh classify      <worktree> <author> classifier on changed paths, post evidence (advisory record)
   wf.sh finish <worktree> <author>        checks + fail-closed --code gate + ready + merge + cleanup
   wf.sh finish <worktree> <author> --design   two-phase DESIGN merge: gate on --scaffold (doc-only PR), spawn ready issues after
+  wf.sh doctor <author> [repo-or-worktree] report ambient + engineer identity readiness without printing tokens
   wf.sh locate-audit [repo]               print the verify-claims reviewer that would run (introspection/test)
   wf.sh help                              this message
 
 <author> = claude | codex (the OPPOSITE family reviews). If an engineer identity is configured for that author,
-open/push/PR actions use it; otherwise they warn and use ambient auth unless WF_REQUIRE_ENGINEER_IDENTITY=1.
-Auth: gh auth login OR export GH_TOKEN for ambient fallback (wf.sh sources no env file).
+open/push/PR actions use it. Missing engineer identity now fails closed by default; set
+WF_ALLOW_AMBIENT_IDENTITY=1 only for a deliberate permissive workflow run. Ambient gh remains fine for
+ordinary inspection outside protected wf.sh mutations. wf.sh sources no env file.
 Full runbook: ${d:-<plugin>}/SKILL.md    Phase-2 + rollback: ${d:-<plugin>}/RUNBOOK.md
 EOF
 }
@@ -80,6 +86,21 @@ ORIGIN_REPO=${ORIGIN_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "
 need_gh(){ command -v gh >/dev/null || die "gh not on PATH"; }
 need_ambient_gh(){ [ -n "${GH_TOKEN:-}" ] || gh auth status >/dev/null 2>&1 \
   || die "no GitHub auth — run 'gh auth login' or export GH_TOKEN before invoking; wf.sh sources no env file"; }
+ambient_identity_allowed(){ [ "${WF_ALLOW_AMBIENT_IDENTITY:-0}" = 1 ]; }
+ambient_identity_hint="Source the engineer-token env before running, or set WF_ALLOW_AMBIENT_IDENTITY=1 for a deliberate ambient-auth workflow run."
+ambient_identity_note(){ note "WARN: WF_ALLOW_AMBIENT_IDENTITY=1 — using ambient GitHub auth for protected workflow action: $*"; }
+missing_identity_die(){ die "$1. Named ship-change workflow actions are strict by default; wf.sh sources no env file. $ambient_identity_hint"; }
+ambient_override_notice(){
+  local action=$1
+  printf '⚠️ Ambient workflow identity override: `%s` used ambient GitHub auth because `WF_ALLOW_AMBIENT_IDENTITY=1` was set. This should be deliberate; normal ship-change workflow writes use the family engineer bot identity.' "$action"
+}
+post_ambient_pr_trail(){  # post_ambient_pr_trail <worktree> <pr> <action>
+  local wt=$1 pr=$2 action=$3 repo body
+  repo=$(gh_repo "$wt")
+  body=$(ambient_override_notice "$action")
+  echo "$body" | gh -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+    || note "WARN: could not post ambient-identity override note to PR #$pr (non-fatal; terminal warning already emitted)"
+}
 
 # Materialize a repo's verify-claims reviewer from its BASE ref into a content cache; echo the cached
 # audit_experiment.sh path on success. "Trusted-but-current": read from the repo's own main (origin/main, then
@@ -199,16 +220,20 @@ engineer_token_cmd(){
   echo "$cmd"
 }
 
+engineer_token_seam(){
+  case "$1" in
+    codex) echo "WF_ENGINEER_TOKEN_CMD_CODEX (or legacy WF_REVIEWER_TOKEN_CMD)" ;;
+    claude) echo "WF_ENGINEER_TOKEN_CMD_CLAUDE" ;;
+    *) echo "WF_ENGINEER_TOKEN_CMD_<FAMILY>" ;;
+  esac
+}
+
 engineer_token(){  # engineer_token <family> <required:0|1>
   local fam=$1 required=${2:-0} cmd t suffix
   suffix=$(family_suffix "$fam"); cmd=$(engineer_token_cmd "$fam")
   if [ -z "$cmd" ]; then
     if [ "$required" = 1 ]; then
-      if [ "$fam" = codex ]; then
-        die "missing WF_ENGINEER_TOKEN_CMD_CODEX (or legacy WF_REVIEWER_TOKEN_CMD)"
-      else
-        die "missing WF_ENGINEER_TOKEN_CMD_$suffix"
-      fi
+      missing_identity_die "missing $(engineer_token_seam "$fam") for the $fam engineer identity"
     fi
     echo ""; return 0
   fi
@@ -221,7 +246,7 @@ engineer_git_author(){
   local fam=$1 required=${2:-0} suffix var val
   suffix=$(family_suffix "$fam"); var="WF_ENGINEER_GIT_AUTHOR_$suffix"; val="${!var:-}"
   if [ -z "$val" ]; then
-    [ "$required" = 1 ] && die "missing WF_ENGINEER_GIT_AUTHOR_$suffix (expected: Name <email>)"
+    [ "$required" = 1 ] && missing_identity_die "missing WF_ENGINEER_GIT_AUTHOR_$suffix for author=$fam (expected: Name <email>)"
     echo ""; return 0
   fi
   [ -n "$(git_author_name "$val")" ] && [ -n "$(git_author_email "$val")" ] \
@@ -316,8 +341,11 @@ author_token_optional(){
   local author=$1 tok
   tok=$(engineer_token "$author" 0)
   if [ -z "$tok" ]; then
-    [ "${WF_REQUIRE_ENGINEER_IDENTITY:-}" = 1 ] && die "missing engineer token for author=$author and WF_REQUIRE_ENGINEER_IDENTITY=1"
-    note "WARN: no engineer token configured for author=$author; using ambient GitHub auth"
+    if ambient_identity_allowed; then
+      ambient_identity_note "author=$author (missing $(engineer_token_seam "$author"))"
+    else
+      missing_identity_die "missing $(engineer_token_seam "$author") for author=$author"
+    fi
   fi
   echo "$tok"
 }
@@ -345,6 +373,19 @@ require_clean(){ [ -z "$(git -C "$1" status --porcelain)" ] || die "worktree $1 
 wt_pr_required(){ local pr; pr=$(wt_pr "$1" "${2:-}"); [ -n "$pr" ] || die "no PR found for branch $(wt_branch "$1") — run 'wf.sh open $1' first (or PR lookup/auth failed)"; echo "$pr"; }
 # repo slug + main checkout, derived FROM a worktree dir (any worktree shares origin + the main checkout):
 gh_repo(){      git -C "${1:-$ORIGIN_REPO}" remote get-url origin | sed -E 's#(git@github.com:|https://github.com/)##; s#\.git$##'; }
+repo_arg_from_gh_args(){  # repo_arg_from_gh_args <fallback-repo> <gh-subcommand-args...>
+  local repo=$1 want_repo=0 a
+  shift || true
+  for a in "$@"; do
+    if [ "$want_repo" = 1 ]; then repo=$a; want_repo=0; continue; fi
+    case "$a" in
+      -R|--repo) want_repo=1 ;;
+      -R=*) repo=${a#-R=} ;;
+      --repo=*) repo=${a#--repo=} ;;
+    esac
+  done
+  echo "$repo"
+}
 main_checkout(){ git -C "$1" worktree list --porcelain | awk '/^worktree /{print $2; exit}'; }   # 1st worktree = main
 wt_pr(){
   local tok=${2:-}
@@ -354,6 +395,42 @@ wt_pr(){
     gh -R "$(gh_repo "$1")" pr view "$(wt_branch "$1")" --json number -q .number 2>/dev/null
   fi
 }  # PR# for a worktree's branch
+
+doctor_ambient_gh(){  # prints status; returns 0 ok, 1 missing/bad
+  local login
+  if login=$(gh api user --jq .login 2>/dev/null); then
+    echo "  ambient gh: ok (login=$login)"; return 0
+  fi
+  echo "  ambient gh: unavailable (gh auth login or GH_TOKEN needed for ambient fallback)"; return 1
+}
+
+doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing, 2 configured-but-failing
+  local fam=$1 repo=$2 label=$3 tok full
+  if [ -z "$(engineer_token_cmd "$fam")" ]; then
+    echo "  $label token: missing ($(engineer_token_seam "$fam"))"; return 1
+  fi
+  if ! tok=$(engineer_token "$fam" 0 2>/dev/null); then
+    echo "  $label token: configured but failed to mint ($(engineer_token_seam "$fam"))"; return 2
+  fi
+  if [ -z "$tok" ]; then
+    echo "  $label token: missing ($(engineer_token_seam "$fam"))"; return 1
+  fi
+  if full=$(GH_TOKEN="$tok" gh api "repos/$repo" --jq .full_name 2>/dev/null); then
+    echo "  $label token: ok (repo access=$full)"; return 0
+  fi
+  echo "  $label token: minted but cannot access $repo"; return 2
+}
+
+doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 invalid
+  local author=$1 val
+  if ! val=$(engineer_git_author "$author" 0 2>/dev/null); then
+    echo "  author git identity: configured but invalid (WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$author"))"; return 2
+  fi
+  if [ -z "$val" ]; then
+    echo "  author git identity: missing (WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$author"))"; return 1
+  fi
+  echo "  author git identity: ok ($(git_author_name "$val") <$(git_author_email "$val")>)"; return 0
+}
 
 # render_pr_body <worktree> <doc-relpath> <issue> — the PR body as a generated VIEW of the committed
 # design doc (#24): a self-describing, plain-language PR with zero duplicate authoring. The visible body
@@ -388,10 +465,9 @@ count_med(){ sum_line "$1" | sed -E 's/.*med=([0-9]+).*/\1/'; }
 count_low(){ sum_line "$1" | sed -E 's/.*low=([0-9]+).*/\1/'; }
 count_all(){ local s; s=$(sum_line "$1"); echo $(( $(sed -E 's/.*high=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*med=([0-9]+).*/\1/'<<<"$s") + $(sed -E 's/.*low=([0-9]+).*/\1/'<<<"$s") )); }
 
-# resolve a fresh token for the REVIEWER identity (opposite family from the author), used to post a NATIVE
-# cross-family review. Missing token config falls back to ambient comments unless a caller explicitly requires
-# a native reviewer token (finish's merge gate does this when WF_REQUIRE_NATIVE_REVIEW=1); configured-but-failing
-# commands always fail closed.
+# resolve a fresh token for the REVIEWER identity (opposite family from the author), used to post cross-family
+# reviews/comments. Callers pass required=1 on protected workflow writes unless WF_ALLOW_AMBIENT_IDENTITY=1
+# explicitly opts into ambient fallback; configured-but-failing commands always fail closed.
 reviewer_token(){  # reviewer_token <author> [required:0|1]
   local author=$1 reviewer required=${2:-0}
   reviewer=$(opposite_family "$author")
@@ -409,14 +485,15 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   local audit rev; audit=$(locate_audit "$wt")
   rev="${TMPDIR:-/tmp}/wf_${mode#--}_$(wt_branch "$wt" | tr '/' '_').md"
   local rtok="" require_reviewer=0
-  # The merge gate (approving=1, set by finish for --code AND design-mode --scaffold) must have a real
-  # opposite-family reviewer when WF_REQUIRE_NATIVE_REVIEW=1 — fail early on a missing identity rather than
-  # silently falling back to an ambient comment that can't satisfy branch protection. Keyed on approving=1
-  # (only the merge gate passes it), so it covers both gate modes, not just --code.
-  [ "$approving" = 1 ] && [ "${WF_REQUIRE_NATIVE_REVIEW:-}" = 1 ] && require_reviewer=1
+  # Any posted workflow review/comment should use the opposite-family engineer identity by default, not the
+  # ambient owner account. WF_ALLOW_AMBIENT_IDENTITY=1 is the explicit permissive escape hatch.
+  ambient_identity_allowed || require_reviewer=1
   if [ -n "$pr" ]; then
     rtok=$(reviewer_token "$author" "$require_reviewer")
-    [ -n "$rtok" ] || need_ambient_gh
+    if [ -z "$rtok" ]; then
+      ambient_identity_note "$mode review for PR #$pr (missing reviewer $(engineer_token_seam "$(opposite_family "$author")"))"
+      need_ambient_gh
+    fi
   fi
   note "$mode review (author=$author, reviewer=opposite family; quiet for several minutes can be normal; findings appear atomically at completion)…"
   AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
@@ -429,12 +506,14 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
   [ -n "$pr" ] || { note "no PR yet — $mode review NOT posted (verdict above; $rev)"; return 0; }
   local repo body review_text; repo=$(gh_repo "$wt"); review_text=$(cat "$rev")
   body=$( { printf '## %s\n\n%s\n\n' "$heading" "$(review_summary_text "$REVIEW_HIGH" "$review_med" "$review_low" "$approving")"; markdown_code_details "Full review details" "$review_text"; } )
+  if [ -z "$rtok" ] && ambient_identity_allowed; then
+    body=$( { ambient_override_notice "$mode review for PR #$pr"; printf '\n\n%s' "$body"; } )
+  fi
   # The reviewer identity attributes its output to the opposite-family engineer — a NATIVE review for --code,
   # AND for --scaffold WHEN it is the merge gate (approving=1, i.e. `finish --design`) so the design approval
   # is a real native APPROVE branch protection accepts. An interim --scaffold (design-review, approving=0)
-  # stays a COMMENT via the elif below. Unconfigured installs fall back to ambient comments unless
-  # WF_REQUIRE_NATIVE_REVIEW=1. Advisory scaffold/classification comments still fall back when no reviewer
-  # identity is configured.
+  # stays a COMMENT via the elif below. Missing reviewer identity reaches the ambient fallback only when
+  # WF_ALLOW_AMBIENT_IDENTITY=1 was explicitly set; otherwise reviewer_token failed closed above.
   if { [ "$mode" = --code ] || { [ "$mode" = --scaffold ] && [ "$approving" = 1 ]; }; } && [ -n "$rtok" ]; then
     local event sha; sha=$(git -C "$wt" rev-parse HEAD)
     if [ "$approving" = 1 ] && [ "$REVIEW_HIGH" = 0 ]; then event=APPROVE              # finish gate, clean -> APPROVE
@@ -536,6 +615,56 @@ help|-h|--help|"")  usage; exit 0 ;;
 locate-audit)  # wf.sh locate-audit [context-repo] — print the verify-claims reviewer wf.sh would run (introspection/test)
   locate_audit "${1:-}" ;;
 
+doctor)  # wf.sh doctor <author> [repo-or-worktree] — report identity readiness without printing tokens
+  need_gh; AUTHOR=${1:?usage: wf.sh doctor <claude|codex> [repo-or-worktree]}; TARGET=${2:-$ORIGIN_REPO}
+  check_author "$AUTHOR"
+  if [ -d "$TARGET" ]; then DREPO=$(gh_repo "$TARGET"); else DREPO=$TARGET; fi
+  REVIEWER=$(opposite_family "$AUTHOR")
+  echo "wf.sh doctor"
+  echo "  author: $AUTHOR"
+  echo "  reviewer: $REVIEWER"
+  echo "  repo: $DREPO"
+  if ambient_identity_allowed; then
+    echo "  ambient workflow fallback: ENABLED (WF_ALLOW_AMBIENT_IDENTITY=1)"
+  else
+    echo "  ambient workflow fallback: disabled (strict engineer identity default)"
+  fi
+  ambient_rc=0; doctor_ambient_gh || ambient_rc=$?
+  author_tok_rc=0; doctor_token "$AUTHOR" "$DREPO" "author engineer" || author_tok_rc=$?
+  reviewer_tok_rc=0; doctor_token "$REVIEWER" "$DREPO" "reviewer engineer" || reviewer_tok_rc=$?
+  git_author_rc=0; doctor_git_author "$AUTHOR" || git_author_rc=$?
+  model_rc=0
+  if [ "$AUTHOR" = codex ]; then
+    if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
+      echo "  model reviewer: ok (AUDIT_VERIFIER_CMD set for Codex-authored reviews)"
+    else
+      echo "  model reviewer: missing (AUDIT_VERIFIER_CMD required for Codex-authored --scaffold/--code reviews)"
+      model_rc=1
+    fi
+  else
+    echo "  model reviewer: ok (default Codex reviewer is opposite-family for Claude-authored reviews)"
+  fi
+  ready=1
+  if ambient_identity_allowed; then
+    [ "$ambient_rc" = 0 ] || ready=0
+    [ "$author_tok_rc" != 2 ] || ready=0
+    [ "$reviewer_tok_rc" != 2 ] || ready=0
+    [ "$git_author_rc" != 2 ] || ready=0
+  else
+    [ "$author_tok_rc" = 0 ] || ready=0
+    [ "$reviewer_tok_rc" = 0 ] || ready=0
+    [ "$git_author_rc" = 0 ] || ready=0
+  fi
+  [ "$model_rc" = 0 ] || ready=0
+  if [ "$ready" = 1 ]; then
+    echo "READY: protected workflow actions would proceed under current configuration"
+  else
+    echo "BLOCKED: protected workflow actions would fail under current configuration"
+    echo "  $ambient_identity_hint"
+    exit 1
+  fi
+  ;;
+
 start)  # wf.sh start <issue#> <slug>
   ISSUE=${1:?usage: wf.sh start <issue#> <slug>}; SLUG=${2:?slug (kebab-case)}
   [ "$(git -C "$ORIGIN_REPO" rev-parse --abbrev-ref HEAD)" = main ] || die "$ORIGIN_REPO is not on 'main' (base must be main)"
@@ -586,10 +715,16 @@ EOF
   note "next: write the design doc at $WT/$DOC, then: wf.sh open $WT"
   ;;
 
-open)   # wf.sh open <worktree> [author]   — commit the design doc, push, open the DRAFT PR
-  need_gh; WT=${1:?usage: wf.sh open <worktree> [author]}; AUTHOR=${2:-}
+open)   # wf.sh open <worktree> <author>   — commit the design doc, push, open the DRAFT PR
+  need_gh; WT=${1:?usage: wf.sh open <worktree> <author>}; AUTHOR=${2:-}
   [ -d "$WT" ] || die "no such worktree: $WT"
-  if [ -n "$AUTHOR" ]; then check_author "$AUTHOR"; else note "WARN: no author passed to open; using ambient git/GitHub identity. For agent attribution, pass author: wf.sh open $WT <claude|codex>"; fi
+  if [ -n "$AUTHOR" ]; then
+    check_author "$AUTHOR"
+  elif ambient_identity_allowed; then
+    ambient_identity_note "open without author (no engineer identity requested)"
+  else
+    missing_identity_die "open requires an author family (claude|codex) for engineer attribution"
+  fi
   BR=$(wt_branch "$WT")
   DOC=$(cd "$WT" && git status --porcelain proposals/ | sed 's/^...//' | head -1)
   [ -n "$DOC" ] || DOC=$(cd "$WT" && git diff --name-only "$(base_ref "$WT")"...HEAD -- proposals/ | head -1)
@@ -601,8 +736,11 @@ open)   # wf.sh open <worktree> [author]   — commit the design doc, push, open
     [ -n "$AUTHOR_TOKEN" ] || need_ambient_gh
     GIT_AUTHOR=$(engineer_git_author "$AUTHOR" 0)
     if [ -z "$GIT_AUTHOR" ]; then
-      [ "${WF_REQUIRE_ENGINEER_IDENTITY:-}" = 1 ] && die "missing git author for author=$AUTHOR and WF_REQUIRE_ENGINEER_IDENTITY=1"
-      note "WARN: no engineer git author configured for author=$AUTHOR; using ambient git identity"
+      if ambient_identity_allowed; then
+        ambient_identity_note "git commit author for author=$AUTHOR (missing WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$AUTHOR"))"
+      else
+        missing_identity_die "missing WF_ENGINEER_GIT_AUTHOR_$(family_suffix "$AUTHOR") for author=$AUTHOR"
+      fi
     fi
   else
     need_ambient_gh
@@ -630,6 +768,9 @@ Namespaced design doc for the scaffold change. Reviewed by --scaffold next." -- 
     --body-file -) \
     || die "gh pr create failed"
   PR=$(basename "$PRURL")
+  if [ -z "$AUTHOR_TOKEN" ] && ambient_identity_allowed; then
+    post_ambient_pr_trail "$WT" "$PR" "wf.sh open"
+  fi
   echo "PR=$PR"; note "draft PR #$PR opened: $PRURL"; note "next: wf.sh design-review $WT <author>"
   ;;
 
@@ -674,6 +815,9 @@ comment)        # wf.sh comment <worktree> <author> [body-file]   — post an AU
   PR=$(wt_pr_required "$WT" "$ATOK")
   if [ "$BODYFILE" = - ]; then BODY=$(cat); else [ -f "$BODYFILE" ] || die "no such body file: $BODYFILE"; BODY=$(cat "$BODYFILE"); fi
   [ -n "$BODY" ] || die "empty comment body (nothing on stdin / empty file)"
+  if [ -z "$ATOK" ] && ambient_identity_allowed; then
+    BODY=$( { ambient_override_notice "wf.sh comment on PR #$PR"; printf '\n\n%s' "$BODY"; } )
+  fi
   echo "$BODY" | gh_author "$ATOK" -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
     || die "could not post the author comment to PR #$PR — failing closed"
   if [ -n "$ATOK" ]; then note "posted author COMMENT to PR #$PR as the $AUTHOR engineer identity"
@@ -714,14 +858,44 @@ issue)          # wf.sh issue <claude|codex> <gh issue args…>   — file/comme
   done
   ATOK=$(author_token_optional "$AUTHOR")          # engineer token, or "" with the configured fallback
   [ -n "$ATOK" ] || need_ambient_gh
-  gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
+  if [ -z "$ATOK" ] && ambient_identity_allowed; then
+    ambient_identity_note "wf.sh issue $GHSUB"
+    IREPO=$(repo_arg_from_gh_args "$(gh_repo "${ORIGIN_REPO:-.}")" "$@")
+    if [ "$GHSUB" = create ]; then
+      OUT=$(gh_author "$ATOK" issue "$@") || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
+      printf '%s\n' "$OUT"
+      INUM=$(sed -nE 's#.*/issues/([0-9]+).*#\1#p' <<<"$OUT" | head -1 || true)
+      if [ -n "$INUM" ]; then
+        ambient_override_notice "wf.sh issue create" | gh_author "$ATOK" issue comment "$INUM" -R "$IREPO" --body-file - >/dev/null 2>&1 \
+          || note "WARN: could not post ambient-identity override note to issue #$INUM (non-fatal; terminal warning already emitted)"
+      fi
+    else
+      INUM=${2:-}
+      gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
+      # A second comment is the least invasive durable trail for arbitrary `gh issue comment` args.
+      if [ -n "$INUM" ]; then
+        ambient_override_notice "wf.sh issue comment" | gh_author "$ATOK" issue comment "$INUM" -R "$IREPO" --body-file - >/dev/null 2>&1 \
+          || note "WARN: could not post ambient-identity override note for issue #$INUM (non-fatal; terminal warning already emitted)"
+      else
+        note "WARN: could not identify issue number for ambient-identity override note (non-fatal; terminal warning already emitted)"
+      fi
+    fi
+  else
+    gh_author "$ATOK" issue "$@" || die "wf.sh issue: 'gh issue $GHSUB' failed — failing closed"
+  fi
   if [ -n "$ATOK" ]; then note "ran 'gh issue $GHSUB' as the $AUTHOR engineer identity"
   else note "ran 'gh issue $GHSUB' (ambient token — no engineer identity configured for $AUTHOR)"; fi
   ;;
 
-classify)       # wf.sh classify <worktree> [author]   — advisory record (never blocks)
-  need_gh; WT=${1:?usage: wf.sh classify <worktree> [author]}; AUTHOR=${2:-}
-  [ -z "$AUTHOR" ] || check_author "$AUTHOR"
+classify)       # wf.sh classify <worktree> <author>   — advisory record (never blocks)
+  need_gh; WT=${1:?usage: wf.sh classify <worktree> <author>}; AUTHOR=${2:-}
+  if [ -n "$AUTHOR" ]; then
+    check_author "$AUTHOR"
+  elif ambient_identity_allowed; then
+    ambient_identity_note "classify without author (classification will use ambient auth)"
+  else
+    missing_identity_die "classify requires an author family (claude|codex) so the opposite-family reviewer identity can post the classification"
+  fi
   [ -d "$WT" ] || die "no such worktree: $WT"
   [ -x "$WT/.aar-ci/classify.sh" ] || die "no classifier at $WT/.aar-ci/classify.sh (is this the aar-skills repo?)"
   require_clean "$WT"
@@ -733,15 +907,25 @@ classify)       # wf.sh classify <worktree> [author]   — advisory record (neve
   # or reviewer identity, keep the existing ambient-comment fallback.
   RTOK=""
   if [ -n "$AUTHOR" ]; then
-    RTOK=$(reviewer_token "$AUTHOR" 0)
+    if ambient_identity_allowed; then
+      RTOK=$(reviewer_token "$AUTHOR" 0)
+    else
+      RTOK=$(reviewer_token "$AUTHOR" 1)
+    fi
   else
-    note "WARN: no author passed to classify; posting classification with ambient GitHub auth. Pass author to use an opposite-family reviewer identity when configured."
+    note "WARN: no author passed to classify; posting classification with ambient GitHub auth because WF_ALLOW_AMBIENT_IDENTITY=1"
   fi
-  [ -n "$RTOK" ] || need_ambient_gh
+  if [ -z "$RTOK" ]; then
+    ambient_identity_note "classification for PR lookup/post"
+    need_ambient_gh
+  fi
   PR=$(wt_pr_required "$WT" "$RTOK")
   BODY=$( { echo "## Type of change"; echo;
       classification_summary_text "$CLASS"; echo; echo;
       markdown_code_details "Classifier details" "$OUT"; } )
+  if [ -z "$RTOK" ] && ambient_identity_allowed; then
+    BODY=$( { ambient_override_notice "wf.sh classify on PR #$PR"; printf '\n\n%s' "$BODY"; } )
+  fi
   if [ -n "$RTOK" ]; then
     echo "$BODY" | GH_TOKEN="$RTOK" gh -R "$(gh_repo "$WT")" pr comment "$PR" --body-file - >/dev/null \
       || die "could not post the classification to PR #$PR as the reviewer identity — failing closed (classification was: $CLASS)"

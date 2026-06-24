@@ -90,6 +90,13 @@ if printf '%s\n' "${PATHS[@]}" | grep -q '^plugins/aar-engineering/skills/ship-c
   else
     err "wf.sh changed but locate_audit_smoke.sh missing — cannot verify reviewer resolution"
   fi
+  ID_SMOKE="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/identity_smoke.sh"
+  if [ -f "$ID_SMOKE" ]; then
+    echo "[checks] strict identity smoke" >&2
+    bash "$ID_SMOKE" >&2 && ok "identity smoke" || err "strict identity smoke FAILED"
+  else
+    err "wf.sh changed but identity_smoke.sh missing — cannot verify strict identity behavior"
+  fi
 fi
 
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

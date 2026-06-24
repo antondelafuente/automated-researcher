@@ -23,10 +23,16 @@ Update `wf.sh` at the existing identity seams:
    applicable.
 4. Add `wf.sh doctor <author> [repo-or-worktree]`, implemented through the same helper predicates the workflow
    uses, reporting ambient gh login, author/reviewer bot logins, git-author readiness, Codex reviewer command
-   readiness, and whether the permissive override is enabled.
+   readiness, and whether the permissive override is enabled. Its exit contract is: exit 0 iff the protected
+   workflow path would proceed under the current configuration, including a deliberate
+   `WF_ALLOW_AMBIENT_IDENTITY=1` permissive run.
 5. When the permissive override is used for protected mutations, emit a terminal warning and leave a best-effort
    GitHub trail when a natural PR/Issue target exists.
-6. Update `ship-change` SKILL.md/RUNBOOK/help text and bump `aar-engineering` plugin version.
+6. Treat `WF_REQUIRE_ENGINEER_IDENTITY` and `WF_REQUIRE_NATIVE_REVIEW` as legacy/no-longer-needed under the new
+   strict default, and update docs/help so no path still presents them as the opt-in strictness switches.
+7. Add a unit-style smoke for the strict-gate/`doctor` behavior and wire it into `.aar-ci/checks.sh` when
+   `wf.sh` changes, next to the existing `locate_audit_smoke.sh`.
+8. Update `ship-change` SKILL.md/RUNBOOK/help text and bump `aar-engineering` plugin version.
 
 ## Alternatives considered
 
@@ -45,4 +51,7 @@ workflow.
 ## Rollout + rollback
 
 Merge through the normal ship-change code path. Rollback is reverting this PR. Operational escape hatch during
-or after rollout: set `WF_ALLOW_AMBIENT_IDENTITY=1` for a deliberate permissive workflow run.
+or after rollout: set `WF_ALLOW_AMBIENT_IDENTITY=1` for a deliberate permissive workflow run. After this lands,
+any in-flight or future shell that has ambient `gh` but has not sourced the engineer-token seams will fail closed
+on protected `wf.sh` mutations; recovery is to source the instance engineer env or set the explicit permissive
+override for that run.

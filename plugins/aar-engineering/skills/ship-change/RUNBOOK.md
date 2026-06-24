@@ -46,15 +46,30 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
 - **`issues: write` — for `wf.sh issue` (agent-filed Issues, #89).** `wf.sh issue <fam> create|comment`
   authors Issues / issue-comments as the engineer App. Creating or commenting on an Issue needs the App to
   have **`issues: write`** (on private *and* public repos — unlike the read above). Without it the App can't
-  open the Issue and falls back to ambient/human auth (defeating the attribution). Grant `issues: write` to
-  both engineer Apps (+ re-accept) when using `wf.sh issue`.
+  open the Issue; `wf.sh` now fails closed by default instead of falling back to ambient/human auth. Grant
+  `issues: write` to both engineer Apps (+ re-accept) when using `wf.sh issue`.
 - **Instance wiring (not product):** each App's id + private key live on the instance under e.g.
   `~/.config/<family>-engineer/`. `WF_ENGINEER_TOKEN_CMD_CLAUDE` / `WF_ENGINEER_TOKEN_CMD_CODEX` mint fresh
   installation tokens per use (they expire ~1h); `WF_ENGINEER_GIT_AUTHOR_CLAUDE` /
   `WF_ENGINEER_GIT_AUTHOR_CODEX` provide `Name <email>` for strict commit attribution. `wf.sh` consumes only these
-  seams — no App specifics in product code. `WF_REQUIRE_ENGINEER_IDENTITY=1` makes missing author identity config block;
-  `WF_REQUIRE_NATIVE_REVIEW=1` makes the final merge-gate review block when the opposite-family reviewer
-  identity is absent.
+  seams — no App specifics in product code. Protected workflow mutations are strict by default: missing author
+  or reviewer engineer identity now blocks without needing `WF_REQUIRE_ENGINEER_IDENTITY=1` or
+  `WF_REQUIRE_NATIVE_REVIEW=1` (legacy/no-longer-needed). Use `wf.sh doctor <claude|codex> [repo-or-worktree]`
+  to check ambient gh, author/reviewer token repo access, git-author wiring, and Codex verifier readiness
+  without printing token values.
+
+## Ambient gh vs workflow identity
+
+It is fine for agent shells to have ordinary `gh` access for reading Issues/PRs or for owner/admin
+maintenance. That credential is not the workflow identity. `wf.sh` protected mutations that name an author
+(`open`, reviews, `comment`, `issue`, `classify`, `finish`) use the family engineer App tokens by default and
+fail closed if those seams are missing. An instance may source a small `gh.env`/`GH_TOKEN` for ambient CLI
+convenience; it must still source the engineer-token env before ship-change workflow writes.
+
+`WF_ALLOW_AMBIENT_IDENTITY=1` is the explicit escape hatch for a deliberate permissive workflow run on an
+install without engineer Apps. When used, the driver emits a terminal warning and leaves a best-effort PR/Issue
+trail when there is a natural target. Treat that warning like the close-gate override: acceptable for bootstrap
+or rescue, not the normal path.
 
 ## Escape hatches (when the automation wedges)
 
@@ -92,7 +107,8 @@ hang.
 
 - **`GH_TOKEN`** (author/driver auth). Rotate: mint a new fine-grained PAT (repo: contents + pull_requests),
   replace it wherever your environment provides `GH_TOKEN` *(this instance: `~/.env`, re-`source`)*. `wf.sh`
-  sources no env file itself. NEVER print it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
+  sources no env file itself. This can be a small ambient-gh env for ordinary CLI use; it does not satisfy the
+  engineer identity seams. NEVER print it; scrub from captured output (`sed "s/${GH_TOKEN}/***/g"`).
 - **Engineer Apps** (author/reviewer identities). Rotate the App's private key in the App settings and replace
   the matching `~/.config/<family>-engineer/key.pem`; the minter picks it up. Revoking an App stops that
   identity immediately.
