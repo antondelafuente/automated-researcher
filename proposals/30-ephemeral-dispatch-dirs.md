@@ -76,6 +76,20 @@ CHECKLIST evidence is therefore "`closing` marker present + closer launched," wh
 self-audit rule (verify state by inspection, not memory) without asking the executor to inspect a process it
 just terminated.
 
+**The two-phase close ordering — commit the evidence BEFORE the kill handoff** (Finding-driven). Because the
+executor must *also* tick, commit, push, and self-audit the host-close CHECKLIST evidence — and the closer is
+about to kill the session it would do that in — the steps must be strictly ordered so the kill never races the
+executor's own bookkeeping. **Phase 1 (executor, in-session):** clear `desired-active`, write the `closing`
+marker, record the host-close evidence in `CHECKLIST.md`, **commit + push** that record, and run the close
+self-audit — all while the session is still alive. The thing the executor attests is precisely this
+*pre-kill* state, which is fully knowable before any kill. **Phase 2 (handoff, then detached):** *only after*
+Phase 1's commit/push/audit completes does the executor launch the detached closer and return; the closer then
+kills the session and writes the durable `closed` record **outside** the session. The contract explicitly
+accepts the closer's post-kill `closed` marker (control-plane, generation-keyed) as the authority for the
+*post-kill* half — the executor is never asked to commit anything after its session is gone. So the gate's
+required evidence is Phase-1 evidence (committed pre-kill), and the post-kill truth lives in the closer's
+durable record, not in a commit the dead session can't make.
+
 **Where the marker lives, and its schema** (Finding-driven). The marker must live **outside the git
 worktree** — in the dispatcher's own control-plane state dir — *not* a file inside the worktree. This is
 load-bearing because the worktree is exactly what the existing `--reap` clean+pushed guard polices: a marker
@@ -306,7 +320,11 @@ substrate supplies the *mechanism* and the field's *values*.
   declaration write + (1) gate → (2)+(3) host-close mechanism + flip to `persistent`.** A Codex substrate that
   truly has no persistent host declares `dispatch_host=none` and is permanently N.A.
 - **Rollback:** the product change is a doc clause — revert the squash commit through the normal lifecycle.
-  The instance completion path is opt-in by construction: if it misbehaves, the executor simply stops calling
-  the host-close at Close and the world reverts to today's manual-reap behavior, with no data at risk because
-  deletion was never automatic. The standing escape hatch is unchanged: `dispatch-claude.sh --reap <exp>` /
-  `--reap-all` for manual cleanup, `--list` to see what's outstanding.
+  The instance completion path is opt-in by construction, **but rollback must flip the declaration, not just
+  drop the call** (Finding-driven): once the dispatcher declares `persistent + handle`, the `[BLOCK]` gate
+  *requires* the host-close call, so merely "stop calling it" would fail closed. So disabling the mechanism
+  means **flipping the dispatcher's `dispatch_host` declaration back to the transitional/disabled state**
+  (`none-yet`), which returns the gate to a declared N.A. — or, for a full product rollback, reverting the
+  checklist-gate clause itself. Either way the world reverts to today's manual-reap behavior with no data at
+  risk, because deletion was never automatic. The standing escape hatch is unchanged: `dispatch-claude.sh
+  --reap <exp>` / `--reap-all` for manual cleanup, `--list` to see what's outstanding.
