@@ -74,6 +74,21 @@ run create r4 >/dev/null
 if run update r4 --handoff "" >/dev/null 2>&1; then no empty-handoff-rejected; else ok empty-handoff-rejected; fi
 if run update r4 --lease-pod "" >/dev/null 2>&1; then no empty-pod-rejected; else ok empty-pod-rejected; fi
 
+# --- surplus args on no-arg commands fail closed (must NOT silently mutate a terminal state) ---
+run create r5 >/dev/null
+if run stop r5 oops >/dev/null 2>&1; then no surplus-stop-rejected; else ok surplus-stop-rejected; fi
+# the spurious-arg stop did NOT mark r5 stopped
+if active r5; then ok surplus-stop-noop; else no surplus-stop-noop; fi
+if run is-desired-active r5 extra >/dev/null 2>&1; then no surplus-isactive-rejected; else ok surplus-isactive-rejected; fi
+
+# --- stop/close terminal transitions: stop idempotent; close-after-stop ok; re-stop-after-close refused ---
+run stop r5 >/dev/null
+run stop r5 >/dev/null && ok stop-idempotent || no stop-idempotent          # already stopped -> no-op success
+run close r5 >/dev/null && ok close-after-stop || no close-after-stop        # stop -> close finalize allowed
+if run stop r5 >/dev/null 2>&1; then no restop-after-close-refused; else ok restop-after-close-refused; fi
+run create r6 >/dev/null; run close r6 >/dev/null
+run close r6 >/dev/null && ok close-idempotent || no close-idempotent        # already closed -> no-op success
+
 # --- RACE: many concurrent updates against a stop must never re-activate the run (Finding 1) ---
 run create rc --handoff /art/rc/TEMP.md >/dev/null
 for i in $(seq 1 40); do run update rc --lease-pod "p$i" >/dev/null 2>&1 & done

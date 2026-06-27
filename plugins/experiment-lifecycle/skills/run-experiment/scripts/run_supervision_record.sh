@@ -246,14 +246,34 @@ cmd_update(){
 
 cmd_stop(){
   local id=$1; local file; file=$(record_path "$id")
-  [ -f "$file" ] || die "stop: no record for '$id'"
+  # classify under the lock: fail closed on missing/corrupt; idempotent on already-stopped; refuse to
+  # re-stop a closed run (the opposite terminal state — a closed run is finished, not stoppable).
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "stop: no record for '$id'";;
+    invalid) die "stop: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    closed)  die "stop: run '$id' is already closed (terminal) — refusing to re-mark";;
+    stopped) echo "stop: run '$id' is already stopped (no-op)"; return 0;;
+    active)  : ;;
+    *)       die "stop: unexpected record state '$state' for '$id'";;
+  esac
   write_record "$file" "" "" "true" "" "false"
   echo "stopped run-supervision record: $file (will NOT be relaunched)"
 }
 
 cmd_close(){
   local id=$1; local file; file=$(record_path "$id")
-  [ -f "$file" ] || die "close: no record for '$id'"
+  # classify under the lock: fail closed on missing/corrupt; idempotent on already-closed. `close` is the
+  # finalizer superset — closing a stopped run is allowed (a deliberately-stopped run that is then torn down).
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "close: no record for '$id'";;
+    invalid) die "close: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    closed)  echo "close: run '$id' is already closed (no-op)"; return 0;;
+    stopped) : ;;  # stop -> close is a legitimate finalize of a deliberately-stopped run
+    active)  : ;;
+    *)       die "close: unexpected record state '$state' for '$id'";;
+  esac
   write_record "$file" "" "" "" "true" "false"
   echo "closed run-supervision record: $file (inactive)"
 }
@@ -286,6 +306,12 @@ main(){
     create|update|stop|close|is-desired-active|show) validate_id "$id"; shift;;
     "") die "usage: run_supervision_record.sh <create|update|stop|close|is-desired-active|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
+  esac
+  # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
+  # closed, especially before a terminal mutation, not silently stop/close a run.
+  case "$sub" in
+    stop|close|show|is-desired-active)
+      [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
     create)            with_lock "$id" cmd_create "$id" "$@";;
