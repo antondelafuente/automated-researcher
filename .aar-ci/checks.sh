@@ -244,4 +244,25 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 11. pod-lease + reaper smoke (#169): the 3-phase create + expiry-driven is-reapable + the locked
+#     reap (refresh-vs-reap race) + report-unknown-never-delete + unresolved-key report-only + legacy
+#     keepalive (future/inconclusive/past) + dry-run — behavior the JSON/syntax checks can't cover.
+#     Runs when either helper or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scripts/(pod_lease|pod_lease_smoke|pod_reaper|pod_reaper_smoke)\.sh$'; then
+  PL_SMOKE="$ROOT/plugins/gpu-job/skills/gpu-job/scripts/pod_lease_smoke.sh"
+  if [ -f "$PL_SMOKE" ]; then
+    echo "[checks] pod-lease smoke" >&2
+    bash "$PL_SMOKE" >&2 && ok "pod_lease smoke" || err "pod_lease smoke FAILED"
+  else
+    err "pod_lease.sh changed but pod_lease_smoke.sh missing — cannot verify the lease helper"
+  fi
+  PR_SMOKE="$ROOT/plugins/gpu-job/skills/gpu-job/scripts/pod_reaper_smoke.sh"
+  if [ -f "$PR_SMOKE" ]; then
+    echo "[checks] pod-reaper smoke" >&2
+    bash "$PR_SMOKE" >&2 && ok "pod_reaper smoke" || err "pod_reaper smoke FAILED"
+  else
+    err "pod_reaper.sh changed but pod_reaper_smoke.sh missing — cannot verify the reaper logic"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

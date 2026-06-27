@@ -143,6 +143,38 @@ def gql(query):
         return json.load(r)
 
 
+# --- pod lease (the #54 child-2 deletion-scoped lease; written across deploy so a model-free reaper
+#     can safely delete an abandoned pod). Wraps pod_lease.sh so the atomic-write + lock semantics live
+#     in one product implementation. GPU_JOB_LEASE_DISABLE=1 turns the wiring off (a standalone caller
+#     who doesn't want a lease registry); the reaper simply has nothing to read for that pod.
+import subprocess
+
+_LEASE_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pod_lease.sh")
+_LEASE_ON = env("GPU_JOB_LEASE_DISABLE", "") not in ("1", "true", "yes")
+
+
+def lease(*args, check=True):
+    """Run pod_lease.sh <args>; return stripped stdout (or None if leasing is disabled)."""
+    if not _LEASE_ON:
+        return None
+    r = subprocess.run(["bash", _LEASE_SH, *args], capture_output=True, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"pod_lease.sh {args[0]} failed: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def delete_pod_now(pod_id):
+    """Best-effort synchronous DELETE with the deploying key (the write-failure fail-closed path)."""
+    req = urllib.request.Request(f"https://rest.runpod.io/v1/pods/{pod_id}", method="DELETE",
+                                 headers={"Authorization": f"Bearer {KEY}", "User-Agent": "gpu-job"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status in (200, 204)
+    except Exception as e:
+        print(f"[lease] emergency DELETE of {pod_id} errored: {e}", flush=True)
+        return False
+
+
 def pod_env():
     e = {"PUBLIC_KEY": PUBLIC_KEY}
     if env("RCLONE_CONF_B64"):
@@ -156,7 +188,10 @@ def pod_env():
     return e
 
 
-def deploy():
+def deploy(nonce=None):
+    # When leasing is on, the pod NAME is the lease nonce (gpujob-<hex>) so the reaper can match an
+    # otherwise-unknown pod to its pending intent. POD_NAME is honored only when leasing is disabled.
+    pod_name = nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job")
     base = {"computeType": "GPU",
             "gpuCount": int(env("GPU_COUNT", "1")),
             "gpuTypeIds": [env("GPU_TYPE", "NVIDIA H200")],
@@ -166,7 +201,7 @@ def deploy():
             "imageName": env("IMAGE", "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"),
             "templateId": env("TEMPLATE_ID", "runpod-torch-v280"),
             "ports": ["22/tcp"], "dataCenterPriority": "availability",
-            "name": env("POD_NAME", "gpu-job"),
+            "name": pod_name,
             "env": pod_env()}
     if env("VOLUME_ID"):
         base["networkVolumeId"] = env("VOLUME_ID")
@@ -192,6 +227,24 @@ def deploy():
                 pid = resp.get("id") or resp.get("podId")
                 print(f"[deploy] OK pod={pid} dc={resp.get('machine',{}).get('dataCenterId','?')} "
                       f"costPerHr={resp.get('costPerHr','?')}", flush=True)
+                # PROVISIONAL: bind the real pod id to the intent. WRITE-FAILURE → fail CLOSED: the pod
+                # is already billing, so synchronously DELETE it with the deploying key (or leave the
+                # emergency record) rather than a silent un-leased orphan.
+                if nonce and _LEASE_ON:
+                    try:
+                        lease("provisional", nonce, str(pid))
+                    except Exception as e:
+                        print(f"[lease] provisional write FAILED for {pid} ({e}) — failing closed: "
+                              f"DELETE the un-leased pod", flush=True)
+                        gone = delete_pod_now(pid)
+                        try:
+                            # emergency unreaped-pod record: the one place the sweep/human must look
+                            lease("enrich", nonce, "--expiry-min", "0", check=False)
+                        except Exception:
+                            pass
+                        raise SystemExit(f"[deploy] provisional lease write failed; pod {pid} "
+                                         + ("DELETED (fail-closed)" if gone else
+                                            f"could NOT be deleted — REAP {pid} MANUALLY (emergency lease {nonce})"))
                 return pid
             print(f"  no go: {str(resp)[:160]}", flush=True)
         if time.time() >= deadline:
@@ -251,8 +304,28 @@ def _selftest():
 if __name__ == "__main__":
     if _SELFTEST:
         _selftest(); raise SystemExit(0)
-    pid = deploy()
+    # INTENT (pre-deploy): mint the lease BEFORE deploy() so even a created-but-id-never-returned pod
+    # is covered (the reaper matches it to the pending intent by nonce and reaps it on the short
+    # default expiry). The intent records the KEY REFERENCE the reaper resolves on its own (the
+    # API_KEY_ENV var name, not the secret), validated as resolvable now.
+    nonce = lease("intent", KEY_NAME) if _LEASE_ON else None
+    if nonce:
+        print(f"[lease] intent {nonce} (key_ref={KEY_NAME})", flush=True)
+    pid = deploy(nonce)
     ip, port, cost = wait_ssh(pid)
+    # ENRICH: SSH endpoint + the run's real expiry (default 12h; a long run REFRESHes via
+    # pod_lease.sh refresh, or set GPU_JOB_LEASE_EXPIRY_MIN).
+    if nonce and _LEASE_ON:
+        exp_min = env("GPU_JOB_LEASE_EXPIRY_MIN", "720")
+        try:
+            lease("enrich", nonce, "--ssh", f"{ip}:{port}", "--expiry-min", exp_min,
+                  *(["--cost", str(cost)] if cost is not None else []))
+            print(f"[lease] enriched {nonce} (expiry +{exp_min}min)", flush=True)
+        except Exception as e:
+            print(f"[lease] enrich FAILED for {nonce} ({e}) — lease stays at intent expiry; "
+                  f"REFRESH it or the reaper will reap on the short default", flush=True)
     print(f"\nPOD_ID={pid}")
+    if nonce:
+        print(f"LEASE_NONCE={nonce}")
     print(f"SSH=ssh -i {env('SSH_KEY_FILE', os.path.expanduser('~/.ssh/id_ed25519'))} -p {port} root@{ip}")
     print(f"COST_PER_HR={cost}")
