@@ -32,8 +32,13 @@ Implementation shape:
 
 - Add a small helper in `wf.sh` that recognizes the only same-family override this driver
   must actively strip: an `AUDIT_VERIFIER_CMD` containing `claude` for `author=claude`.
-  Leave the broader verifier-family inference canonical in `verify-claims`.
+  Leave the broader verifier-family inference canonical in `verify-claims`, and add a pointer
+  comment to the `audit_experiment.sh` matcher so future family-matcher changes update both.
+- Strengthen `require_model_reviewer` itself, not just `doctor`: for `author=codex`, a set but
+  Codex-family `AUDIT_VERIFIER_CMD` should fail before the review subprocess starts.
 - Use that helper in `run_review` instead of blindly inheriting `AUDIT_VERIFIER_CMD`.
+- Emit a one-line `note` when `wf.sh` strips a same-family verifier override for
+  `author=claude`, so the substitution is visible in terminal logs.
 - Add smoke coverage to `identity_smoke.sh` with a fake audit script that records whether
   `AUDIT_VERIFIER_CMD` reached the subprocess. The regression case is
   `author=claude` + ambient `AUDIT_VERIFIER_CMD='claude ...'`: the fake audit should see

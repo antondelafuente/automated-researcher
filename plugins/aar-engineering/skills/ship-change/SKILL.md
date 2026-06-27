@@ -40,6 +40,9 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 - **Cross-family review, both gates.** The design (`--scaffold`) and the code (`--code`) are reviewed by the
   OPPOSITE family from the author. Pass the author family to review/finish commands. Codex-authored reviews also
   need `AUDIT_VERIFIER_CMD` to point at a Claude-family CLI so the model review is genuinely cross-family.
+  Claude-authored reviews use the default Codex verifier; `wf.sh` clears inherited `BASH_ENV` and ignores a
+  same-family Claude `AUDIT_VERIFIER_CMD` for that review subprocess rather than requiring agents to hand-edit
+  shell environment state.
 - **Quiet review is normal.** Claude-family reviews can be quiet for several minutes. The underlying verifier
   writes findings atomically only after completion, so an absent or empty findings file is not by itself a hang
   signal; use the runbook's local thresholds before inspecting or retrying.
@@ -89,7 +92,8 @@ wf.sh open <WORKTREE> <author>    # prints PR=<n>; author=claude|codex is requir
 # 3. DESIGN REVIEW — cross-family --scaffold on the doc, posted to the PR
 wf.sh design-review <WORKTREE> <author>
 #   → revise the doc for findings. ARCHITECTURAL changes: this is where the PM's design approval belongs
-#     (recorded, advisory — the human reads the PR; not yet a required check). Then:
+#     (recorded, advisory — the human reads the PR; not yet a required check). `wf.sh` selects the reviewer
+#     environment from <author>; do not clear or set `BASH_ENV` by hand to force a reviewer. Then:
 
 # 4. IMPLEMENT — build the change IN the worktree, commit it (path-scoped) on the branch.
 

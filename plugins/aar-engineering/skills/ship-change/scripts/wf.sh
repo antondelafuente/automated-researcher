@@ -192,8 +192,27 @@ check_author(){
 }
 
 require_model_reviewer(){
-  [ "$1" != codex ] || [ -n "${AUDIT_VERIFIER_CMD:-}" ] \
+  [ "$1" = codex ] || return 0
+  [ -n "${AUDIT_VERIFIER_CMD:-}" ] \
     || die "author=codex needs a Claude model-family reviewer for --scaffold/--code (set AUDIT_VERIFIER_CMD, e.g. claude -p ... > \"\\$OUT_TMP\")"
+  is_claude_verifier_cmd "$AUDIT_VERIFIER_CMD" \
+    || die "author=codex needs AUDIT_VERIFIER_CMD to be Claude-family; got a non-Claude verifier (would fail cross-family review)"
+}
+
+is_claude_verifier_cmd(){
+  # Keep this narrow mirror synced with verify-claims' verifier-family matcher in
+  # plugins/verify-claims/skills/verify-claims/scripts/audit_experiment.sh.
+  case "${1:-}" in *claude*) return 0 ;; *) return 1 ;; esac
+}
+
+review_audit_env(){  # review_audit_env <author> <constitution>
+  local author=$1 constitution=$2
+  if [ "$author" = claude ] && is_claude_verifier_cmd "${AUDIT_VERIFIER_CMD:-}"; then
+    note "ignoring same-family AUDIT_VERIFIER_CMD for author=claude; using default Codex verifier"
+    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+  else
+    printf '%s\0' BASH_ENV= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+  fi
 }
 
 family_suffix(){
@@ -518,8 +537,9 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
     fi
   fi
   note "$mode review (author=$author, reviewer=opposite family; quiet for several minutes can be normal; findings appear atomically at completion)…"
-  AAR_SUBSTRATE="$author" AUDIT_CONSTITUTION="${AUDIT_CONSTITUTION:-$wt/AGENTS.md}" \
-    bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
+  local audit_env=()
+  while IFS= read -r -d '' item; do audit_env+=("$item"); done < <(review_audit_env "$author" "${AUDIT_CONSTITUTION:-$wt/AGENTS.md}")
+  env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
     || { echo "BLOCKED: reviewer process failed — tail of log:" >&2; tail -8 "$rev.run.log" >&2; exit 1; }
   require_valid_review "$rev"
   local review_med review_low
@@ -665,10 +685,13 @@ doctor)  # wf.sh doctor <author> [repo-or-worktree] — report lifecycle identit
   git_author_rc=0; doctor_git_author "$AUTHOR" || git_author_rc=$?
   model_rc=0
   if [ "$AUTHOR" = codex ]; then
-    if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
-      echo "  model reviewer: ok (AUDIT_VERIFIER_CMD set for Codex-authored reviews)"
-    else
+    if [ -z "${AUDIT_VERIFIER_CMD:-}" ]; then
       echo "  model reviewer: missing (AUDIT_VERIFIER_CMD required for Codex-authored --scaffold/--code reviews)"
+      model_rc=1
+    elif is_claude_verifier_cmd "$AUDIT_VERIFIER_CMD"; then
+      echo "  model reviewer: ok (AUDIT_VERIFIER_CMD is Claude-family for Codex-authored reviews)"
+    else
+      echo "  model reviewer: invalid (AUDIT_VERIFIER_CMD must be Claude-family for Codex-authored reviews)"
       model_rc=1
     fi
   else

@@ -55,8 +55,17 @@ check). Wiring either as a GitHub-required status is a tracked follow-up (needs 
   seams — no App specifics in product code. Protected workflow mutations are strict by default: missing author
   or reviewer engineer identity now blocks without needing `WF_REQUIRE_ENGINEER_IDENTITY=1` or
   `WF_REQUIRE_NATIVE_REVIEW=1` (legacy/no-longer-needed). Use `wf.sh doctor <claude|codex> [repo-or-worktree]`
-  to check ambient gh, author/reviewer token repo access, git-author wiring, and Codex verifier readiness
+  to check ambient gh, author/reviewer token repo access, git-author wiring, and author-aware model reviewer readiness
   without printing token values.
+
+## Model reviewer environment
+
+`AUDIT_VERIFIER_CMD` is a model-family override, not a blanket workflow default. For Codex-authored changes it
+must point at a Claude-family CLI, and `wf.sh doctor codex` / the review commands reject a Codex-family value
+before starting the reviewer. For Claude-authored changes the default Codex verifier is the cross-family path;
+`wf.sh` clears `BASH_ENV` for the audit subprocess and drops an inherited Claude-family `AUDIT_VERIFIER_CMD`,
+logging a one-line note when it does so. This keeps instance-wide shell convenience from turning a
+Claude-authored PR into a same-family Claude review.
 
 ## Ambient gh vs workflow identity
 
