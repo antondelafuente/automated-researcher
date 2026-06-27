@@ -1,7 +1,7 @@
 {
   "name": "aar-engineering",
   "description": "The SWE pipeline for building the AAR product (the engineering layer, not a shipped research plugin). ship-change drives a scaffold change through a GitHub-backed lifecycle: Issue \u2192 worktree branch \u2192 namespaced design doc \u2192 draft PR \u2192 --scaffold design review (posted) \u2192 implement \u2192 --code review (posted) \u2192 classifier (records mechanical|architectural with evidence) \u2192 tracked .aar-ci checks + fake-HOME behavior smoke \u2192 fail-closed merge-when-clean. Worktree-from-the-start (no shared-checkout races). Engineer identity seams (WF_ENGINEER_TOKEN_CMD_CLAUDE/CODEX plus WF_ENGINEER_GIT_AUTHOR_CLAUDE/CODEX) let Claude and Codex author under their own bot identities and review with the opposite-family identity by default; WF_REVIEWER_TOKEN_CMD remains a legacy Codex-token alias. Ambient gh is fine for inspection, but protected workflow writes use bot identities unless WF_ALLOW_AMBIENT_IDENTITY=1 is explicitly set. Pairs with verify-claims (the review primitives) and a per-repo .aar-ci/ profile.",
-  "version": "0.3.20",
+  "version": "0.3.21",
   "author": {
     "name": "Anton de la Fuente"
   }

@@ -46,6 +46,46 @@ PY
   fi
 fi
 
+# 1c. Packaged disposition references must stay synced with the canonical AGENTS.md section. Plugin-only installs
+#     cannot rely on repo-root AGENTS.md being present, but the product still needs one editorial home for the
+#     issue disposition contract. Dependent plugins therefore ship generated/synced references, and this check
+#     prevents drift.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(AGENTS\.md|plugins/.*/references/DISPOSITIONS\.md)$'; then
+  if CHECK_ROOT="$ROOT" python3 - <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(os.environ["CHECK_ROOT"])
+agents = (root / "AGENTS.md").read_text()
+start = "<!-- DISPOSITIONS:START -->"
+end = "<!-- DISPOSITIONS:END -->"
+
+def extract(text: str, label: str) -> str:
+    if text.count(start) != 1 or text.count(end) != 1:
+        print(f"{label} must contain exactly one disposition reference block", file=sys.stderr)
+        sys.exit(1)
+    body = text.split(start, 1)[1].split(end, 1)[0]
+    return f"{start}{body}{end}\n"
+
+canonical = extract(agents, "AGENTS.md")
+refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
+if not refs:
+    print("no packaged DISPOSITIONS.md references found", file=sys.stderr)
+    sys.exit(1)
+bad = []
+for ref in refs:
+    if ref.read_text() != canonical:
+        bad.append(str(ref.relative_to(root)))
+if bad:
+    print("packaged disposition reference drift: " + ", ".join(bad), file=sys.stderr)
+    sys.exit(1)
+PY
+  then ok "packaged disposition references match AGENTS.md"
+  else err "packaged disposition reference drift"
+  fi
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue

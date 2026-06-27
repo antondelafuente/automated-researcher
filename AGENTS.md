@@ -1,9 +1,10 @@
 # automated-researcher — development conventions (agent-facing)
 
 This repo is the PRODUCT: modular agent skills for automated research, developed here in their public shape even
-while the repo is private. The lab's orchestrator repo is the INSTANCE — it consumes this
-repo via symlinks/plugin installs and never the reverse. The instance-side transition map
-(what migrates next, gates, current state) lives at the lab's orchestrator/PRODUCT_TRANSITION.md.
+while the repo is private. A consuming instance is the deployment that imports this repo through plugin installs,
+source checkouts, symlinks, or thin local wrappers. The product never depends on a particular instance. Each
+consuming instance owns its own transition map, local paths, credentials, run records, launch/reload machinery,
+and deployment guidance.
 
 ## Two layers in this repo: the product and its SWE pipeline
 
@@ -34,9 +35,9 @@ review serves the **product** (`--design` / `--data` / close = experiment audits
 (`--scaffold` design review + `--code` PR review). Same capability, wired into both layers; neither substitutes for
 the other.
 
-**Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs the lab's `orchestrator` repo that
-*uses* it) and *product vs SWE pipeline* (within this repo: the shipped research plugins vs the `aar-engineering`
-layer that builds them).
+**Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs any consuming deployment that uses
+it) and *product vs SWE pipeline* (within this repo: the shipped research plugins vs the `aar-engineering` layer
+that builds them).
 
 ## Rules
 
@@ -74,13 +75,14 @@ layer that builds them).
   session may be named for its experiment), and a guessed name silently defeats the point
   of self-identifying.
 
+<!-- DISPOSITIONS:START -->
 ## Issue tracker — dispositions
 
 Every open Issue carries a **disposition** — how it should be handled — orthogonal to its type
 (`bug`/`enhancement`/…) and to open/closed. This is the definition (the product-owned, versioned part). The
-assign-at-filing and maintain *procedures* are operational and instance-specific — this program wires them
-into the `file-feedback` (assign) / `triage-feedback` (maintain) skills (see #79/#80; not yet landed); a
-different install wires its own. AGENTS.md holds only the definition, not the procedure.
+assign-at-filing and maintain *procedures* live in the appropriate operating surface: reusable product feedback
+machinery belongs in product skills, while deployment-only file bookkeeping belongs in consuming-instance
+guidance. AGENTS.md holds the issue contract, not local workflow paths.
 
 - **`ready`** — actionable now, with **no unresolved design** (this refines #74's initial "low-blast"
   wording: a design-derived child can touch architectural surfaces and still be `ready` because its design is
@@ -102,3 +104,4 @@ different install wires its own. AGENTS.md holds only the definition, not the pr
 **Design → implementation link:** a `needs-design` Issue is closed when its design lands (the design PR);
 that design spawns `ready` children, each carrying a **`design: #<design-issue>`** body pointer. Code PRs
 close `ready` Issues, never a `needs-design` Issue directly.
+<!-- DISPOSITIONS:END -->
