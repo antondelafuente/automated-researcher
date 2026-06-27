@@ -503,6 +503,24 @@ fd_save(){  # fd_save <wt> <repo> <pr> <tok> — post the cache as a new canonic
 }
 # fd-helpers-end (extraction sentinel for fd_state_smoke.sh)
 
+# run_verifier_bounded (#122): the ONE place the verifier subprocess is launched as a background wait. The
+# orchestrator#2 incident was this exact call hanging forever (a codex review blocked on stdin, no deadline,
+# no liveness — silence read as "still working"). Every verifier launch (run_review AND the mandatory
+# fresh_sweep) goes through here so NONE can park the workflow indefinitely. Caps the run with a hard deadline
+# (WF_REVIEW_TIMEOUT seconds, default 1200=20min; 0 disables deliberately) and fails CLOSED. Returns the
+# verifier's rc; on a tripped deadline returns 124 (timeout's convention) so callers report the stuck path.
+# Fails closed (rc 125) when a cap is REQUESTED but no usable `timeout` exists — never silently unbounded.
+# Args: <out-rev> <audit> <mode> <target> <wt> ... then the audit_env entries as trailing args after a `--`.
+run_verifier_bounded(){  # run_verifier_bounded <rev> <audit> <mode> <target> <wt> -- <ENV=V...>
+  local rev=$1 audit=$2 mode=$3 target=$4 wt=$5; shift 5; [ "${1:-}" = -- ] && shift
+  local review_timeout=${WF_REVIEW_TIMEOUT:-1200} timeout_pfx=()
+  if [ "$review_timeout" != 0 ]; then
+    if command -v timeout >/dev/null 2>&1; then timeout_pfx=(timeout -k 30 "$review_timeout")
+    else echo "BLOCKED: WF_REVIEW_TIMEOUT=$review_timeout requests a reviewer deadline but no \`timeout\` command is available — failing CLOSED rather than running an unbounded reviewer (#122). Install coreutils \`timeout\`, or set WF_REVIEW_TIMEOUT=0 to deliberately disable the cap." >&2; return 125; fi
+  fi
+  "${timeout_pfx[@]}" env "$@" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log"
+}
+
 # fresh_sweep (#140): an UN-ANCHORED stateless dimensional review (no disposition injection — review_audit_env
 # clears DISPOSITION_FILE; the --code/--scaffold prompts carry no prior-round anchoring) to catch a pre-existing
 # hole the disposition-anchored review would trust past. Writes a DISTINCT wf_fresh_<branch>.md artifact (never
@@ -519,7 +537,12 @@ fresh_sweep(){  # fresh_sweep <wt> <author> <mode> <target> <pr>  -> echoes the 
   note "fresh-eyes sweep (un-anchored stateless ${mode#--}; candidate findings, NON-gating)…"
   # The sweep itself is the MANDATORY backstop — return non-zero on failure so finish fails closed. Only the
   # PR-comment posting below is best-effort. (NOT require_valid_review here — it dies; the caller decides.)
-  if ! env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log"; then
+  # Bounded wait (#122): this verifier launch is also capped via run_verifier_bounded so the mandatory sweep
+  # inside finish can't hang forever before the merge-gate review is even reached (a stuck sweep returns 124/125
+  # and fails the sweep, which fails finish closed). Same WF_REVIEW_TIMEOUT cap as run_review.
+  local sweep_rc=0; run_verifier_bounded "$rev" "$audit" "$mode" "$target" "$wt" -- "${audit_env[@]}" || sweep_rc=$?
+  if [ "$sweep_rc" != 0 ]; then
+    [ "$sweep_rc" = 124 ] && note "fresh-eyes sweep exceeded ${WF_REVIEW_TIMEOUT:-1200}s deadline (#122) — failing the mandatory sweep CLOSED rather than parking"
     note "fresh-eyes sweep run FAILED — tail: $(tail -2 "$rev.run.log" 2>/dev/null)"; return 1
   fi
   grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$rev" 2>/dev/null \
@@ -725,17 +748,15 @@ run_review(){  # run_review <mode> <worktree> <author> <target> <pr> <heading> [
       fi
     fi
   fi
-  # Bounded wait (#122): the reviewer subprocess is a scaffold-provided background wait, and the orchestrator#2
-  # incident was exactly this call hanging forever (a codex review blocked on stdin, no deadline, no liveness
-  # — silence read as "still working"). Cap it with a hard deadline so a wedged verifier fails CLOSED (BLOCKED)
-  # instead of parking the whole workflow indefinitely. WF_REVIEW_TIMEOUT (seconds, default 1200=20min) tunes
-  # it; 0 disables the cap (deliberate). timeout's rc 124 = the deadline tripped (the stuck path).
-  local review_timeout=${WF_REVIEW_TIMEOUT:-1200} timeout_pfx=()
-  [ "$review_timeout" != 0 ] && command -v timeout >/dev/null 2>&1 && timeout_pfx=(timeout -k 30 "$review_timeout")
-  "${timeout_pfx[@]}" env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log" \
+  # Bounded wait (#122): the reviewer subprocess is a scaffold-provided background wait (orchestrator#2 was
+  # this call hanging forever). run_verifier_bounded caps it (WF_REVIEW_TIMEOUT) and fails CLOSED — rc 124 =
+  # the deadline tripped (the stuck path), rc 125 = a cap was requested but `timeout` is missing.
+  run_verifier_bounded "$rev" "$audit" "$mode" "$target" "$wt" -- "${audit_env[@]}" \
     || { local rc=$?
          if [ "$rc" = 124 ]; then
-           echo "BLOCKED: reviewer exceeded ${review_timeout}s deadline (#122 bounded wait) — treating a stuck reviewer as a FAIL, not waiting forever. Inspect $rev.run.log; re-run, or raise WF_REVIEW_TIMEOUT for a genuinely slow reviewer." >&2
+           echo "BLOCKED: reviewer exceeded ${WF_REVIEW_TIMEOUT:-1200}s deadline (#122 bounded wait) — treating a stuck reviewer as a FAIL, not waiting forever. Inspect $rev.run.log; re-run, or raise WF_REVIEW_TIMEOUT for a genuinely slow reviewer." >&2; exit 1
+         elif [ "$rc" = 125 ]; then
+           exit 1   # run_verifier_bounded already printed the BLOCKED reason (no usable timeout)
          else
            echo "BLOCKED: reviewer process failed — tail of log:" >&2
          fi

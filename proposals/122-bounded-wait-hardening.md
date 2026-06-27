@@ -68,12 +68,25 @@ the experiment-surface instance of the canonical rule, so the two don't drift.
   surfaces, so a packaged-and-drift-checked reference is more machinery than the rule warrants; inline
   self-containment is the lighter fit.
 
+**Code-review resolution (two findings, both accepted):**
+
+- **HIGH — the cap covered only `run_review`, not the mandatory `fresh_sweep`.** `finish` also runs an
+  un-anchored `fresh_sweep` verifier (the #140 fresh-eyes backstop) *before* the capped merge-gate review, so a
+  hang there would still park forever. **Accepted:** factored the cap into a single `run_verifier_bounded`
+  helper that is now the ONE place a verifier subprocess is launched, and routed BOTH `run_review` and
+  `fresh_sweep` through it. No verifier launch is unbounded.
+- **MED — silent unbounded fallback when `timeout` is absent.** With a nonzero cap but no `timeout` binary, the
+  first cut ran unbounded while the docs promised a hard cap. **Accepted:** `run_verifier_bounded` now fails
+  **CLOSED** (rc 125, a clear BLOCKED message) when a cap is requested but no usable `timeout` exists — set
+  `WF_REVIEW_TIMEOUT=0` to disable the cap deliberately.
+
 This satisfies the acceptance criterion two ways: a fresh agent discovers the bounded-wait discipline **at
 point of need** (each waiting surface states the full minimal rule, not just the experiment skill, and not a
 dangling pointer), and the changed surfaces are covered by the repo's existing deterministic checks (version
 bumps on the three touched plugins; disposition-sync stays green since the `DISPOSITIONS` block is untouched;
 `bash -n` on the changed `wf.sh`; the `wf.sh`-triggered `locate_audit`/`identity`/`fd_state` smokes) plus the
-fake-HOME discovery smoke for each touched plugin.
+fake-HOME discovery smoke for each touched plugin. The bounded behavior (deadline→124, fast-completes→0,
+missing-`timeout`-with-cap→125 fail-closed, cap=0→unbounded) was verified directly against the helper.
 
 ## Alternatives considered
 
