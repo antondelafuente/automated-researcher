@@ -71,32 +71,39 @@ above (#54's run-supervision record is the handle's home *and* the resurrection-
 is one coherent extension of #54, not a second parallel lifecycle: durably-launch closer → [closer: clear
 desired-active + kill session] → prune → `closed`.
 
-This makes the attestation split clean and honest. The executor attests only the **pre-kill** half it can —
-the `closing` marker is written and the detached closer was launched as the last Close action — never "I
-watched my own session die." The **post-kill** confirmation (session actually gone, `closed` marker written)
-belongs to the detached closer and to any operator/dispatcher read of the marker afterward. The executor's
-CHECKLIST evidence is therefore "`closing` marker present + closer launched," which matches the close
-self-audit rule (verify state by inspection, not memory) without asking the executor to inspect a process it
-just terminated.
+This makes the attestation split clean and honest. The executor's *audited* attestation (in `CHECKLIST.md`,
+before the close audit) is only **readiness** — it can close its host (handle + generation resolved, finalizer
+armed) — not that it has. The host-close *events* it then performs as its last act (`closing` marker, closer
+launch) and everything the closer does afterward (`desired-active` clear, kill, `closed` marker) are recorded
+in the **control-plane finalizer record**, not a post-session commit. The **post-kill** confirmation (session
+gone, generation-keyed `closed` marker) belongs to the detached closer and to any operator/dispatcher read of
+that record afterward — never "I watched my own session die." This matches the close self-audit rule (verify
+state by inspection, not memory) without asking the executor to commit or inspect anything after its session is
+gone.
 
 **The close ordering — the executor only *launches* the closer; the closer owns `desired-active`-clear + kill
 atomically** (Finding-driven; two real ordering hazards forced this precise sequence). Two constraints pin it.
-First, **there are TWO gates at two altitudes — an audited checklist gate AND a post-audit finalizer gate —
+First, **there are TWO gates at two altitudes — an audited *readiness* gate AND a post-audit *finalizer* gate —
 and they must not be conflated.** `run-experiment`'s contract is "commit `CHECKLIST.md` at close → the
 cross-family close audit verifies it," and that audit runs *before* the self-wake clears, while host-close is
-the *very last* Close action. So the actual *host-closed* fact is unknowable at audit time; forcing it into the
-audited CHECKLIST is circular. The split:
-- **Audited CHECKLIST `[BLOCK]` gate (in the brief, verified by the close audit):** asserts only that host-close
-  was *initiated* — the `closing` marker is written and the detached closer was durably launched. This is fully
-  knowable while the session is alive and *before* the audit, so it sits legitimately inside the existing
-  audited-checklist contract with no change to that contract's meaning.
-- **Post-audit finalizer gate (control-plane, owned by the dispatcher/closer — NOT an audited commit):** the
-  *host-closed* confirmation (session gone, generation-keyed `closed` marker written) happens *after* the audit
-  and *after* the session dies, so it cannot be a CHECKLIST commit the executor makes. It is a finalizer the
-  external closer satisfies and the dispatcher/operator reads from the control-plane record.
+the *very last* Close action *after* the audit. So **nothing about the host-close itself — not even "closer
+launched" — has happened yet when the audit runs**: launching the closer is the action that kills the audited
+session, so it cannot also be audited evidence. Forcing any host-close *event* into the audited CHECKLIST is
+circular. The split therefore divides on the audit boundary:
+- **Audited CHECKLIST `[BLOCK]` gate (in the brief, verified by the close audit):** asserts only **pre-audit
+  readiness** — the `dispatch_host` declaration is resolved, the `dispatch_host_close` handle + generation/run-id
+  are resolved, and the finalizer command is *valid and armed* (or `dispatch_host=none` → N.A.). This is a
+  static fact knowable while the session is alive and *before* the audit, with nothing yet killed — so it sits
+  legitimately inside the existing audited-checklist contract with no change to that contract's meaning. It
+  proves the executor is *ready and able* to close its host, not that it already did.
+- **Post-audit finalizer gate (control-plane, owned by the dispatcher/closer — NOT an audited commit):** *all*
+  the host-close *events* — `closing` marker written, closer durably launched, `desired-active` cleared,
+  session killed, generation-keyed `closed` marker written — happen *after* the audit, as the executor's last
+  act plus the detached closer's work. None is a CHECKLIST commit the executor makes; the external finalizer
+  satisfies them and the dispatcher/operator reads the result from the control-plane record.
 
-So nothing asks the executor to commit-or-audit anything only knowable after its session is gone: the audited
-gate is the pre-kill "initiated" fact; the finalizer is the post-kill "closed" fact, owned outside the brief.
+So nothing asks the executor to commit-or-audit a host-close event: the audited gate is *readiness* (pre-audit,
+nothing killed); the finalizer is the whole *initiated → closed* lifecycle (post-audit, owned outside the brief).
 (This implies a small `run-experiment`/template note distinguishing audited checklist gates from post-audit
 finalizer gates — captured in the product child below.)
 
@@ -169,8 +176,8 @@ records this contract already has it consult — the host-close handle must be *
 executor already reads, not buried instance-side and not passed as tmux seed text** (seed text isn't part of
 the brief+scaffold a zero-context executor is contracted to read, and relying on it reintroduces exactly the
 implicit-context fragility dispatch exists to kill). The handle names: the exact command to run at Close, the
-host-state marker's path and schema, the evidence that proves the close was initiated, and an explicit
-host-presence declaration (the closed `dispatch_host` enum below). The next paragraph fixes *which* record — and it is not the
+host-state marker's path and schema, the readiness evidence the audited gate checks (handle + generation
+resolved, finalizer armed), and an explicit host-presence declaration (the closed `dispatch_host` enum below). The next paragraph fixes *which* record — and it is not the
 frozen brief.
 
 **Who writes the handle, and where — #54's run-supervision record, NOT the reviewed brief** (Finding-driven,
@@ -191,16 +198,17 @@ gate** (shipped by the designer, frozen with the brief, never mutated) whose evi
 run-supervision record at Close. The *contract* (an obligation + a record field) lives in the product; the
 *values* are filled by the dispatcher/substrate into #54's record. And because the CHECKLIST template is the
 scaffold's canonical forcing function for Close gates, the *gate* (not the handle value) is anchored there: a
-universal `[BLOCK]` checklist gate requiring host-closed evidence read from the run-supervision record, so the
-host-close can't be silently skipped the way buried prose gets skipped.
+universal `[BLOCK]` checklist gate requiring **host-close readiness** evidence read from the run-supervision
+record (the post-audit finalizer owns the actual close), so the host-close can't be silently skipped the way
+buried prose gets skipped.
 
 **The gate is capability-gated by a closed `dispatch_host` enum — never substrate-blind, never silently
 skippable by a broken launcher** (Finding-driven). The `[BLOCK]` gate reads a **`dispatch_host` field** the
 substrate's dispatcher records. The field is a **closed enum of exactly two declared values plus the
 absent/unset case** — and absent is *not* silently N.A.:
 - **`persistent`** (carries the `dispatch_host_close` handle) → the substrate declares a persistent dispatch
-  host and supplies the handle → the gate is a real `[BLOCK]`: the executor must run host-close and show the
-  `closing`-marker + closer-launched evidence.
+  host and supplies the handle → the gate is a real `[BLOCK]`: the executor must show **readiness** (handle +
+  generation resolved, finalizer armed) and then, as its post-audit last act, run host-close.
 - **`none`** (carries a required `reason` string) → the substrate explicitly declares *no* persistent dispatch
   host → the gate resolves **N.A.** on that declared reason. The `reason` field is what distinguishes a
   permanent no-host substrate (`reason: "codex thread/watcher exits on its own"`) from a *transitional*
@@ -328,7 +336,8 @@ substrate supplies the *mechanism* and the field's *values*.
   consumes its `close`/`is-desired-active`. On merge #30 spawns `ready` children: (1) the product contract —
   the `run-experiment` Close clause (incl. the **audited-checklist-gate vs post-audit-finalizer-gate**
   distinction), the `design-experiment` dispatch-contract line, the `CHECKLIST`-template static `[BLOCK]`
-  "host-close initiated" gate (evidence read from #54's record), **the extension of #54's record
+  "host-close readiness" gate (evidence read from #54's record; the actual close is the post-audit finalizer),
+  **the extension of #54's record
   schema + helper API + tests with the `dispatch_host` closed-enum (+`reason`) and `dispatch_host_close`
   fields**, **plus the experiment-lifecycle version bump + CHANGELOG entry**; (2) the instance non-destructive `dispatch-claude.sh --host-close <exp>` verb (clear
   `desired-active` via #54's API → write `closing` marker → spawn a deadline-bounded detached closer that kills
