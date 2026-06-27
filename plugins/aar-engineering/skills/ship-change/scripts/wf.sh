@@ -207,11 +207,13 @@ is_claude_verifier_cmd(){
 
 review_audit_env(){  # review_audit_env <author> <constitution>
   local author=$1 constitution=$2
+  # AUDIT_DRY_RUN= : a review must NEVER run in dry-run (it would exit 0 without writing findings, and a stale
+  # clean review file could then be reused as the merge verdict — a gate bypass). Clear it unconditionally.
   if [ "$author" = claude ] && is_claude_verifier_cmd "${AUDIT_VERIFIER_CMD:-}"; then
     note "ignoring same-family AUDIT_VERIFIER_CMD for author=claude; using default Codex verifier"
-    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_VERIFIER_CMD= AUDIT_DRY_RUN= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   else
-    printf '%s\0' BASH_ENV= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
+    printf '%s\0' BASH_ENV= AUDIT_DRY_RUN= "AAR_SUBSTRATE=$author" "AUDIT_CONSTITUTION=$constitution"
   fi
 }
 
@@ -1233,9 +1235,14 @@ Split into one design PR per doc."
        # FAIL CLOSED if no trusted reviewer-derived list is recoverable — never fall back to author-only state
        # (that would let a deleted/downgraded disposition bypass the deterministic backstop).
        [ -f "$PRIORREV" ] || die "disposition-aware finish needs a trusted reviewer-derived findings list, but no recent $PK review output is present — run 'wf.sh code-review $WT $AUTHOR' (or design-review) first, then finish."
+       # Detect a TRUE duplicate WITHIN the reviewer-derived list (a hashed-id collision = real ambiguity)
+       # BEFORE any dedup, so `sort -u` below only collapses the legitimate reviewer∩state overlap.
+       REVHIGH=$(fd_review_high_list "$PRIORREV")
+       DUPR=$(printf '%s\n' "$REVHIGH" | grep -v '^$' | sort | uniq -d)
+       [ -z "$DUPR" ] || die "ambiguous reviewer findings — colliding id(s): $(printf '%s ' $DUPR) — cannot disposition unambiguously"
        # UNION of reviewer-derived HIGH ids (trusted; catches a deleted/downgraded disposition) AND the state's
        # own HIGH ids (catches a stale `unresolved` HIGH the current reviewer no longer raises). Either blocks.
-       { fd_review_high_list "$PRIORREV"; fd_high_list "$FD"; } | sort -u > "$FDLIST"
+       { printf '%s\n' "$REVHIGH"; fd_high_list "$FD"; } | grep -v '^$' | sort -u > "$FDLIST"
        ( cd "$WT" && bash "$(dirname "$0")/disposition_gate.sh" "$FD" "$FDLIST" ) \
          || die "disposition structural gate BLOCKED — a reviewer HIGH is unresolved, undispositioned, or malformed in the state. Disposition it (wf.sh fdispo $WT $AUTHOR) and re-run finish." ;;
   esac
