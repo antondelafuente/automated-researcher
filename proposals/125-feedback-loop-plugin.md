@@ -32,11 +32,16 @@ Add a new plugin, `feedback-loop`, with two product skills and one initializer.
 - `plugins/feedback-loop/skills/file-feedback/SKILL.md`
 - `plugins/feedback-loop/skills/triage-feedback/SKILL.md`
 - `plugins/feedback-loop/skills/file-feedback/scripts/feedback_loop_init.sh`
+- `plugins/feedback-loop/skills/triage-feedback/scripts/feedback_loop_init.sh`
 - `plugins/feedback-loop/skills/*/references/DISPOSITIONS.md`
 
 The plugin uses the same Agent Skills layout as the existing modules. README and marketplace docs list it as
 optional but recommended: it is how users report product friction and how maintainers process that friction.
 Codex installs symlink the two skill dirs independently.
+
+`feedback_loop_init.sh` must be discoverable from either skill. The canonical implementation can live in one
+place, but `triage-feedback` must ship an executable wrapper or copy so a maintainer-only install can configure
+`FEEDBACK_PRODUCT_REPO` without also installing `file-feedback`.
 
 ### Local config
 
@@ -49,11 +54,14 @@ The config keys are:
 - `FEEDBACK_PRODUCT_REPO`: required `OWNER/REPO` for product issues.
 - `FEEDBACK_INSTANCE_GOTCHAS_FILE`: optional local gotcha destination for deployment-only incidents.
 - `FEEDBACK_INSTANCE_BACKLOG_FILE`: optional local backlog destination for deployment-only ideas.
-- `FEEDBACK_INSTANCE_GOTCHAS_ARCHIVE`: optional closed gotcha archive.
-- `FEEDBACK_INSTANCE_BACKLOG_ARCHIVE`: optional closed backlog archive.
-- `FEEDBACK_PEER_COORDINATION`: optional free-text pointer to the consuming instance's coordination channel.
-- `FEEDBACK_INSTANCE_CHANGELOG`: optional local changelog pointer.
-- `FEEDBACK_INSTANCE_PIPELINES_DIR`: optional local pipelines/helper pointer.
+- `FEEDBACK_INSTANCE_GOTCHAS_ARCHIVE`: optional closed gotcha archive, used by `triage-feedback` when configured.
+- `FEEDBACK_INSTANCE_BACKLOG_ARCHIVE`: optional closed backlog archive, used by `triage-feedback` when configured.
+- `FEEDBACK_PEER_COORDINATION`: optional free-text pointer to the consuming instance's coordination channel,
+  surfaced before touching files or helpers that may be under live ownership.
+- `FEEDBACK_INSTANCE_CHANGELOG`: optional local changelog pointer, surfaced as the release-note destination for
+  instance-visible changes.
+- `FEEDBACK_INSTANCE_PIPELINES_DIR`: optional local pipelines/helper pointer, used as context when triaging
+  instance gotchas that can become code.
 - `FEEDBACK_ISSUE_COMMAND`: optional issue creation/comment command override.
 
 The initializer always requires `FEEDBACK_PRODUCT_REPO` through an environment preseed or an interactive prompt.
@@ -88,8 +96,10 @@ researcher to submit. It never tells an outside user to call `gh-as-engineer`, n
 and never writes to `/home/anton/...` unless the instance config explicitly points there.
 
 For instance-only file targets, the skill owns only the generic shape: symptom -> cause -> fix/cost for gotchas,
-and what/why/take/next-step for backlog ideas. The exact archive vocabulary and closed-file maintenance remain
-consuming-instance procedure.
+and what/why/take/next-step for backlog ideas. When archive keys are configured, `triage-feedback` may perform
+the generic close-by-move operation: remove the resolved entry from the configured live file and append a
+one-line pointer to the configured archive. The product owns only that generic operation and the marker vocabulary;
+the consuming instance owns which files exist, what local entries mean, and any richer archive policy.
 
 ### `triage-feedback`
 
@@ -104,6 +114,9 @@ ready/needs-design/needs-shaping/blocked/parked/other, group duplicates, and rou
 
 The skill must not run automatically; it is an explicit maintainer pass. It can mention an instance's configured
 coordination channel for live ownership checks, but it cannot require `message-aar` or a `CLAIMED_BY` convention.
+When configured, it should use `FEEDBACK_PEER_COORDINATION`, `FEEDBACK_INSTANCE_PIPELINES_DIR`, and
+`FEEDBACK_INSTANCE_CHANGELOG` as concrete pointers for coordination, code-home inspection, and release notes;
+when unset, it should say the relevant instance key is missing instead of naming Anton paths.
 
 Checklist promotion is split by genericity:
 
@@ -171,9 +184,16 @@ classification, checks, fake-HOME smoke, final review, protected merge. The new 
 installs keep working if they do not install it.
 
 After merge, this deployment must flip the local Claude/Codex wrapper skills to the product source in the same
-work session and keep instance-only file/archive details in `/home/anton` guidance. If that instance flip cannot
-be completed immediately, open a tracked instance follow-up before marking this shipped; do not leave two
-independently-editable live copies as the steady state.
+work session and keep instance-only file/archive details in `/home/anton` guidance. The ordered deployment step is:
+
+1. Run `feedback_loop_init.sh` non-interactively with Anton's real values so `~/.config/feedback-loop/env` exists
+   before any wrapper points at the new product skill.
+2. Flip the local Claude/Codex wrapper skills for `file-feedback` and `triage-feedback` to point at the product
+   plugin source.
+3. Reload or restart live sessions that need the changed skills.
+
+If that instance flip cannot be completed immediately, open a tracked instance follow-up before marking this
+shipped; do not leave two independently-editable live copies as the steady state.
 
 Rollback is a normal revert of the merge commit. Because the plugin is additive and the lifecycle text degrades
 to neutral instance-feedback wording, rollback risk is low.
