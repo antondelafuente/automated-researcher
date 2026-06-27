@@ -406,7 +406,7 @@ $(jq -r 'def s: tostring | gsub("[\r\n]+";" "); .findings[]? | "- [\(.severity /
 $(if [ -n "${FRESH_SWEEP_FILE:-}" ] && [ -r "${FRESH_SWEEP_FILE:-}" ]; then
   printf '\n=== CANDIDATE FRESH-SWEEP FINDINGS (an un-anchored stateless re-read — #140) ===\n'
   printf 'SURFACE any HIGH below that is NOT semantically covered by a valid disposition above — a genuinely new or PRE-EXISTING hole no prior finding named. A candidate that merely RE-STATES an already validly fixed/refuted/deferred finding is NOT new — suppress it. Judge by substance, not wording.\n\n'
-  grep -E '^FINDING |^  issue:' "$FRESH_SWEEP_FILE" 2>/dev/null
+  grep -E '^FINDING |^  issue:' "$FRESH_SWEEP_FILE" 2>/dev/null || true
 fi)
 
 $PROMPT"

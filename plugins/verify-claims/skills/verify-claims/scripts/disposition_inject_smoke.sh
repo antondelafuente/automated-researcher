@@ -63,5 +63,12 @@ assert "$(has "$withfresh" 'CANDIDATE FRESH-SWEEP FINDINGS')"                   
 assert "$(has "$withfresh" 'SENTINEL_SWEEP_HOLE')"                                    with-fresh-candidate-injected
 assert "$([ "$(has "$yes" 'CANDIDATE FRESH-SWEEP')" = 0 ] && echo 1 || echo 0)"       no-fresh-no-section
 
+# a ZERO-finding sweep must not crash prompt assembly (the candidate grep returns 1 on no FINDING lines).
+printf 'NO-FINDING AREAS: all\nSUMMARY: high=0 med=0 low=0\n' > "$TMP/sweep0.md"
+zf=$(BASH_ENV= AUDIT_VERIFIER_CMD= AAR_SUBSTRATE=claude AUDIT_DRY_RUN=1 AUDIT_CONSTITUTION="$ROOT/AGENTS.md" \
+  DISPOSITION_FILE="$TMP/d.json" FRESH_SWEEP_FILE="$TMP/sweep0.md" bash "$A" --code "$TMP/x.diff" "$ROOT" "$TMP/out" 2>/dev/null); zrc=$?
+assert "$([ "$zrc" = 0 ] && echo 1 || echo 0)"                                       zero-finding-sweep-no-crash
+assert "$(has "$zf" 'CANDIDATE FRESH-SWEEP FINDINGS')"                                zero-finding-sweep-header-present
+
 if [ "$fails" -eq 0 ]; then echo "disposition_inject_smoke: ALL PASS"; else echo "disposition_inject_smoke: FAILURES"; fi
 exit "$fails"

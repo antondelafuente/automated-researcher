@@ -482,14 +482,21 @@ fresh_sweep(){  # fresh_sweep <wt> <author> <mode> <target> <pr>  -> echoes the 
   if ! env "${audit_env[@]}" bash "$audit" "$mode" "$target" "$wt" "$rev" >/dev/null 2>"$rev.run.log"; then
     note "WARN: fresh-eyes sweep failed — proceeding (the disposition-aware gate still runs)"; return 0
   fi
-  require_valid_review "$rev" || { note "WARN: fresh-eyes sweep produced no parseable output — skipping"; rm -f "$rev"; return 0; }
+  # NON-fatal validity check (NOT require_valid_review, which dies — the skip must be reachable).
+  grep -qE '^SUMMARY: high=[0-9]+ med=[0-9]+ low=[0-9]+' "$rev" 2>/dev/null \
+    || { note "WARN: fresh-eyes sweep produced no parseable output — skipping"; rm -f "$rev"; return 0; }
   local h m l; h=$(count_high "$rev"); m=$(count_med "$rev"); l=$(count_low "$rev")
   note "fresh-eyes sweep: $h HIGH / $m MED / $l LOW candidate(s) -> $rev"
   if [ -n "$pr" ]; then
-    local repo rtok body; repo=$(gh_repo "$wt"); rtok=$(reviewer_token "$author" 0)
-    body=$( { printf '## Fresh-eyes sweep — un-anchored stateless read (CANDIDATE findings; NON-gating; do NOT `fdispo seed` these)\n\nThese are an amnesiac full re-read to catch a pre-existing hole. They are NOT a verdict and NOT auto-seeded; the disposition-aware merge review semantically adjudicates them, and only its residual findings are dispositioned.\n\n'; markdown_code_details "Sweep candidates ($h HIGH/$m MED/$l LOW)" "$(cat "$rev")"; } )
-    printf '%s' "$body" | gh_author "$rtok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
-      || note "WARN: could not post the fresh-eyes sweep comment (non-fatal)"
+    local repo rtok; repo=$(gh_repo "$wt"); rtok=$(reviewer_token "$author" 0)
+    if [ -z "$rtok" ] && ! ambient_identity_allowed; then
+      note "fresh-eyes sweep: no reviewer engineer identity — skipping the (non-gating) PR comment"
+    else
+      local body
+      body=$( { printf '## Fresh-eyes sweep — un-anchored stateless read (CANDIDATE findings; NON-gating; do NOT `fdispo seed` these)\n\nThese are an amnesiac full re-read to catch a pre-existing hole. They are NOT a verdict and NOT auto-seeded; the disposition-aware merge review semantically adjudicates them, and only its residual findings are dispositioned.\n\n'; markdown_code_details "Sweep candidates ($h HIGH/$m MED/$l LOW)" "$(cat "$rev")"; } )
+      printf '%s' "$body" | gh_author "$rtok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1 \
+        || note "WARN: could not post the fresh-eyes sweep comment (non-fatal)"
+    fi
   fi
   printf '%s\n' "$rev"
 }
