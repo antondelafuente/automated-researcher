@@ -137,6 +137,17 @@ mc3="$TMP/mc3.json"; echo '{"findings":[{"id":"x","severity":"HIGH","status":"fi
 fd_merge_canonical_round "$mc3" "$(canon_body '{"round":3,"last_reviewed_sha":"SHA3"}')"
 [ "$(fd_round "$mc3")" = 3 ] && ok merge-restores-dropped-round || no "merge-restores-dropped-round ($(fd_round "$mc3"))"
 [ "$(jq -r '.findings[0].id' "$mc3")" = "x" ] && ok merge-preserves-findings || no "merge-preserves-findings"
+# EQUAL rounds: an author save whose cache dropped last_reviewed_sha must NOT publish a same-round comment
+# without the SHA — canonical metadata is preserved on `>=` (else a later bare retry misses the short-circuit).
+mc5="$TMP/mc5.json"; echo '{"round":4,"findings":[{"id":"y","severity":"MED","status":"refuted"}]}' > "$mc5"
+fd_merge_canonical_round "$mc5" "$(canon_body '{"round":4,"last_review_fingerprint":"FPEQ","last_reviewed_sha":"SHAEQ"}')"
+[ "$(fd_round "$mc5")" = 4 ] && ok merge-equal-keeps-round || no "merge-equal-keeps-round ($(fd_round "$mc5"))"
+[ "$(fd_last_reviewed_sha "$mc5")" = "SHAEQ" ] && ok merge-equal-restores-sha || no "merge-equal-restores-sha ($(fd_last_reviewed_sha "$mc5"))"
+[ "$(jq -r '.findings[0].id' "$mc5")" = "y" ] && ok merge-equal-preserves-findings || no "merge-equal-preserves-findings"
+# both rounds zero (the normal no-backstop save) -> no-op, no spurious empty metadata written.
+mc0="$TMP/mc0.json"; echo '{"findings":[]}' > "$mc0"
+fd_merge_canonical_round "$mc0" "$(canon_body '{"round":0}')"
+[ "$(jq 'has("last_reviewed_sha")' "$mc0")" = false ] && ok merge-zero-no-spurious-meta || no "merge-zero-no-spurious-meta"
 # no/empty/unparseable canonical -> no-op, local untouched.
 mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
 fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
