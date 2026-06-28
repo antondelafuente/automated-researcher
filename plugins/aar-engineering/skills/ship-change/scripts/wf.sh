@@ -664,7 +664,9 @@ fd_load(){  # fd_load <wt> <repo> <pr> <tok> -> echoes cache path (canonical PR 
 # always STRICTLY increments — so on equal rounds canonical is always at least as authoritative, and finish's
 # own advancing save still wins (its local round is strictly greater => this branch is skipped => local wins).
 # Args: <cache> <canonical-comment-body>. No-op on empty/unparseable canonical (best-effort; finish's advancing
-# save is independently fail-closed and the gate re-derives findings from GitHub regardless).
+# save is independently fail-closed and the gate re-derives findings from GitHub regardless). RETURNS nonzero
+# ONLY when an adoption WAS required (canonical >= local) but the cache write FAILED — so fd_save aborts before
+# posting a stale lower round. A no-op (no canonical / lower canonical / unparseable) returns 0.
 fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   local cache=$1 cbody=$2 cjson cround lround fp sha
   [ -n "$cbody" ] || return 0
@@ -675,10 +677,16 @@ fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
   lround=$(jq -r '(.round // 0)' "$cache" 2>/dev/null); case "$lround" in ''|*[!0-9]*) lround=0 ;; esac
   if [ "$cround" -ge "$lround" ] 2>/dev/null && [ "$cround" -gt 0 ] 2>/dev/null; then
     fp=$(printf '%s' "$cjson" | jq -r '.fp'); sha=$(printf '%s' "$cjson" | jq -r '.sha')
-    jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
-      '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
-      && mv "$cache.tmp" "$cache" || { rm -f "$cache.tmp" 2>/dev/null || true; }
+    # The adoption is REQUIRED (canonical is at least as advanced) — if we can't write it, signal failure so
+    # fd_save aborts rather than publish the stale lower local round (which would regress the monotonic counter).
+    if jq --argjson r "$cround" --arg fp "$fp" --arg sha "$sha" \
+        '.round=$r | .last_review_fingerprint=$fp | .last_reviewed_sha=$sha' "$cache" > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"; then :; else
+      rm -f "$cache.tmp" 2>/dev/null || true
+      return 1
+    fi
   fi
+  return 0
 }
 # fd_save posts the local cache as the new canonical comment, after guarding the monotonic counter
 # (fd_merge_canonical_round). The canonical read is REQUIRED, not best-effort: if it FAILS (GitHub error) we
@@ -686,14 +694,15 @@ fd_merge_canonical_round(){  # fd_merge_canonical_round <cache> <canonical-body>
 # overwriting a higher canonical counter with a stale local cache. A clean read that finds NO canonical comment
 # yet (empty body) is a legitimate first save and proceeds. The local cache's `round` is also validated at save
 # time (not only on finish's load) so a hand-edited `fdispo save` can never PUBLISH a malformed counter. RETURNS:
-# gh post rc on a real post; 3 if the required canonical read failed; 4 if the local round is malformed.
+# gh post rc on a real post; 3 if the required canonical read failed; 4 if the local round is malformed; 5 if a
+# required higher-canonical round adoption could not be written.
 fd_save(){  # fd_save <wt> <repo> <pr> <tok>
   local wt=$1 repo=$2 pr=$3 tok=$4 cache cbody rrc=0; cache=$(fd_cache "$wt")
   fd_round_valid "$cache" || return 4   # never publish a malformed round (back-compat absent/null still ok)
   cbody=$(gh_author "$tok" -R "$repo" pr view "$pr" --json comments \
     --jq "[.comments[]|select(.body|contains(\"$FD_MARKER\"))|.body]|last // empty" 2>/dev/null) || rrc=$?
   [ "$rrc" = 0 ] || return 3   # canonical read failed -> cannot guarantee monotonicity -> fail closed, do NOT post
-  fd_merge_canonical_round "$cache" "$cbody"
+  fd_merge_canonical_round "$cache" "$cbody" || return 5   # required round adoption couldn't be written -> fail closed
   printf '%s\n\n## Finding dispositions — disposition-aware merge gate (canonical, latest)\n\n```json\n%s\n```\n' \
     "$FD_MARKER" "$(cat "$cache")" | gh_author "$tok" -R "$repo" pr comment "$pr" --body-file - >/dev/null 2>&1
 }

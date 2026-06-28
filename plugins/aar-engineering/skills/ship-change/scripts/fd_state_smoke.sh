@@ -148,6 +148,14 @@ fd_merge_canonical_round "$mc5" "$(canon_body '{"round":4,"last_review_fingerpri
 mc0="$TMP/mc0.json"; echo '{"findings":[]}' > "$mc0"
 fd_merge_canonical_round "$mc0" "$(canon_body '{"round":0}')"
 [ "$(jq 'has("last_reviewed_sha")' "$mc0")" = false ] && ok merge-zero-no-spurious-meta || no "merge-zero-no-spurious-meta"
+# a REQUIRED adoption (canonical >= local) whose cache write FAILS -> rc nonzero (so fd_save aborts before
+# posting the stale lower round). Simulate with an unwritable cache dir.
+mdir="$TMP/m_unwritable"; mkdir -p "$mdir"; echo '{"round":1,"findings":[]}' > "$mdir/c.json"; chmod 555 "$mdir"
+if fd_merge_canonical_round "$mdir/c.json" "$(canon_body '{"round":9,"last_reviewed_sha":"SHA9"}')" 2>/dev/null; then no "merge-required-write-fail-rc"; else ok merge-required-write-fail-rc; fi
+chmod 755 "$mdir"
+# a NO-OP (lower canonical) returns 0 even though no write happens.
+mok="$TMP/mok.json"; echo '{"round":5,"findings":[]}' > "$mok"
+fd_merge_canonical_round "$mok" "$(canon_body '{"round":2}')" && ok merge-noop-rc0 || no "merge-noop-rc0"
 # no/empty/unparseable canonical -> no-op, local untouched.
 mc4="$TMP/mc4.json"; echo '{"round":2,"findings":[]}' > "$mc4"
 fd_merge_canonical_round "$mc4" ""; [ "$(fd_round "$mc4")" = 2 ] && ok merge-empty-canonical-noop || no "merge-empty-canonical-noop ($(fd_round "$mc4"))"
