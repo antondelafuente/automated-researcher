@@ -1323,10 +1323,14 @@ readonly_probe_one_push_url(){
   # ONLY the read-only shim, which forwards `get` to the snapshotted helpers but no-ops store/erase. The repo's
   # OWN tmp config carries the shim + ssh/hooks settings via -c, which survive the global/system isolation.
   rc=0
+  # FULL config isolation: global+system+NOSYSTEM AND GIT_CONFIG_COUNT=0 so inherited env-injected config
+  # (GIT_CONFIG_KEY_n/VALUE_n) can't add a credential helper alongside the shim and run store/erase (#166 r18).
+  # Reset the helper chain (-c credential.helper=) BEFORE installing ONLY the read-only shim, so nothing else
+  # handles store/erase for this push.
   GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true SSH_ASKPASS=/bin/true \
-        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
         timeout "$to" git -C "$tmp" -c core.askPass= -c core.hooksPath=/dev/null \
-        -c "credential.helper=$shim" \
+        -c credential.helper= -c "credential.helper=$shim" \
         -c core.sshCommand="ssh -o BatchMode=yes -o ConnectTimeout=$to" \
         push --dry-run --no-verify "$url" "HEAD:refs/heads/wf-doctor-readonly-probe-$$" >/dev/null 2>&1 || rc=$?
   rm -rf "$tmp"

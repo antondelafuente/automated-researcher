@@ -500,6 +500,41 @@ if echo "$RO_OUT" | grep -q 'not a GitHub remote'; then
 else
   fail "F2 r12: non-GitHub origin not flagged/skipped"
 fi
+
+# F1 r18 (behavioral): an ENV-INJECTED credential helper (GIT_CONFIG_COUNT/KEY/VALUE) must be neutralized by
+# the probe's full isolation (GIT_CONFIG_COUNT=0 + helper reset + shim) — a real `git push --dry-run` under
+# that env must NOT invoke the env helper's store/erase. Mirror the r9 approach against a non-resolving host.
+ENVLOG="$TMP/envcfg-ops.log"; : > "$ENVLOG"
+ENVHELPER="$TMP/envhelper.sh"
+cat > "$ENVHELPER" <<EOF
+#!/bin/bash
+echo "ENVCFG_OP: \$1" >> "$ENVLOG"
+[ "\$1" = get ] && printf 'username=x\npassword=SECRET\n'
+exit 0
+EOF
+chmod +x "$ENVHELPER"
+R18TMP=$(mktemp -d); "$REAL_GIT" -C "$R18TMP" init -q
+"$REAL_GIT" -C "$R18TMP" -c user.name=t -c user.email=t@t commit -q --allow-empty -m x
+R18SHIM="$TMP/r18-shim.sh"
+cat > "$R18SHIM" <<EOF
+#!/bin/bash
+op=\$1; if [ "\$op" != get ]; then cat >/dev/null 2>&1 || true; exit 0; fi
+cat >/dev/null 2>&1 || true; printf '\n'
+EOF
+chmod +x "$R18SHIM"
+# run the probe-equivalent push WITH an env-injected helper present, but UNDER the full isolation the probe uses
+GIT_TERMINAL_PROMPT=0 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 \
+  GIT_CONFIG_KEY_0="credential.helper" GIT_CONFIG_VALUE_0="$ENVHELPER" \
+  timeout 15 "$REAL_GIT" -C "$R18TMP" -c credential.helper= -c "credential.helper=$R18SHIM" \
+  -c core.sshCommand='ssh -o BatchMode=yes -o ConnectTimeout=3' \
+  push --dry-run --no-verify "https://nonresolve.invalid/o/r.git" HEAD:refs/heads/probe >/dev/null 2>&1
+# NOTE: GIT_CONFIG_COUNT=0 makes git IGNORE the GIT_CONFIG_KEY_0/VALUE_0 pair -> the env helper must never run.
+if ! grep -qE 'ENVCFG_OP' "$ENVLOG"; then
+  pass "F1 r18: env-injected helper (GIT_CONFIG_COUNT=0) neutralized — never invoked (no store/erase)"
+else
+  fail "F1 r18: env-injected helper still ran (ops: $(tr '\n' ' ' < "$ENVLOG"))"
+fi
+rm -rf "$R18TMP"
 # behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
 CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
 LOGHELPER="$TMP/loghelper.sh"
