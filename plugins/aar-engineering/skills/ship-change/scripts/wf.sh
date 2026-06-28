@@ -1043,10 +1043,19 @@ doctor_token(){  # doctor_token <family> <repo> <label>; returns 0 ok, 1 missing
   if [ -z "$tok" ]; then
     echo "  $label token: missing ($(engineer_token_seam "$fam"))"; return 1
   fi
-  if full=$(GH_TOKEN="$tok" real_gh api "repos/$repo" --jq .full_name 2>/dev/null); then
+  # NEVER send a URL-shaped / credential-bearing value into `gh api repos/<repo>` — it would leak userinfo into
+  # the API request + child argv (#166 code-review F1 r18f). Use a CLEAN owner/repo slug only: the value as-is
+  # if it's already clean, else a slug derived from a GitHub URL; otherwise skip the API access check.
+  local apirepo=""
+  if is_clean_repo_slug "$repo"; then apirepo=$repo
+  elif is_github_remote_url "$repo"; then apirepo=$(github_repo_slug "$repo"); fi
+  if [ -z "$apirepo" ]; then
+    echo "  $label token: minted (skipped repo-access check — target is not a bare owner/repo: $(redact_userinfo "$repo"))"; return 0
+  fi
+  if full=$(GH_TOKEN="$tok" real_gh api "repos/$apirepo" --jq .full_name 2>/dev/null); then
     echo "  $label token: ok (repo access=$full)"; return 0
   fi
-  echo "  $label token: minted but cannot access $(redact_userinfo "$repo")"; return 2
+  echo "  $label token: minted but cannot access $apirepo"; return 2
 }
 
 doctor_git_author(){  # doctor_git_author <author>; returns 0 ok, 1 missing, 2 invalid
@@ -1331,9 +1340,12 @@ readonly_probe_one_push_url(){
       case "$sshauth" in *:*) sshport=":${sshauth#*:}"; sshauth=${sshauth%%:*} ;; esac
       if [ -n "$sshpath" ]; then push_url="ssh://${ssh_user}@${sshauth}${sshport}/${sshpath}"; else push_url="ssh://${ssh_user}@${sshauth}${sshport}/"; fi ;;
     *@*:*)
-      # scp-style [user[:secret]@]host:path -> <user>@host:path (keep user, drop any :secret).
-      ssh_user=${url%@*}; ssh_user=${ssh_user%%:*}; [ -n "$ssh_user" ] || ssh_user=git
-      push_url="${ssh_user}@${parsed_host}:${url#*:}" ;;
+      # scp-style [user[:secret]@]host:path -> <user>@host:path (keep user, drop ALL userinfo incl. any secret).
+      # Rebuild from the host AFTER the userinfo `@`, never from `${url#*:}` (which keeps `secret@host:` when the
+      # userinfo carries a password — #166 code-review F2 r18f).
+      ssh_user=${url%%@*}; ssh_user=${ssh_user%%:*}; [ -n "$ssh_user" ] || ssh_user=git
+      local scp_hostpath=${url##*@}                       # host:path (userinfo dropped)
+      push_url="${ssh_user}@${scp_hostpath}" ;;
     *:*)
       # bare scp-style host:path with NO user -> add the required `git@`.
       push_url="git@${url}" ;;

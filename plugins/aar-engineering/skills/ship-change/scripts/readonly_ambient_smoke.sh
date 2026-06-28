@@ -521,7 +521,7 @@ else
 fi
 
 # F1/F2 r18c: an SSH/scp credential-bearing GitHub origin must ALSO be userinfo-stripped in the push argv.
-for spec in "ssh://git:SSHURLSECRET@github.com/o/r.git:SSHURLSECRET" "git@github.com:o/r.git:n/a"; do
+for spec in "ssh://git:SSHURLSECRET@github.com/o/r.git:SSHURLSECRET" "git@github.com:o/r.git:n/a" "git:SCPSECRET@github.com:o/r.git:SCPSECRET"; do
   ourl=${spec%:*}; tok=${spec##*:}
   WTx="$TMP/wt-ssh-$RANDOM"; mkdir -p "$WTx"
   "$REAL_GIT" -C "$WTx" init -q
@@ -542,11 +542,14 @@ for spec in "ssh://git:SSHURLSECRET@github.com/o/r.git:SSHURLSECRET" "git@github
   fi
 done
 
-# F3 r18c (structural): doctor_token's 'cannot access' failure message redacts userinfo in the repo value.
-if grep -q 'cannot access \$(redact_userinfo "\$repo")' "$WF"; then
-  pass "F3 r18c: doctor_token redacts userinfo in its repo-access failure message"
+# F3 r18c/r18f (structural): doctor_token never sends a URL-shaped target to `gh api` — it uses a clean slug
+# only (derived if needed) and redacts userinfo in the skip message; it never prints/sends a raw tokenized repo.
+if grep -q 'is_clean_repo_slug "$repo"; then apirepo=$repo' "$WF" \
+   && grep -q 'gh api "repos/$apirepo"' "$WF" \
+   && grep -q 'target is not a bare owner/repo: $(redact_userinfo "$repo")' "$WF"; then
+  pass "F3 r18f: doctor_token uses a clean slug for gh api + redacts userinfo (no token in API call/output)"
 else
-  fail "F3 r18c: doctor_token still prints a raw (possibly tokenized) repo value"
+  fail "F3 r18f: doctor_token may still send/print a raw URL-shaped repo"
 fi
 
 # F1 r18e: a worktree with an HTTPS GitHub origin must STILL probe the synthesized SSH surface — so an ambient
