@@ -72,6 +72,19 @@ instance's values; `validate` checks it against the schema (required fields pres
 named: the module owns its config file's creation and validation, the same pattern `~/.config/<module>/`
 already implies for the engineer Apps' keys.
 
+**Helper packaging contract.** `experiment-lifecycle` exposes **two independently-installed skills**
+(`design-experiment`, `run-experiment`), and the README/CI rule is that skills are symlinked per-skill
+(`skills/<skill>`, not `skills/<module>`), so a module-level helper has no single install-resolvable home —
+exactly the situation `feedback-loop` already faced. This design **follows the feedback-loop precedent**: the
+init/validate + discovery/snapshot helper is **packaged in both skill dirs** (each skill references it
+relative to itself, so either skill resolves it when installed alone), with the **deterministic drift check
+in `.aar-ci/checks.sh`** (the same check that already guards feedback-loop's duplicated init helper) asserting
+the two copies are byte-identical. The alternative — a separate shared runtime skill/plugin — is heavier than
+this single shared file warrants and is what #150's shared-helper child exists to evaluate for the *GitHub
+mutation* primitives; the *profile discovery* helper is small and read-only, so the per-skill-copy + drift-
+check packaging is the right weight. (Specifying this is per design-review FINDING 1: the packaging contract
+is fixed here, before implementation, not left to the child.)
+
 **Format: TOML, plus stdlib JSON.** TOML is the recommended authoring format — unambiguous (no YAML
 indentation/`norway` foot-guns), comment-friendly, stdlib-parseable (Python `tomllib`). The discovery rule
 also accepts `.json` (stdlib `json`, zero extra dependency) for an instance that prefers it; **YAML is not
@@ -319,9 +332,10 @@ fact, declared once, here).
   `~/.config/experiment-lifecycle/aar-profile.toml` with its `research-lab` slug, `run/` prefix, and
   research-identity seam names — instance content, never shipped in the product.
 - **Cluster coupling:** this is a **prerequisite** that *unblocks* #156 and #157 (both list #153 in their
-  `blocked-by`). It is **adjacent** to #146 (provides `private`), #154 (provides `require_cross_family`),
-  #150 (declares the identity seams it consumes), #155 (provides repo+prefix), and #145 (provides the
-  snapshot hash). It **contradicts no sibling**: it declares, others enforce.
+  `blocked-by`). It is **adjacent** to #146 (provides `private`), #154 (consumes **no** profile field —
+  cross-family is a product invariant, decision 3a), #150 (declares the identity seams it consumes), #155
+  (provides repo+prefix), and #145 (provides the snapshot hash). It **contradicts no sibling**: it declares,
+  others enforce.
 - **No runtime behavior ships in this PR** — doc-only design. The only thing that "breaks" if mis-specified
   is the children built on it, which is why it is reviewed first.
 
