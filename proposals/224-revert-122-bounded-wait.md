@@ -20,9 +20,11 @@ drained the 5-hour quota. **It worked fine before #122** — the ~12-min heartbe
 **Revert `cef1342` in full** (a `git revert`, conflicts resolved against intervening PRs):
 
 - Remove the bounded-wait rule prose from AGENTS.md + run-experiment + ship-change SKILL/RUNBOOK +
-  verify-claims. The executor returns to the pre-#122 model: arm self-wake → end turn → sleep → wake on
-  deadline/done. The *older* (pre-#122) self-wake / controller-supervised / look-again-deadline content —
-  present when it worked — is preserved.
+  verify-claims. This restores the **pre-#122 behavior** (the ~12-min heartbeat that worked) by removing
+  the continuous-verify pressure. The older until-loop / controller-supervised / look-again-deadline prose
+  *predates* #122 and is left as-is — so this revert does not by itself fully clean the
+  autonomous-vs-controller-supervised wait contract; that cleaner split and the Codex cheap-wait are
+  **#223**, not this revert.
 - Remove the `WF_REVIEW_TIMEOUT` / `run_verifier_bounded` cap from `wf.sh`. **It's dead code:** `wf.sh`
   only ever runs under an agent, whose own Bash-tool timeout (≤10 min) is *shorter* than the 20-min cap —
   so the agent always catches a hung reviewer first; nothing reaches the cap. (A human runs it

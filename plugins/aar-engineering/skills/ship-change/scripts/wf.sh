@@ -1209,7 +1209,7 @@ readonly_advisory_probe(){
   # marker so the guard (if installed) passes this internal call through. CAPTURE the -i output FIRST with its
   # own `|| true` so a non-2xx gh exit (403/404 -> nonzero) does NOT blank the status under `set -o pipefail`
   # (#166 code-review F4) — then parse the HTTP status line. BOUND with `timeout` so a stalled `gh api` can't
-  # hang doctor (#166 code-review F1 r12 / AGENTS.md bounded background waits); a timeout -> inconclusive.
+  # hang doctor (#166 code-review F1 r12); a timeout -> inconclusive.
   out=$(printf '{}' | timeout "$to" env GH_TOKEN="$tok" WF_GH_INTERNAL=1 gh api -X PATCH "repos/$repo" --input - -i 2>/dev/null || true)
   code=$(printf '%s\n' "$out" | awk 'toupper($1) ~ /^HTTP/ {print $2; exit}')
   case "$code" in
@@ -1362,7 +1362,7 @@ readonly_probe_one_push_url(){
   chmod +x "$shim"
   # Disable every interactive/ambient-helper PROMPT but keep the AMBIENT credential surface reachable for `get`
   # via the read-only shim — that is exactly what we must catch, WITHOUT the store/erase mutation. Bound with
-  # `timeout` so a DNS/network/helper stall can never hang doctor (#166 F2 / AGENTS.md bounded background waits).
+  # `timeout` so a DNS/network/helper stall can never hang doctor (#166 F2).
   # ISOLATE git config (GIT_CONFIG_GLOBAL/SYSTEM -> /dev/null + NOSYSTEM=1) so NO inherited helper — unscoped OR
   # URL-scoped (credential.https://github.com.helper) — runs and writes the store (#166 F1 r9); then install
   # ONLY the read-only shim, which forwards `get` to the snapshotted helpers but no-ops store/erase. The repo's
