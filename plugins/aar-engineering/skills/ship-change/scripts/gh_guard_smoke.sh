@@ -87,7 +87,7 @@ if ! guard pr merge 1 --squash >/dev/null 2>&1; then pass "bare 'pr merge' block
 if ! guard issue close 1 >/dev/null 2>&1; then pass "bare 'issue close' blocked"; else fail "bare 'issue close' should be blocked"; fi
 
 # 2g. mixed read/write families: mutating verbs redirected, reads pass (review HIGH)
-for w in "repo delete o/r" "repo create x" "release delete v1" "secret set FOO" "variable set BAR" "repo edit o/r" "workflow run deploy.yml" "run rerun 5" "run cancel 5"; do
+for w in "repo delete o/r" "repo create x" "release delete v1" "secret set FOO" "variable set BAR" "repo edit o/r" "workflow run deploy.yml" "run rerun 5" "run cancel 5" "repo deploy-key add k.pub" "project item-add 1" "project item-delete 1"; do
   : > "$FAKE_GH_LOG"
   if ! guard $w >/dev/null 2>&1 && ! grep -q FAKE_GH_CALLED "$FAKE_GH_LOG"; then pass "'gh $w' blocked (mutating)"; else fail "'gh $w' should be blocked"; fi
 done

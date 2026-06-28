@@ -121,9 +121,32 @@ esac
 is_mutating_verb(){
   case "$1" in
     create|delete|remove|rm|edit|set|rename|archive|unarchive|fork|sync|transfer|\
-    upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|run|lock|unlock|pin|unpin) return 0 ;;
+    upload|enable|disable|add|clear|import|restore|deploy|cancel|rerun|run|lock|unlock|pin|unpin|\
+    close|reopen|merge|comment|review|ready|develop|copy|move) return 0 ;;
+    # nested/hyphenated write forms: `repo deploy-key add`, `project item-add|item-edit|item-delete|
+    # item-create|field-create|link|unlink|mark-template|copy`, `pr|issue edit`, etc. Catch any token whose
+    # ACTION suffix (after the last '-') is a write verb, plus the standalone link/unlink/mark-* forms.
+    *-add|*-create|*-delete|*-remove|*-edit|*-set|*-rename|*-archive|*-upload|*-enable|*-disable|*-import|\
+    *-restore|*-rerun|*-cancel|item-*|field-*|link|unlink|mark-template|set-default) return 0 ;;
     *) return 1 ;;
   esac
+}
+# has_mutating_positional: scan EVERY positional word (flag/value-skipping) for a mutating verb, so a nested
+# write a few tokens in — `gh repo deploy-key add`, `gh project item-add` — is caught, not just the first
+# verb after the family (#165 review). Sets nothing; returns 0 if any positional word is a mutating verb.
+has_mutating_positional(){
+  local start=$1 i n=${#ARGV[@]} tok
+  i=$start
+  while [ "$i" -lt "$n" ]; do
+    tok=${ARGV[$i]}
+    if [ "${tok#-}" != "$tok" ]; then
+      if is_value_flag "$tok"; then i=$((i+2)); continue; fi
+      i=$((i+1)); continue
+    fi
+    if is_mutating_verb "$tok"; then return 0; fi
+    i=$((i+1))
+  done
+  return 1
 }
 
 case "$sub" in
@@ -135,9 +158,10 @@ case "$sub" in
   # ---- mixed read/write families: pass reads, redirect obvious mutating verbs (#165 review HIGH) ----
   repo|release|secret|variable|ruleset|workflow|run|cache|gist|label|environment|codespace|org|extension)
     # `run` has no plain create but `gh run rerun|cancel|delete` mutate; `workflow run|enable|disable` mutate;
-    # `gh repo create|delete|edit|rename|archive|fork|sync`, `gh release create|delete|edit|upload`,
-    # `gh secret set|delete`, etc. are caught by is_mutating_verb. Reads (view/list/download/clone) pass.
-    if is_mutating_verb "$verb"; then guard_die "$sub $safe_verb"; fi
+    # `gh repo create|delete|edit|rename|archive|fork|sync`, `gh repo deploy-key add`, `gh release
+    # create|delete|edit|upload`, `gh secret set|delete`, etc. Scan ALL positional words (not just the first
+    # verb) so a NESTED write is caught. Reads (view/list/download/clone) pass.
+    if has_mutating_positional $((sub_idx+1)); then guard_die "$sub $safe_verb"; fi
     exec_real_gh "$@"
     ;;
 
@@ -205,7 +229,8 @@ case "$sub" in
     # and any future ones): fail SAFE toward the redirect when the verb is an obvious mutating one, otherwise
     # pass through (the capability layer remains the security boundary). This default-safe rule means a new
     # write-capable family is redirected by the ergonomic guard without needing a per-family case (#165 review).
-    if is_mutating_verb "$verb"; then guard_die "$sub $safe_verb"; fi
+    # Scans ALL positional words so nested writes (`gh project item-add`) are caught too.
+    if has_mutating_positional $((sub_idx+1)); then guard_die "$sub $safe_verb"; fi
     exec_real_gh "$@"
     ;;
 esac
