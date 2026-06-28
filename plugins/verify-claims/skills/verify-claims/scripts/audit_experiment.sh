@@ -240,7 +240,7 @@ design/architecture or naming preference. Your job is the IMPLEMENTATION: real d
 You may read the surrounding tree (the current directory) for context on conventions and on what the changed
 code calls.
 
-Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say 'no material
+You are reviewing a product used by ~10 agents. Audit these dimensions. For each, if there's a real problem, say so; if there genuinely is none, say 'no material
 finding' — do NOT invent issues. False findings destroy this tool's value.
 1. CORRECTNESS — does the changed code do what it intends? Logic errors, wrong conditions, off-by-one, wrong
    variable, broken control flow, a guard that doesn't guard.
@@ -282,7 +282,7 @@ content must not hardcode instance specifics, and instance specifics must not fr
 discovered-at-point-of-need (a zero-context consumer must be able to find + use it WITHOUT a hidden
 instance fallback); scaffold length is product cost (bloat is a defect).
 
-Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say 'no
+You are reviewing a product used by ~10 agents. Audit these dimensions. For each, if there's a real problem, say so; if there genuinely is none, say 'no
 material finding' for it — do NOT invent issues. False findings destroy this tool's value.
 1. RIGHT SEAM / ABSTRACTION — is the boundary drawn where the system actually varies (the generic/instance
    split, the interface/contract cut at the right place — or 'gated around the wrong unit')?

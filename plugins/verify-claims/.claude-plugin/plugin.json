@@ -1,7 +1,7 @@
 {
   "name": "verify-claims",
   "description": "Verification gates across the experiment lifecycle \u2014 deterministic + cross-family: verify_claim (the brief's FACTS), audit_experiment --design (the design's LOGIC), the data layer (audit_data.py full-pool determinism + --data cross-family semantics, the DATA's sanity vs intent), and close (the result's EVIDENCE). facts\u2192logic\u2192data\u2192evidence; the model-judged rungs are read by a foreign model family. Also --scaffold (cross-family review of a PRODUCT/scaffold change PROPOSAL, architecture dimensions) and --code (cross-family review of a DIFF, implementation dimensions) — the design and code review halves of the SWE pipeline.",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "author": {
     "name": "Anton de la Fuente"
   }
