@@ -69,11 +69,15 @@ Claude-authored PR into a same-family Claude review.
 
 ## Ambient gh vs workflow identity
 
-It is fine for agent shells to have ordinary `gh` access for reading Issues/PRs or for owner/admin
-maintenance. That credential is not the workflow identity. `wf.sh` protected mutations that name an author
-(`open`, reviews, `comment`, `issue`, `classify`, `finish`) use the family engineer App tokens by default and
-fail closed if those seams are missing. An instance may source a small `gh.env`/`GH_TOKEN` for ambient CLI
-convenience; it must still source the engineer-token env before ship-change workflow writes.
+It is fine — and expected — for agent shells to have ordinary `gh` access for **reading** Issues/PRs. That
+ambient credential is **read-only by construction** (canonical rule + the `WF_READONLY_TOKEN_CMD` seam:
+`AGENTS.md` "The ambient agent GitHub credential MUST be read-only") and is not the workflow identity:
+it can never write. Owner/admin **writes** are NOT ambient — they go through the explicit elevated-owner-token
++ `WF_GH_ALLOW_OWNER_WRITE=1` maintenance path (see escape hatches below), so elevation is deliberate, never
+the silent default. `wf.sh` protected mutations that name an author (`open`, reviews, `comment`, `issue`,
+`classify`, `finish`) use the family engineer App tokens by default and fail closed if those seams are
+missing. An instance may source a small read-only `gh.env`/`GH_TOKEN` for ambient CLI convenience; it must
+still source the engineer-token env before ship-change workflow writes.
 
 `WF_ALLOW_AMBIENT_IDENTITY=1` is the explicit escape hatch for a deliberate permissive workflow run on an
 install without engineer Apps. When used, the driver emits a terminal warning and leaves a best-effort PR/Issue

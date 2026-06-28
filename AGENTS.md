@@ -58,6 +58,21 @@ that builds them).
   `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
   *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
   human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
+- **The ambient agent GitHub credential MUST be read-only — by construction, not by convention.** This is
+  the capability half of the rule above: the credential an agent shell reaches by default (exported
+  `GH_TOKEN`/`GITHUB_TOKEN`, the stored `gh auth` login, and the Git push credential) must be **minted
+  read-only by a controlled minter**, so its read-only scope is authoritative *by construction*, never
+  merely promised. ALL writes go through the engineer token path (`WF_ENGINEER_TOKEN_CMD_*`); a bare `gh`
+  write fails closed. The product seam an instance implements is **`WF_READONLY_TOKEN_CMD`** (prints the
+  ambient read-only token) paired with **`WF_READONLY_TOKEN_INFO_CMD`** (emits the token's
+  machine-verifiable granted permissions), mirroring how the rule above names `WF_ENGINEER_TOKEN_CMD_*`.
+  `wf.sh doctor … --readonly` is the detector: it confirms the ambient credential is authoritatively
+  read-only across the API + git-push surfaces and **FAILS CLOSED on any token whose read-only-ness it
+  cannot authoritatively confirm** (an opaque/unattested token is a failure, not a pass — provenance, not
+  a probe, is the certifier). Owner/admin writes are NOT ambient: they require the explicit two-step
+  elevated-owner-token + `WF_GH_ALLOW_OWNER_WRITE=1` maintenance path (the ship-change RUNBOOK escape
+  hatch), so elevation is a visible, deliberate act, never the silent default. (Design: the #149 design
+  doc; this is its canonical contract home — the ship-change SKILL/RUNBOOK restate it at point of need.)
 - **Bounded background waits — silence is not progress.** Any wait on background or external work (a
   `run_in_background` task, a detached driver, a poll loop, a review/verifier subprocess) MUST have three
   things, or it can hang forever with nothing erroring (orchestrator#2: a `ship-change` review blocked on

@@ -52,9 +52,10 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
   inspect-at-5/suspicious-at-10-minutes thresholds ARE that deadline + liveness check; the merge-gate verifier
   subprocess itself is hard-capped by `wf.sh` (`WF_REVIEW_TIMEOUT`, default 20min — a tripped cap fails CLOSED
   as BLOCKED, never an indefinite park). Canonical rule: `AGENTS.md` "Bounded background waits".
-- **Engineer identities are strict by default for workflow writes.** Ambient `gh` is fine for inspection and
-  owner/admin maintenance, but protected `wf.sh` mutations that name an author use the family engineer bot
-  identities or fail before falling back to the owner account. `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
+- **Engineer identities are strict by default for workflow writes.** Ambient `gh` is read-only — fine for
+  inspection, never for writes (owner/admin writes are NOT ambient; they need the explicit elevated-owner-token
+  + `WF_GH_ALLOW_OWNER_WRITE=1` maintenance path — see RUNBOOK escape hatches). Protected `wf.sh` mutations that
+  name an author use the family engineer bot identities or fail before falling back to the owner account. `WF_ENGINEER_TOKEN_CMD_CLAUDE` /
   `WF_ENGINEER_TOKEN_CMD_CODEX` mint GitHub tokens for those bot identities; `WF_ENGINEER_GIT_AUTHOR_*` gives
   `Name <email>` for strict `open` commits. `WF_REVIEWER_TOKEN_CMD` remains a backward-compatible alias for the
   Codex engineer token when `WF_ENGINEER_TOKEN_CMD_CODEX` is unset. `WF_REQUIRE_ENGINEER_IDENTITY` and
@@ -76,7 +77,8 @@ approval is the human's judgment, recorded, not mechanically blocking. As-built 
 ## The lifecycle (the agent drives; `wf.sh` is the mechanical glue)
 
 You do the JUDGMENT steps (write the design doc, implement, triage findings) BETWEEN these subcommands.
-The ambient agent `gh` credential MUST be **read-only** (`gh auth login` / `GH_TOKEN` for READ access only);
+The ambient agent `gh` credential MUST be **read-only** (`gh auth login` / `GH_TOKEN` for READ access only;
+canonical rule + the product seam: `AGENTS.md` "The ambient agent GitHub credential MUST be read-only");
 all writes go through the configured `WF_ENGINEER_TOKEN_CMD_*` / `WF_ENGINEER_GIT_AUTHOR_*` seams. An instance
 provides its read-only ambient token via `WF_READONLY_TOKEN_CMD` (+ `WF_READONLY_TOKEN_INFO_CMD` for the
 machine-verifiable permissions), and `wf.sh doctor <author> [repo] --readonly` confirms the ambient credential
