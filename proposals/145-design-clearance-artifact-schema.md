@@ -61,23 +61,40 @@ not just author + SHA. So:
   `finding_responses` (e.g. flipping an unanswered HIGH to `justified`) after clearance invalidates the
   attestation and BLOCKs. The actor is committing to *these responses on this brief*, not just "I approve."
 
-**Digests are over a canonical serialization, not raw bytes.** A content digest is only deterministic if
-producer and consumer hash identical bytes, so this schema fixes both *what* is hashed and *how* it is
-serialized:
+**The approver attests a fully-determined pre-approval subdocument — no chicken-and-egg.** The clearance event
+must attest the *content*, but the event is authored *before* the final `CLEARANCE.json` exists. This resolves
+cleanly because what the approver attests is the **`attested_clearance` subdocument**, which is fully
+determined before the event (it is the brief + findings + verdicts; it does **not** contain the approval block).
+Ordering:
 
-- The attested `CLEARANCE.json` digest is `sha256` over a defined **`attested_clearance` subdocument** — the
-  object `{ schema_version, experiment, decision, brief_commit, digest_algorithm, brief_blobs, design_audit,
-  finding_responses }` (i.e. everything *except* the `approval`/`cleared_at` block, which carries the
-  attestation pointer and so cannot be inside what it attests) — serialized as **JCS, RFC 8785** (canonical
-  JSON: UTF-8, sorted keys, no insignificant whitespace, canonical number forms). The clearance event's marker
-  carries the digest of *that* canonical subdocument.
+1. The producer computes the canonical `attested_clearance` subdocument (defined below) from the cleared brief,
+   the structured findings record, and the arbitrated responses.
+2. The producer presents it to the approver — as the canonical bytes (and their digest) embedded in the
+   clearance-comment body, so the approver authorizes exactly those bytes. (A staged `CLEARANCE.draft.json`
+   holding the subdocument is an equivalent implementation; the contract is "the approver sees and attests the
+   exact subdocument.")
+3. The authorized actor posts the clearance event; its marker carries `sha256(attested_clearance)` + the cleared
+   SHA + repo/PR identity.
+4. `design-experiment` writes the final `CLEARANCE.json` = the attested subdocument **plus** the `approval`
+   block (which references that event). Because the approval block is *outside* the attested subdocument, adding
+   it does not change the attested digest — no circularity.
+
+**Digests are over a canonical serialization, not raw bytes**, so producer and consumer hash identical bytes:
+
+- The **`attested_clearance` subdocument** is exactly these fields, no more: `schema_version`, `experiment`,
+  `decision`, `brief_commit`, `brief_files`, `digest_algorithm`, `brief_blobs`, `design_audit`,
+  `finding_responses` — i.e. the whole document **minus** `cleared_at` and the `approval` object (JSON Pointers
+  `/cleared_at` and `/approval`, the attestation-pointer fields, which cannot be inside what they attest).
+  `brief_files` **is** attested (it pins which files are load-bearing). Serialized as **JCS, RFC 8785**
+  (canonical JSON: UTF-8, sorted keys, no insignificant whitespace, canonical number forms); the digest is
+  `sha256` over that byte string.
 - The `findings_record` is likewise serialized as JCS before hashing, so `findings_sha256` and the audit
   event's attested digest are computed over the same canonical bytes.
 
-Defining the exact subdocument + JCS serialization is what makes the attestation implementable; producer and
-consumer run the identical transform. The JSON thus records *pointers and the verdict*; the two external events
-anchor both the **identity** (authorized actor, cleared SHA) **and the content** (findings + responses) — so the
-gate cannot be passed by editing the branch files alone.
+The implementation ships a **producer/consumer test vector** (a fixed subdocument → its JCS bytes → its
+`sha256`) so both sides are proven to compute the identical digest. The JSON thus records *pointers and the
+verdict*; the two external events anchor both the **identity** (authorized actor, cleared SHA) **and the
+content** (brief, findings + responses) — so the gate cannot be passed by editing the branch files alone.
 
 **The clearance event is NOT a merge-satisfying GitHub `APPROVED` review.** #130 decision 2 is explicit: the
 design review gates the *run*, never the merge — only the *close* gate posts the final merge-satisfying native
@@ -113,12 +130,13 @@ form is the safe default precisely because it is structurally incapable of satis
     "cleared_sha": "9f3a1c4e8b2d6a0f5c7e9b1d3f5a7c9e1b3d5f7a"
   },
   "brief_commit": "9f3a1c4e8b2d6a0f5c7e9b1d3f5a7c9e1b3d5f7a",
-  "brief_files": ["DESIGN.md", "START.md", "CHECKLIST.md"],
+  "brief_files": ["DESIGN.md", "START.md", "CHECKLIST.md", "data_audit_manifest.md"],
   "digest_algorithm": "sha256",
   "brief_blobs": {
     "DESIGN.md": "b1946ac9...",
     "START.md": "591785b7...",
-    "CHECKLIST.md#gates": "1d229271..."
+    "CHECKLIST.md#gates": "1d229271...",
+    "data_audit_manifest.md": "84a516841..."
   },
   "design_audit": {
     "audit_ref": "https://github.com/<owner>/<repo>/pull/<n>#pullrequestreview-<id>",
@@ -170,7 +188,7 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** (instance-profile policy, #153) — the executor checks the fetched event's author equals this and is authorized; a designer cannot self-clear by writing a string. |
 | `approval.cleared_sha` | 40-hex SHA | yes | The commit the clearance event names (carried in the comment marker / review SHA). Must equal `brief_commit`. |
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
-| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
+| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus `data_audit_manifest.md` whenever the experiment has one** (it is a load-bearing design artifact — pinned when present; see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
 | `digest_algorithm` | enum (fixed `"sha256"` in v1) | yes | The one digest algorithm for `brief_blobs`/all digests in this schema. Fixed for determinism (#130 F3 fix); a future algorithm is a schema-version bump, not a per-file choice. |
 | `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, and `CHECKLIST.md#gates` (the gate-definition section only — the run-evidence section is excluded so the executor can write it). The integrity anchor the executor compares current content against (brief-integrity rule). |
 | `design_audit.audit_ref` | string (URL) | yes | Pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
@@ -256,6 +274,18 @@ files (#130); `brief_blobs` pins `DESIGN.md` and `START.md` whole plus this gate
 definitions are pinned and drift-checked; run-evidence is not — satisfying both #130 (the brief's gates bound at
 clearance) and the run-mutability reality.
 
+### Data-audit manifest (pinned when present)
+
+The scaffold already treats `data_audit_manifest.md` as a standing **load-bearing design artifact**: it states
+the experiment's data purpose, sources/counts, transformations, invariants, and *what would invalidate the
+experiment* (the `--data` gate's reference). That is design-time content that must not silently drift after
+clearance for the same reason `DESIGN.md` must not — so when an experiment has one, it is a **drift-checked
+unit**, pinned whole in `brief_blobs` and included in the attested subdocument. It is **conditional, fail-closed**:
+not every experiment produces a manifest, so the rule is "if `data_audit_manifest.md` exists at `brief_commit`,
+it MUST be pinned and drift-checked; absence is fine, but a present-but-unpinned manifest BLOCKs" (so a
+load-bearing manifest cannot be quietly omitted from the integrity set). The producer lists it in `brief_files`
+and `brief_blobs` whenever the experiment has one.
+
 ### Path and produce/consume contract
 
 - **Path / home.** `experiments/<exp>/CLEARANCE.json` — the canonical per-experiment dir on the research
@@ -292,9 +322,11 @@ identity and content:
 2. **`decision == "cleared"`.** Any other value (`blocked`, or absent) → BLOCK.
 3. **`experiment`** equals the `experiments/<exp>/` directory name → else BLOCK (mis-filed artifact).
 4. **Brief integrity (the re-clearance trigger) — two-sided, both against `brief_blobs`.** The drift-checked
-   units are `DESIGN.md` whole, `START.md` whole, and the **gate-definition block of `CHECKLIST.md`** (the
-   static gates — *not* the run-evidence section the executor mutates; see "Checklist" above). For each unit the
-   executor performs **both** comparisons, and BLOCKs on either mismatch:
+   units are `DESIGN.md` whole, `START.md` whole, the **gate-definition block of `CHECKLIST.md`** (the static
+   gates — *not* the run-evidence section the executor mutates; see "Checklist" above), and
+   **`data_audit_manifest.md` whole when one exists at `brief_commit`** (the standing data-validity design
+   artifact — see "Data-audit manifest" below). For each unit the executor performs **both** comparisons, and
+   BLOCKs on either mismatch:
    - **(a) `brief_blobs` actually describes the audited commit.** Recompute the unit's digest **from the Git
      tree at `brief_commit`** and require it equals the `brief_blobs` entry. This closes the hole where a
      `brief_blobs` digest is fabricated to match drifted working-tree content while `brief_commit` (the audited
@@ -316,13 +348,13 @@ identity and content:
    requires: it exists and is the declared kind; it is **not** a GitHub `APPROVED` review (a clearance event
    must be structurally non-merge-satisfying — #130 decision 2); its author equals `approval.actor`; `actor` is
    an **authorized approver** per the instance-profile policy (#153); the repo+PR identity in its marker matches
-   this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and the
-   `CLEARANCE.json` digest it attests equals the on-disk digest** (computed over the file with the
-   `approval.event_*`/digest fields excluded). A missing event, an APPROVE-typed event, an unauthorized actor, a
-   wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. The attested digest is `sha256` over the
-   **canonical `attested_clearance` subdocument** (JCS / RFC 8785; the subdocument defined above) — producer and
-   consumer run the identical transform, so the check is deterministic. (The digest attestation is what stops a
-   designer editing `finding_responses` after clearance: the authorized actor committed to *these* responses.)
+   this experiment; the SHA it names equals `approval.cleared_sha == brief_commit`; **and the digest it attests
+   equals `sha256` of the on-disk `attested_clearance` subdocument** (the exact field set defined above —
+   document minus `/cleared_at` and `/approval` — serialized JCS/RFC 8785). A missing event, an APPROVE-typed
+   event, an unauthorized actor, a wrong repo/PR, a SHA mismatch, or a digest mismatch → BLOCK. Producer and
+   consumer run the identical transform (proven by the shipped test vector), so the check is deterministic. (The
+   digest attestation is what stops a designer editing `finding_responses` after clearance: the authorized actor
+   committed to *these* responses.)
 7. **Finding-response completeness, validated against the externally-attested findings record.** The executor
    loads `design_audit.findings_record`, verifies `sha256(findings_record) == findings_sha256` **AND that this
    digest equals the one the posted `--design` audit event attests** (else BLOCK — the findings were edited
@@ -420,6 +452,15 @@ generic "not cleared."
   experiment PR — is **unaffected**: the gate is the new GitHub path's contract, not a retrofit onto every
   existing/in-flight run. So no in-flight local run breaks for lack of a `CLEARANCE.json`. (Making the GitHub
   path the *default* is #130's own staged rollout, not this schema's.)
+- **The shared checklist template change is back-compatible (the one genuinely shared edit).** Adding the
+  `BEGIN/END GATES` markers touches `CHECKLIST_TEMPLATE.md` and `run-experiment`'s evidence-writing, which all
+  runs consume — so it must not break a **markerless** checklist (every existing/in-flight checklist, and the
+  local-handoff contract). Contract: the markers are **additive and optional**; a markerless checklist behaves
+  exactly as today — the executor ticks in place as before, and the GitHub-path drift check simply has no
+  `CHECKLIST.md#gates` unit to pin (a markerless checklist is not gate-drift-checked). The markers are
+  *required only on the GitHub experiment path* (where the gates must be pinned); the local path stays
+  marker-optional with unchanged behavior. So the prior bullet's "local handoff unaffected" holds: the shared
+  template gains an optional structure, it does not change markerless behavior.
 - **Canonical record path:** adds `CLEARANCE.json` + a committed structured `findings_record` to the
   `experiments/<exp>/` layout #130 establishes — event references are pointer-only (`event_ref`/`audit_ref`
   URLs), but the per-finding evidence + findings record are committed content governed by #130's
