@@ -1107,7 +1107,16 @@ install-gh-guard)  # wf.sh install-gh-guard [bindir] [--force] — put the gh wr
   [ -f "$GUARD" ] || die "guard wrapper not found at $GUARD"
   command -v gh >/dev/null || die "no real gh on PATH to guard — install gh first"
   REALGH=$(command -v gh)
-  case "$REALGH" in "$BIND"/gh) die "real gh resolves to $REALGH (inside the install dir) — point install-gh-guard at a DIFFERENT bindir that sits EARLIER on PATH than the real gh";; esac
+  # If `gh` already resolves to $BIND/gh, distinguish two cases: (a) it's ALREADY this guard -> a re-install is
+  # idempotent (fall through to the symlink check below); (b) it's some OTHER gh in $BIND -> reject, since we
+  # can't see the real gh behind it (#165 review F2).
+  if [ "$REALGH" = "$BIND/gh" ]; then
+    if [ -L "$BIND/gh" ] && guard_symlink_matches "$BIND/gh" "$GUARD"; then
+      note "gh write-guard already installed + active at $BIND/gh (idempotent re-install)"
+    else
+      die "real gh resolves to $REALGH (inside the install dir) and is NOT this guard — point install-gh-guard at a DIFFERENT bindir that sits EARLIER on PATH than the real gh"
+    fi
+  fi
   mkdir -p "$BIND" || die "could not create bindir $BIND"
   # Refuse to clobber an EXISTING $BIND/gh that isn't already this guard's symlink (it could be a real gh
   # binary or a different tool the operator put there) — mirror uninstall's safety. --force overrides (#165 review F2).

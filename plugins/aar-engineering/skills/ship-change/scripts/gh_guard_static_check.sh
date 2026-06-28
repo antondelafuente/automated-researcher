@@ -27,8 +27,21 @@ WF="$ROOT/plugins/aar-engineering/skills/ship-change/scripts/wf.sh"
 
 violations=0
 lineno=0
+heredoc_term=""   # when inside a <<EOF heredoc, the terminator we wait for (heredoc bodies are doc text,
+                  # NOT shell — a `gh …` in usage()/PR-body text there is never an invocation, so skip them).
 while IFS= read -r line; do
   lineno=$((lineno+1))
+  # heredoc handling: if we're inside one, skip lines until the terminator; otherwise detect a heredoc start.
+  if [ -n "$heredoc_term" ]; then
+    # terminator is the line (optionally indented for <<-) equal to the captured word.
+    if printf '%s\n' "$line" | grep -Eq "^[[:space:]]*${heredoc_term}[[:space:]]*$"; then heredoc_term=""; fi
+    continue
+  fi
+  # detect `<<EOF` / `<<'EOF'` / `<<-"EOF"` start; capture the (quote-stripped) terminator word.
+  if printf '%s\n' "$line" | grep -Eq '<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*'; then
+    heredoc_term=$(printf '%s\n' "$line" | sed -E "s/.*<<-?[[:space:]]*[\"']?([A-Za-z_][A-Za-z0-9_]*).*/\1/")
+    # the START line itself can still carry a real `gh` before the `<<`, so fall through and scan it too.
+  fi
   # drop full-line comments and trailing comments (cheap; good enough — a `#gh` inside a string is rare and
   # would only cause a FALSE POSITIVE that the author resolves by marking, never a false negative).
   code=${line%%#*}
@@ -45,18 +58,16 @@ while IFS= read -r line; do
     stripped=$(printf '%s\n' "$code" \
       | sed -E 's/real_gh/REAL/g' \
       | sed -E 's/WF_GH_INTERNAL=1[[:space:]]+gh/MARKEDGH/g')
-    if printf '%s\n' "$stripped" | grep -Eq '(^|[|&;({`]|[[:space:]])gh[[:space:]]'; then
-      # exclude obvious non-invocation tokens that survived: `gh auth login` IN A STRING/MESSAGE, `command -v gh`,
-      # `gh not on PATH`, the help text. Heuristic exclusions for known-safe non-invocation mentions:
-      case "$stripped" in
-        *"command -v gh"*) continue ;;
-      esac
-      # If the remaining `gh ` is immediately followed by a known SUBCOMMAND or a flag, treat as an invocation.
-      if printf '%s\n' "$stripped" | grep -Eq '(^|[|&;({`]|[[:space:]])gh[[:space:]]+(-|api|pr|issue|auth|repo|search|run|release|browse|alias|status|view|list)'; then
-        echo "VIOLATION wf.sh:$lineno: unmarked internal gh call — route through real_gh/gh_author or set WF_GH_INTERNAL=1" >&2
-        echo "    $line" >&2
-        violations=$((violations+1))
-      fi
+    # remove the KNOWN non-invocation form `command -v gh` (a PATH probe, not a call) so it doesn't false-flag.
+    probe_stripped=$(printf '%s\n' "$stripped" | sed -E 's/command -v gh//g')
+    # SOUND gate (review F1): ANY remaining token-position `gh ` is a violation — we do NOT gate on a
+    # hardcoded subcommand allowlist (a future `gh project|secret|… ` write would slip past one). After
+    # stripping the marked forms (real_gh / WF_GH_INTERNAL=1 gh) and the command-probe, nothing legitimate
+    # should remain; a survivor is an unmarked internal gh call.
+    if printf '%s\n' "$probe_stripped" | grep -Eq '(^|[|&;({`]|[[:space:]])gh[[:space:]]'; then
+      echo "VIOLATION wf.sh:$lineno: unmarked internal gh call — route through real_gh/gh_author or set WF_GH_INTERNAL=1" >&2
+      echo "    $line" >&2
+      violations=$((violations+1))
     fi
   fi
 done < "$WF"

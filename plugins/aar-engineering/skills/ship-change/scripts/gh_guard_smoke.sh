@@ -245,6 +245,9 @@ PATH="$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" --force >/dev/null 2>&1
 if [ -L "$IBIN/gh" ] && [ "$(readlink -f "$IBIN/gh")" = "$(readlink -f "$GUARD")" ]; then pass "install-gh-guard --force replaces a non-guard gh"; else fail "install-gh-guard --force should replace with the guard symlink"; fi
 # idempotent re-install of our own symlink succeeds
 if PATH="$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" >/dev/null 2>&1; then pass "install-gh-guard is idempotent on its own symlink"; else fail "install-gh-guard should be idempotent on its own symlink"; fi
+# re-install when the guard is ALREADY ACTIVE (gh resolves to $IBIN/gh first) must still succeed, not reject
+# on the "real gh resolves inside the install dir" check (review F2).
+if PATH="$IBIN:$RBIN:$PATH" bash "$WF" install-gh-guard "$IBIN" >/dev/null 2>&1; then pass "install-gh-guard succeeds when the guard is already active on PATH"; else fail "install-gh-guard should succeed (idempotent) when already active"; fi
 
 echo "[smoke] static check: passes on real wf.sh, fails on a planted unmarked call"
 if bash "$STATIC" "$ROOT" >/dev/null 2>&1; then pass "static check passes on the real wf.sh"; else fail "static check should pass on the real wf.sh"; fi
