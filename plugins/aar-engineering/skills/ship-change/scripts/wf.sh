@@ -1136,23 +1136,26 @@ github_repo_slug(){
     *)     path=$u ;;
   esac
   path=${path%.git}; path=${path#/}
-  # keep only the FIRST two path segments (owner/repo); reject anything that isn't exactly owner/repo.
-  case "$path" in
-    */*/*) path="${path%%/*}/$(x=${path#*/}; printf '%s' "${x%%/*}")" ;;
-  esac
+  # REJECT (don't truncate) anything that isn't exactly owner/repo — silently truncating an extra-segment URL
+  # could make the detector probe a DIFFERENT repo than the supplied remote (#166 code-review F3 r18h).
   is_clean_repo_slug "$path" && printf '%s' "$path"
 }
 
-# is_clean_repo_slug <s> — true ONLY for a bare `owner/repo` (exactly one slash; no scheme/userinfo/host/port/
-# whitespace), so a URL-shaped target (which can carry a userinfo token) is NEVER embedded into a
-# `gh api repos/<slug>` path (#166 F1 r17b). Allows the GitHub-name charset plus '.'/'-'/'_'.
+# is_clean_repo_slug <s> — true ONLY for a well-formed bare `owner/repo`: exactly one slash, BOTH components
+# non-empty, the GitHub-name charset ([A-Za-z0-9._-]) only, and NEITHER component is `.`/`..` (path traversal).
+# So `/repo`, `owner/`, `../user`, `a/b/c`, and URL-shaped values are all rejected — a value used in a
+# `gh api repos/<slug>` path or a synthesized push URL is always a real owner/repo (#166 code-review F1 r18h).
 is_clean_repo_slug(){
-  case "$1" in
-    ""|*[!A-Za-z0-9._/-]*) return 1 ;;   # empty or any disallowed char (covers @ : / / space, etc.)
+  local s=$1 owner repo
+  case "$s" in
     */*/*) return 1 ;;                    # more than one slash
-    */*) return 0 ;;                      # exactly one slash -> owner/repo
-    *) return 1 ;;
+    */*) owner=${s%%/*}; repo=${s#*/} ;;  # exactly one slash
+    *) return 1 ;;                        # no slash
   esac
+  [ -n "$owner" ] && [ -n "$repo" ] || return 1
+  case "$owner" in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$repo"  in ""|.|..|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  return 0
 }
 
 readonly_token_cmd(){ echo "${WF_READONLY_TOKEN_CMD:-}"; }            # the instance read-only minter seam

@@ -551,6 +551,22 @@ if grep -q 'is_clean_repo_slug "$repo"; then apirepo=$repo' "$WF" \
 else
   fail "F3 r18f/g: doctor_token may still send/print a raw repo or count an unverified token OK"
 fi
+# F1/F3 r18h (unit): is_clean_repo_slug rejects malformed slugs (/repo, owner/, ../user, a/b/c, ., o/..) and
+# github_repo_slug REJECTS (empty) extra-segment URLs instead of truncating to a different repo.
+SLUG_OK=1
+eval "$(awk '/^is_clean_repo_slug\(\)\{/,/^\}$/' "$WF")" 2>/dev/null || SLUG_OK=0
+eval "$(awk '/^github_repo_slug\(\)\{/,/^\}$/' "$WF")" 2>/dev/null || SLUG_OK=0
+if [ "$SLUG_OK" = 1 ] \
+   && is_clean_repo_slug "o/r" \
+   && ! is_clean_repo_slug "/r" && ! is_clean_repo_slug "o/" && ! is_clean_repo_slug "../user" \
+   && ! is_clean_repo_slug "a/b/c" && ! is_clean_repo_slug "o/.." \
+   && [ "$(github_repo_slug 'https://github.com/o/r.git')" = o/r ] \
+   && [ -z "$(github_repo_slug 'https://github.com/o/r/extra')" ]; then
+  pass "F1/F3 r18h: slug validators reject malformed slugs + extra-segment URLs (no traversal / wrong-repo probe)"
+else
+  fail "F1/F3 r18h: slug validators accept a malformed slug or truncate an extra-segment URL"
+fi
+
 # F1 r18g (structural): redact_userinfo covers the scp-style [user:secret@]host:path form too (not just ://).
 if grep -q "s#(\^|\[\[:space:\]\])\[\^/@:\[:space:\]\]+:\[\^/@\[:space:\]\]+@" "$WF"; then
   pass "F1 r18g: redact_userinfo redacts scp-style credential-bearing remotes too"
