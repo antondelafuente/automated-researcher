@@ -104,7 +104,7 @@ path     = "recipes/provisioning.md"      # iff kind=repo — repo-relative path
 git_ref  = "<git-sha>"                    # iff kind=repo — pins the exact commit
 [recipes.artifact_store]                  # a kind="uri" recipe:
 kind     = "uri"
-uri      = "r2://mats/recipes/artifact-store.md"  # scheme MUST be in the supported set (below)
+uri      = "r2://<bucket>/recipes/artifact-store.md"  # scheme MUST be in the supported set (below)
 sha256   = "<hex digest>"                 # iff kind=uri — pins the exact bytes
 # [recipes.ledger] / .teardown / .cost_policy follow the same typed shape.
 ```
