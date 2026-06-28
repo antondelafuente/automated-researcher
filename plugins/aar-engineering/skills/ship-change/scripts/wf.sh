@@ -1190,8 +1190,11 @@ readonly_probe_source(){
 # (read-only), 3 inconclusive (non-auth error). Sets RO_PUSH_OUT to the captured output.
 RO_PUSH_RC=3; RO_PUSH_OUT=""
 readonly_probe_one_push_url(){
-  local url=$1 tmp rc to=${WF_GIT_PROBE_TIMEOUT:-20} shim helpers h
+  local url=$1 wt=${2:-} tmp rc fillrc to=${WF_GIT_PROBE_TIMEOUT:-20} shim
   RO_PUSH_RC=3; RO_PUSH_OUT=""
+  # the context git uses for resolving the AMBIENT credential: the TARGET WORKTREE when supplied (so its
+  # worktree-LOCAL + path-scoped credential config is honored — #166 code-review F1 r11), else the default ctx.
+  local credctx=(); [ -n "$wt" ] && [ -d "$wt" ] && credctx=(-C "$wt")
   tmp=$(mktemp -d) || { RO_PUSH_OUT="mktemp failed"; RO_PUSH_RC=3; return; }
   (
     git -C "$tmp" init -q 2>/dev/null
@@ -1212,17 +1215,29 @@ readonly_probe_one_push_url(){
   # This both preserves detection (a real ambient credential is found by git's own correct parsing) and makes
   # store/erase impossible.
   shim="$tmp/cred-ro-shim.sh"
-  local cred_in cred_out parsed_host parsed_proto
+  local cred_in cred_out parsed_host parsed_proto parsed_path
   parsed_proto=${url%%://*}; case "$url" in *://*) : ;; *) parsed_proto=ssh ;; esac
   case "$url" in
-    https://*) parsed_host=${url#https://}; parsed_host=${parsed_host%%/*} ;;
-    *) parsed_host=github.com ;;
+    https://*) parsed_host=${url#https://}; parsed_path=${parsed_host#*/}; parsed_host=${parsed_host%%/*}
+               [ "$parsed_path" = "$parsed_host" ] && parsed_path="" ;;
+    *) parsed_host=github.com; parsed_path="" ;;
   esac
   # `git credential fill` resolves the ambient credential using git's OWN rules (handles helpers with args,
-  # url-scoped helpers, !-commands) and performs only `get` — no mutation. Prompts disabled so it can't block.
-  cred_in=$(printf 'protocol=%s\nhost=%s\n\n' "$parsed_proto" "$parsed_host")
+  # url-scoped helpers, !-commands) and performs only `get` — no mutation. We run it in the TARGET WORKTREE
+  # context (credctx) so worktree-local + PATH-scoped helpers are honored, and include the URL path so a
+  # path-scoped `credential.https://host/owner/repo.helper` matches (#166 F1 r11). Prompts disabled so it can't
+  # block; capture the EXIT STATUS so a TIMEOUT is treated as inconclusive, never a silent empty-cred read-only
+  # (#166 F3 r11).
+  if [ -n "$parsed_path" ]; then
+    cred_in=$(printf 'protocol=%s\nhost=%s\npath=%s\n\n' "$parsed_proto" "$parsed_host" "$parsed_path")
+  else
+    cred_in=$(printf 'protocol=%s\nhost=%s\n\n' "$parsed_proto" "$parsed_host")
+  fi
   cred_out=$(printf '%s' "$cred_in" | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true \
-               timeout "$to" git credential fill 2>/dev/null || true)
+               timeout "$to" git "${credctx[@]}" -c credential.useHttpPath=true credential fill 2>/dev/null); fillrc=$?
+  if [ "$fillrc" = 124 ] || [ "$fillrc" = 137 ]; then
+    rm -rf "$tmp"; RO_PUSH_OUT="credential fill timed out after ${to}s"; RO_PUSH_RC=3; return
+  fi
   # build the static get-only replay helper (no-ops store/erase). Only meaningful for the HTTPS surface; SSH
   # auth uses the key, not this helper, and the isolated config + BatchMode handle the SSH side.
   {
@@ -1288,7 +1303,7 @@ readonly_probe_git_push(){
   esac
   if [ "${#urls[@]}" = 0 ]; then echo "    ambient git push: skipped (no probeable remote url)"; return 3; fi
   for u in "${urls[@]}"; do
-    readonly_probe_one_push_url "$u"
+    readonly_probe_one_push_url "$u" "$wt"
     case "$RO_PUSH_RC" in
       0) accepted=$((accepted+1)) ;;
       2) rejected=$((rejected+1)) ;;

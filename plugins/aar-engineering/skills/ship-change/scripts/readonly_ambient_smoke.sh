@@ -98,11 +98,19 @@ chmod +x "$BIN/gh"
 #     git-push surface. READONLY_SMOKE_GIT=rejected -> auth-reject; =accepted -> accept (FAIL signal). Records
 #     any push attempt; --dry-run must NEVER reach a real remote.
 REAL_GIT=$(command -v git)
-cat > "$BIN/git" <<EOF
+# write the standard fake git: intercepts `push` (the dry-run probe) and `credential` (so it NEVER reaches the
+# real machine's credential helpers — #166 code-review F2 hermeticity), passes every other op (init/commit/
+# remote/config) to the real git. Per-URL push outcome so the SSH-surface false-pass (F1) is testable.
+write_fake_git(){  # write_fake_git <bin/git path> [ssh-push-output-override-block]
+  cat > "$1" <<EOF
 #!/bin/bash
-# intercept push (the dry-run probe); pass every other git op (init/commit/remote) to the real git so the
-# detector's worktree origin-url read works. Per-URL outcome so the SSH-surface false-pass (F1) is testable:
-#   READONLY_SMOKE_GIT_HTTPS / READONLY_SMOKE_GIT_SSH = accepted|rejected (default rejected).
+# credential: stub fill/approve/reject so the probe's 'git credential fill' stays hermetic (no real helpers).
+for a in "\$@"; do
+  if [ "\$a" = credential ]; then
+    cat >/dev/null 2>&1 || true   # consume the credential request on stdin
+    exit 0                        # emit NOTHING -> no ambient credential in the smoke's default fixtures
+  fi
+done
 is_push=0; purl=""
 for a in "\$@"; do
   if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
@@ -115,14 +123,17 @@ if [ "\$is_push" = 1 ]; then
     *)             outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
   esac
   case "\$outcome" in
-    accepted) echo "To \$purl (dry run)"; exit 0 ;;
-    hostkey)  echo "Host key verification failed." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
-    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
+    accepted)    echo "To \$purl (dry run)"; exit 0 ;;
+    hostkey)     echo "Host key verification failed." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
+    authzdenied) echo "ERROR: Permission to o/r.git denied to some-user." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
+    *)           echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
   esac
 fi
 exec "$REAL_GIT" "\$@"
 EOF
-chmod +x "$BIN/git"
+  chmod +x "$1"
+}
+write_fake_git "$BIN/git"
 
 # --- provenance seam fixtures: WF_READONLY_TOKEN_INFO_CMD reads the token on stdin, prints canonical perms.
 #     We key the emitted perms off the token VALUE so per-source isolation is testable.
@@ -321,6 +332,23 @@ if grep -q 'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_N
 else
   fail "F1 r8/r9/r10: probe does not isolate config + use git-native credential resolution"
 fi
+# F1 r11: credential resolution runs in the TARGET WORKTREE context (credctx -C "$wt") with the URL PATH +
+# credential.useHttpPath, so worktree-local + path-scoped credential config is honored (structural).
+if grep -q 'credctx=(-C "\$wt")' "$WF" \
+   && grep -q 'git "${credctx\[@\]}" -c credential.useHttpPath=true credential fill' "$WF" \
+   && grep -q 'path=%s' "$WF"; then
+  pass "F1 r11: credential fill runs in the worktree context with the URL path (worktree-local/path-scoped cfg honored)"
+else
+  fail "F1 r11: credential fill does not use the worktree context + URL path"
+fi
+# F3 r11: a TIMEOUT during the credential snapshot is treated as inconclusive (fail-closed), not a silent
+# empty-credential read-only (structural — the timeout branch returns RC=3 before building the replay helper).
+if grep -q 'credential fill timed out after' "$WF" && grep -q 'fillrc=124' "$WF" 2>/dev/null || \
+   grep -q 'fillrc" = 124' "$WF"; then
+  pass "F3 r11: credential-fill timeout -> inconclusive (fail-closed, not empty-cred read-only)"
+else
+  fail "F3 r11: credential-fill timeout is not handled as inconclusive"
+fi
 # behavioral shim unit: build a shim like the function does (forward get to a logging helper, no-op store/erase)
 CREDLOG="$TMP/cred-ops.log"; : > "$CREDLOG"
 LOGHELPER="$TMP/loghelper.sh"
@@ -414,50 +442,9 @@ fi
 WT3="$TMP/wt-authz"; mkdir -p "$WT3"
 "$REAL_GIT" -C "$WT3" init -q
 "$REAL_GIT" -C "$WT3" remote add origin "git@github.com:o/r.git"
-# fake git emits the GitHub authz-denial phrasing for the SSH push; detector must read read-only (not inconclusive)
-cat > "$BIN/git" <<EOF
-#!/bin/bash
-is_push=0; purl=""
-for a in "\$@"; do
-  if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
-  [ "\$a" = push ] && is_push=1
-done
-if [ "\$is_push" = 1 ]; then
-  echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
-  case "\$purl" in
-    git@*|ssh://*) echo "ERROR: Permission to o/r.git denied to some-user." >&2; echo "fatal: Could not read from remote repository." >&2; exit 128 ;;
-    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
-  esac
-fi
-exec "$REAL_GIT" "\$@"
-EOF
-chmod +x "$BIN/git"
 : > "$MUTLOG"
-RO_TARGET="$WT3" run_strict "RO_aaa" "" "" denied rejected || true
+RO_TARGET="$WT3" RO_GIT_SSH=authzdenied run_strict "RO_aaa" "" "" denied rejected || true
 echo "$RO_OUT" | grep -q 'ambient git push: read-only' && pass "F3: GitHub SSH 'Permission to X denied to Y' -> read-only (auth-rejected)" || fail "F3: SSH authz-denial not classified read-only"
-# restore the standard fake git for any later assertions
-cat > "$BIN/git" <<EOF
-#!/bin/bash
-is_push=0; purl=""
-for a in "\$@"; do
-  if [ "\$is_push" = 1 ] && [ "\${a#-}" = "\$a" ] && [ -z "\$purl" ]; then purl="\$a"; fi
-  [ "\$a" = push ] && is_push=1
-done
-if [ "\$is_push" = 1 ]; then
-  echo "GIT_PUSH_ATTEMPT: \$*" >> "$MUTLOG"
-  case "\$purl" in
-    git@*|ssh://*) outcome=\${READONLY_SMOKE_GIT_SSH:-rejected} ;;
-    *)             outcome=\${READONLY_SMOKE_GIT_HTTPS:-rejected} ;;
-  esac
-  case "\$outcome" in
-    accepted) echo "To \$purl (dry run)"; exit 0 ;;
-    hostkey)  echo "Host key verification failed." >&2; exit 128 ;;
-    *) echo "fatal: Authentication failed for '\$purl'" >&2; exit 128 ;;
-  esac
-fi
-exec "$REAL_GIT" "\$@"
-EOF
-chmod +x "$BIN/git"
 
 # --- plain doctor prints the read-only section as a labeled reporter (does not require engineer identity to PASS
 #     for the read-only verdict to print). We only assert the section + verdict line appear.
