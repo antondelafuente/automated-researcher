@@ -14,6 +14,9 @@ set -uo pipefail
 # smoke's fake fixtures (#166 code-review F3) — keeps the smoke hermetic on any agent box. run_strict re-sets
 # only WF_READONLY_TOKEN_INFO_CMD per fixture and explicitly clears WF_READONLY_TOKEN_CMD.
 unset BASH_ENV ENV WF_READONLY_TOKEN_CMD WF_READONLY_TOKEN_INFO_CMD
+# also clear any inherited ambient credential / fixture vars so the DIRECT `bash "$WF" doctor` invocations
+# (the ones not routed through run_strict) can't pass/fail against an unintended ambient credential (#166 r17).
+unset GH_TOKEN GITHUB_TOKEN READONLY_SMOKE_STORED_TOKEN READONLY_SMOKE_API READONLY_SMOKE_GIT_HTTPS READONLY_SMOKE_GIT_SSH
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WF="$HERE/wf.sh"
