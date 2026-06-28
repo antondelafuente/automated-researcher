@@ -119,13 +119,18 @@ git_author_env  = "AAR_RESEARCH_GIT_AUTHOR"  # env var holding "Name <email>" fo
 require_pr_review        = true          # branch protection requires an approving review before merge
 enforce_admins           = true          # protection includes administrators (no standing bypass)
 
-[recipes]
-# TYPED POINTERS to the existing narrative recipes (decision 6). Not a rewrite — an anchor.
-provisioning    = "recipes/provisioning.md"   # path (repo-relative) or URI the executor reads/links
-artifact_store  = "recipes/artifact-store.md" # where artifacts persist (the R2/store policy)
-ledger          = "recipes/ledger.md"         # the run ledger contract
-teardown        = "recipes/teardown.md"       # teardown-key + delete-don't-stop policy
-cost_policy     = "recipes/cost-policy.md"     # GPU-cheap / API-gated budget policy
+# Recipe pointers: TYPED, fully-addressable objects (decision 6) — not a rewrite of the recipes, an anchor.
+# Each is { kind, ref, + (repo,path | uri) }, so the executor needs no hidden instance knowledge to fetch it.
+[recipes.provisioning]
+kind = "repo"                            # "repo" -> {repo,path}@ref ; "uri" -> {uri}@ref
+repo = "owner/research-lab"              # the OWNING repo (present iff kind=repo) — never assumed to be research_repo
+path = "recipes/provisioning.md"         # repo-relative path (present iff kind=repo)
+ref  = "<git-sha>"                       # REQUIRED for both kinds — pins the exact version
+[recipes.artifact_store]                 # e.g. a URI-kind recipe:
+kind = "uri"
+uri  = "r2://mats/recipes/artifact-store.md"
+ref  = "<content-hash>"
+# [recipes.ledger] / .teardown / .cost_policy follow the same typed shape.
 ```
 
 Field semantics, normative:
@@ -185,32 +190,55 @@ enforcer reads it.
 
 The #130 promise is reproducibility from the record. Instance config can change between when an experiment is
 designed and when (or if) it is re-examined, so the brief must **freeze** the values it resolved, not
-re-resolve them live. At clearance time, `design-experiment` writes a snapshot block into `START.md`:
+re-resolve them live.
 
+**Snapshot timing — before the reviewed brief commit (coherence with #130 §2).** #130 requires the full
+brief (`DESIGN.md` + `START.md` + `CHECKLIST.md`) to be committed **before** the design audit, and binds
+clearance to that commit SHA, so **any later change to the brief forces re-clearance**. The profile snapshot
+is part of `START.md`, so `design-experiment` **resolves the live profile and writes the snapshot block into
+`START.md` as part of that pre-audit brief commit** — the reviewed (and cleared) SHA therefore already
+contains the exact snapshot the executor will use. There is no separate "snapshot at clearance" step after
+the audit; resolution happens once, before the brief commit, and the snapshot rides inside the audited brief.
+A profile edit after clearance changes nothing the executor reads (it uses the frozen snapshot); but if a
+*re-snapshot* is ever performed it edits `START.md` and so **triggers #130's re-clearance** like any brief
+change — the `profile_sha256` makes that drift detectable. The snapshot block written into `START.md`:
+
+The snapshot is a **machine-parseable fenced TOML block** under a fixed `START.md` heading (`## Instance
+profile (snapshot)`) — TOML to match the profile format and so a parser smoke can validate it (FINDING 2);
+never the YAML-ish key list an earlier draft showed. The recipe pointers are **typed objects** (FINDING 3),
+fully addressable without hidden instance knowledge:
+
+````toml
+## Instance profile (snapshot — resolved before the brief commit, DO NOT re-resolve)
+```toml
+profile_path    = "~/.config/experiment-lifecycle/aar-profile.toml"
+profile_sha256  = "<hash of the file's bytes at resolution>"
+schema_version  = 1
+
+[github]
+research_repo   = "owner/research-lab"
+base_branch     = "main"
+branch_prefix   = "run/"
+issue_repo      = "owner/research-lab"
+private         = true
+
+[identity]                                  # SEAM NAMES, not secrets (decision 7)
+token_cmd_env   = "AAR_RESEARCH_TOKEN_CMD"
+git_author_env  = "AAR_RESEARCH_GIT_AUTHOR"
+
+[protection]                                # expectations the close-gate pre-checks (decision 2/3a)
+require_pr_review = true
+enforce_admins   = true
+
+[recipes.provisioning]                      # typed, fully-addressable pointer (FINDING 3)
+kind = "repo"                               #   "repo" -> resolve {repo,path}@ref ; "uri" -> resolve {uri}@ref
+repo = "owner/research-lab"                 #   present iff kind=repo (the OWNING repo, not assumed)
+path = "recipes/provisioning.md"            #   present iff kind=repo
+ref  = "<git-sha>"                          #   pins the exact version (required for both kinds)
+# [recipes.artifact_store] / .ledger / .teardown / .cost_policy follow the same typed shape;
+# a kind="uri" entry uses { kind="uri", uri="r2://...", ref="<hash>" } instead of repo/path.
 ```
-## Instance profile (snapshot — resolved at clearance, DO NOT re-resolve)
-profile_path:    ~/.config/experiment-lifecycle/aar-profile.toml
-profile_sha256:  <hash of the file's bytes at resolution>
-schema_version:  1
-# --- github (decision 2) ---
-research_repo:   owner/research-lab
-base_branch:     main
-branch_prefix:   run/
-issue_repo:      owner/research-lab
-private:         true
-# --- identity: the SEAM NAMES, not secrets (decision 7) ---
-token_cmd_env:   AAR_RESEARCH_TOKEN_CMD
-git_author_env:  AAR_RESEARCH_GIT_AUTHOR
-# --- protection expectations the close-gate pre-checks (decision 2/3a) ---
-require_pr_review: true
-enforce_admins:    true
-# --- recipe pointers: repo-relative path + the ref/hash that pins the version ---
-recipe_provisioning:   recipes/provisioning.md@<git-sha>
-recipe_artifact_store: recipes/artifact-store.md@<git-sha>
-recipe_ledger:         recipes/ledger.md@<git-sha>
-recipe_teardown:       recipes/teardown.md@<git-sha>
-recipe_cost_policy:    recipes/cost-policy.md@<git-sha>
-```
+````
 
 Normative rules:
 
@@ -253,10 +281,14 @@ refuse-unknown-MAJOR.)
 
 The non-GitHub instance facts (provisioning, artifact store, ledger, teardown, cost) are **out of scope for
 restructuring**. They remain the frozen recipes/prose they are today; the profile adds a `[recipes]` block of
-**typed pointers** so the same discovery rule that finds the GitHub facts also reaches the recipes. This is
-the minimal change that satisfies #130 (it needs the *GitHub* facts machine-discoverable) without forcing a
-speculative rewrite of recipes that are working as prose. A future issue may promote individual recipes into
-structured config; this design neither requires nor blocks that.
+**typed, fully-addressable pointers** — each `{ kind, ref, + (repo,path | uri) }` — so the same discovery
+rule that finds the GitHub facts also reaches the recipes, and the executor needs no hidden instance
+knowledge to fetch a recipe (the owning repo or URI and the pinning ref are *in the pointer*, never assumed —
+per FINDING 3). This is the minimal change that satisfies #130 (it needs the *GitHub* facts machine-
+discoverable) without forcing a speculative rewrite of recipes that are working as prose. Validating that
+each recipe pointer resolves (the repo/uri exists at the ref) is part of `aar-profile-validate`'s checks
+(decision 1). A future issue may promote individual recipes into structured config; this design neither
+requires nor blocks that.
 
 ### 7. Identity by reference, never inline — the secret-handling contract
 
@@ -350,8 +382,9 @@ replace the narrative seam with the typed reads + the snapshot write. The discov
 the schema doc (1); the skill edits (4) are `blocked-by` (2) and (3). The instance's own profile under
 `~/.config/experiment-lifecycle/` is written by `aar-profile-init` once (2) lands — instance content, not a
 product child. Staged: the init/validate + discovery helper ship and are unit-smoked (validate a fixture
-profile, fail-closed on a missing one, refuse an unknown MAJOR, mint via the seam name) **before** any skill
-consumes them, so the contract is validated in isolation first.
+profile, fail-closed on a missing one, refuse an unknown MAJOR, mint via the seam name, **round-trip the
+fenced-TOML START.md snapshot through a parser** so the consumed snapshot grammar is proven machine-readable)
+**before** any skill consumes them, so the contract is validated in isolation first.
 
 Rollback is a normal revert of the spawned skill edits — with the narrative "per your execution profile"
 prose still present alongside the typed reads during the staged rollout, reverting the typed reads falls back
