@@ -465,14 +465,20 @@ path, state = sys.argv[1], sys.argv[2]
 with open(path) as f:
     rec = json.load(f)
 pods = rec.get("lease_pod_ids") or []
+
+def fmt_bool(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else str(value)
+
 print(f"record={path}")
 print(f"run_id={rec.get('run_id')}")
 print(f"state={state}")
-print(f"desired_active={str(bool(rec.get('desired_active'))).lower()}")
+print(f"desired_active={fmt_bool(rec.get('desired_active'))}")
 print(f"handoff_path={rec.get('handoff_path') or ''}")
 print(f"session_handle={rec.get('session_handle') or ''}")
 print(f"lease_pod_ids={','.join(str(p) for p in pods)}")
-print(f"relaunch_requested={str(bool(rec.get('relaunch_requested'))).lower()}")
+print(f"relaunch_requested={fmt_bool(rec.get('relaunch_requested'))}")
 reason = rec.get("relaunch_reason")
 if reason:
     print(f"relaunch_reason={reason}")

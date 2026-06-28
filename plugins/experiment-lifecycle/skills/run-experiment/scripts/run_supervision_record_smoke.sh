@@ -224,9 +224,11 @@ run checkpoint a1 --handoff /art/a1/TEMP2.md --lease-pod podZ >/dev/null
   && ok alias-checkpoint-pod || no alias-checkpoint-pod
 status=$(run status a1)
 printf '%s\n' "$status" | grep -qx 'state=active' && ok status-state || no status-state
+printf '%s\n' "$status" | grep -qx 'desired_active=true' && ok status-desired-active-bool || no status-desired-active-bool
 printf '%s\n' "$status" | grep -qx 'handoff_path=/art/a1/TEMP2.md' && ok status-handoff || no status-handoff
 printf '%s\n' "$status" | grep -qx 'session_handle=tmux:a1' && ok status-session-handle || no status-session-handle
 printf '%s\n' "$status" | grep -qx 'lease_pod_ids=podZ' && ok status-pods || no status-pods
+printf '%s\n' "$status" | grep -qx 'relaunch_requested=false' && ok status-relaunch-bool || no status-relaunch-bool
 
 # Alias commands must preserve fail-closed and argument validation.
 if run start a1 >/dev/null 2>&1; then no alias-start-over-active-refused; else ok alias-start-over-active-refused; fi
