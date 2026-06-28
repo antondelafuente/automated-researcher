@@ -109,9 +109,13 @@ content check), metric *names* (from a constrained vocabulary), decision rules, 
 are **always payload** regardless of which field they appear in — the validator's content check forces them to
 a pointer even if a schema field nominally "allows" them. Everything else — verbatim prompts, eval/grader
 bodies, raw paths — is a payload field carried as a pointer. **#155 owns turning the free-form brief into that structured form; until it lands,
-the brief is committed to the artifact store and the trail carries the pointer + the T2 rationale prose only.**
-This is the brief's analogue of the audit structured-emit prerequisite: selective inline redaction is unlocked
-only by a structured schema, never by pattern-matching prose. An instance may tighten the allowlist (e.g. drop
+the brief is committed to the artifact store and the trail carries the pointer + the `visibility.yml` sidecar
+ONLY.** Even the rationale prose is pointer-only pre-#155 (Finding-3): a free-form `DESIGN.md` interleaves
+rationale with exact evals/paths/model IDs, so there is no machine-checkable boundary separating "T2 rationale"
+from config until #155's schema draws it — so nothing from the un-schematized brief is inlined except the
+closed-schema sidecar. Inline rationale returns only through #155's structured schema. This is the brief's
+analogue of the audit structured-emit prerequisite: selective inline redaction is unlocked only by a structured
+schema, never by pattern-matching prose. An instance may tighten the allowlist (e.g. drop
 `model_id` to pointer-only); it may extend it only via a product-owned schema enum (see Finding-5 fix in the
 policy).
 
@@ -135,11 +139,15 @@ the evidence," so payload can land in a finding's **issue** and **recommendation
 treat free-form pattern-matching as a sufficient publish path. Instead:
 
 - The audit producers (`verify_claim` / `audit_experiment`) must gain a **structured sanitized output**: named
-  safe fields (finding id, severity, one-line summary the producer guarantees payload-free) + every quote /
-  cited excerpt carried as an `artifact_ref`, never inline. This is a **`verify-claims` producer-interface
-  child with its own canonical schema + tests** (Finding-2 — it belongs in `verify-claims`, not coupled to the
-  GitHub wiring), and it is a **hard prerequisite** of the wiring child — the GitHub commit/post wiring may not
-  be authorized until it lands.
+  safe fields + every quote / cited excerpt carried as an `artifact_ref`, never inline. **The inline safe
+  fields are deterministic metadata only by default** (finding id, a severity from the closed enum, the
+  finding's *dimension* tag) — NOT a free-text summary. A free-text one-line summary is **not** trusted as
+  inline-safe merely because the producer "guarantees" it (a producer assertion is not machine-checkable, and a
+  summary can carry semantic payload — Finding-1); a summary is inline only if it passes a **mechanical content
+  validator** (no raw identifiers, length-bounded, drawn from constrained vocab), else it is pointer-only. This
+  is a **`verify-claims` producer-interface child with its own canonical schema + tests** (Finding-2 — it
+  belongs in `verify-claims`, not coupled to the GitHub wiring), and it is a **hard prerequisite** of the
+  wiring child — the GitHub commit/post wiring may not be authorized until it lands.
 - **Until structured-emit lands, legacy free-form audit output is rejected at every publish boundary** — it is
   pointer-only (committed to the artifact store, a pointer + parsed header on the trail). The validator
   fail-closes on any attempt to inline a legacy free-form audit body. There is no "redact the quote and publish
@@ -171,9 +179,13 @@ agree on):
 artifact_ref:
   handle: "<store-issued opaque id>"  # opaque artifact ID; NOT a raw bucket/path; resolved to a real URI privately by #153
   bytes:  <int>                       # size, for the reader's sense of scale (optional)
-  caption: "<non-sensitive one-line>"# safe-to-show description; MUST itself satisfy T2 (no payload)
+  caption: "<non-sensitive one-line>"# OPTIONAL; only if it passes the mechanical content validator, else omit
   # integrity hash is NOT on the public trail for sensitive artifacts — see below
 ```
+
+`caption` is **optional and mechanically validated** (Finding-1): a free-text caption is not trusted as safe by
+assertion — it appears on the trail only if it passes the same content validator the safe-summary uses (no raw
+identifiers, length-bounded). When in doubt it is omitted; the `handle` alone is a valid pointer.
 
 **The trail carries an opaque `handle`, never a raw store path (prior Finding-4 fix).** A raw `r2://<bucket>/<key>`
 URI is itself operational-sensitive payload (it leaks the store layout / bucket names), so it must not appear on
@@ -225,9 +237,9 @@ record_visibility:
   tier_overrides:                    # may only TIGHTEN (T2→T1→T0), never loosen; validator rejects a loosen
     RESULTS_narrative: T1            # e.g. an instance that won't even publish result prose inline
   brief_safe_fields_remove:          # instance may only REMOVE keys from the product allowlist (tighten);
-    - model_id                       #   extension is NOT allowed here — see brief_safe_fields_enable
+    - model_display_label            #   extension is NOT allowed here — see brief_safe_fields_enable
   brief_safe_fields_enable:          # extension is restricted to a PRODUCT-OWNED enum the brief schema (#155)
-    - model_id                       #   declares as optionally-inline-able; an instance opts in, never invents
+    - model_display_label            #   a RELEASED-public display label only; a raw/pre-release model_id is ALWAYS payload
   max_quote_chars: <int>             # PR-quote ceiling; default 0 (no payload quote). >0 requires private repo.
   redaction_marker: "[[redacted: %s]]"  # format; default as above
 ```
@@ -249,7 +261,20 @@ tier_overrides: { RESULTS_narrative: T1 }   # values are tier names (T0/T1/T2) o
 require_private_repo: true                  # bool; may raise the floor; may never lower it
 ```
 
-**Why a sidecar, not `DESIGN.md` front-matter (Finding-1 fix).** The visibility metadata *decides* visibility,
+**`standard` is mechanically verified, not merely asserted (Finding-2 fix).** A self-declared `sensitivity:
+standard` cannot be *trusted* — a run could be sensitive and (mistakenly or otherwise) declare itself standard,
+and the gate would then enforce consistency against a false assertion. So the validator runs **closed mechanical
+trigger checks** before accepting `standard`: if the experiment references a model ID on the instance's declared
+**pre-release/private model list**, or a **private-dataset handle**, or any record carries a `sensitive`-marked
+artifact, the trigger **forces the effective sensitivity to `sensitive`** regardless of the sidecar's
+declaration (and a `standard` declaration against a fired trigger is logged). `standard` is therefore a
+*verified* state (no trigger fired), not a bare claim. The instance's pre-release model list + private-dataset
+namespace are part of the #153 profile (it already owns model/data identity); the contract owns the trigger
+*rule* (closed, mechanical, fail-closed: an unparseable model/data reference → treat as sensitive). This makes
+the gate enforce consistency against a *checked* assertion, and keeps the public-default safe without flipping
+the product floor to private-by-default (see the decision note).
+
+**Why a sidecar, not `DESIGN.md` front-matter (prior Finding-1 fix).** The visibility metadata *decides* visibility,
 so it cannot itself be pointer-only — yet `DESIGN.md` is free-form and therefore pointer-only until #155
 schematizes it (a circularity). Resolving it: the declaration is a **separate, mandatory, structured sidecar
 file** whose schema admits only closed values (the enum, tier names, booleans) and is therefore inline-safe by
@@ -290,7 +315,10 @@ ship-change's own merge gate uses (parse an authoritative verdict; missing/garbl
    T1 payload field not pointer-ized/redacted → BLOCK. A pointer missing `handle`, a `handle` that
    looks like a raw store path (`r2://`/`s3://`/bucket path) or equals the content hash → BLOCK, an inline
    `sha256` on a sensitive/public-trail pointer → BLOCK, or a `caption` that itself contains payload → BLOCK.
-   A missing/malformed `visibility.yml` sidecar → BLOCK. A tier override that *loosens* (instance or per-experiment) → BLOCK (config error). A
+   A missing/malformed `visibility.yml` sidecar → BLOCK. A free-text summary/caption that fails the content
+   validator → pointer-only (or BLOCK if inlined). A `sensitivity: standard` declaration while a mechanical
+   trigger fired (pre-release model ID / private-dataset handle / sensitive-marked artifact) → effective
+   sensitivity forced to `sensitive`; an unparseable model/data reference → treat as `sensitive`. A tier override that *loosens* (instance or per-experiment) → BLOCK (config error). A
    `brief_safe_fields_enable` key not in the product-owned schema enum → BLOCK.
 2. **Post-time (a PR review comment / PR body).** The helper (#150) runs the validator over the review/PR-body
    text before calling GitHub. Payload quote over `max_quote_chars` → BLOCK. `max_quote_chars > 0` on a
@@ -312,8 +340,12 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
 ### What this contract does NOT do (scope fence)
 
 - It does not define the artifact store, its auth, or how a `handle` resolves to a real URI — that is the
-  instance profile (#153) and the existing run-experiment artifact-store seam. The contract only fixes the
-  **pointer shape** (opaque `handle` on the trail; integrity hash resolved privately) the trail
+  instance profile (#153) and the existing run-experiment artifact-store seam. **#153 must supply an immutable
+  artifact-index/resolver** (Finding-4): a handle namespace, an immutable handle→URI mapping, private hash
+  storage, resolver discovery, and tombstone/rotation behavior — without it the opaque handles are not
+  reproducibly auditable. The contract owns only the **pointer shape** (opaque `handle` on the trail; integrity
+  hash resolved privately); the index that makes a handle resolvable is #153's, and the wiring child is
+  `blocked-by` it. The contract only fixes the **pointer shape** the trail
   uses.
 - It does not implement the validator or wire it into the skills — the validator *library* is the `ready`
   child; the wiring is the `blocked-by` child (see Rollout).
@@ -357,8 +389,12 @@ explicit T2 classification or an explicitly-pointer-ized T1 field.
   gate) consumes all three boundaries. None of those may be authorized until this lands (umbrella rule); this
   doc is the thing that unblocks them.
 - **Touches #153 (instance-profile interface):** adds the `record_visibility` block to the profile schema #153
-  defines. #153 owns the file location/discovery; this contract owns the block's fields and their semantics.
-  Coordinated, not contradictory — #153's schema should reserve `record_visibility` for this contract.
+  defines, and requires #153 to supply (a) the **pre-release/private model list + private-dataset namespace**
+  the `standard`-verification trigger checks against, and (b) the **immutable artifact-index/resolver** (handle
+  namespace, handle→URI mapping, private hash storage, resolver discovery, tombstone/rotation) that makes the
+  opaque handles resolvable and auditable. #153 owns the file location/discovery + these resolvers; this
+  contract owns the block's fields, the trigger rule, and the pointer shape. Coordinated, not contradictory —
+  #153's schema should reserve `record_visibility` for this contract.
 - **Touches #150 (shared GitHub-lifecycle helper):** the post-time validator runs inside the helper's
   review/PR-body posting path, and the merge-time re-check runs in the helper's merge gate. The helper hosts
   the *enforcement call site* on the rungs it runs (--design, close, post, merge); this contract supplies the
