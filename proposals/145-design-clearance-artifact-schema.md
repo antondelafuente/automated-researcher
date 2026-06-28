@@ -190,7 +190,7 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
 | `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus `data_audit_manifest.md` (required on the GitHub path)** — its `#design` block is drift-checked, its generated values are not (see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
 | `digest_algorithm` | enum (fixed `"sha256"` in v1) | yes | The one digest algorithm for `brief_blobs`/all digests in this schema. Fixed for determinism (#130 F3 fix); a future algorithm is a schema-version bump, not a per-file choice. |
-| `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, and `CHECKLIST.md#gates` (the gate-definition section only — the run-evidence section is excluded so the executor can write it). The integrity anchor the executor compares current content against (brief-integrity rule). |
+| `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, `CHECKLIST.md#gates` (gate-definition block only), and `data_audit_manifest.md#design` (the design-intent block; **required on the GitHub path**) — in each case the run-evidence/generated section is excluded so the executor can write it. The integrity anchor the executor compares current content against (brief-integrity rule). |
 | `design_audit.audit_ref` | string (URL) | yes | Pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
 | `design_audit.audit_commit` | 40-hex SHA | yes | The commit the `--design` audit reviewed. Must equal `brief_commit`; if they differ the executor blocks (the audited design is not the cleared brief). |
 | `design_audit.findings_record` | string (path) | yes | Committed path of the **structured** machine-readable audit finding list (id, severity, text per finding) the responses are validated against — not a copied count. |
@@ -270,9 +270,21 @@ outside excluded), normalized to UTF-8 with trailing-whitespace stripped per lin
 what `brief_blobs["CHECKLIST.md#gates"]` digests, and the executor recomputes the same range. The executor
 writes evidence only *outside* the block, so its edits never change the digested bytes. (`CHECKLIST_TEMPLATE.md`
 gains these markers — a one-line addition to the producer child's template edit.) `brief_files` lists all three
-files (#130); `brief_blobs` pins `DESIGN.md` and `START.md` whole plus this gates block. The contract: gate
-definitions are pinned and drift-checked; run-evidence is not — satisfying both #130 (the brief's gates bound at
+files (#130); `brief_blobs` pins `DESIGN.md` and `START.md` whole plus this gates block.
+
+**On the GitHub path the gates block is mandatory — fail-closed.** A GitHub-path checklist with **no
+`BEGIN/END GATES` block BLOCKs** (a markerless checklist there would have nothing to pin, fail-*open* on the
+load-bearing gates — unacceptable). Markerless checklists are allowed **only on the legacy local path**, where
+they keep today's tick-in-place behavior. So the contract is: gate definitions are pinned and drift-checked
+(and *required* on the GitHub path); run-evidence is not — satisfying both #130 (the brief's gates bound at
 clearance) and the run-mutability reality.
+
+**Evidence maps back to gates by stable id.** Because evidence now lives *outside* the pinned block, the
+zero-context executor/reader must still map each evidence note to its gate. So each gate definition carries a
+**stable gate id**, and the mutable evidence section references findings/notes **by that id** (the evidence↔gate
+mapping the one-file format gave for free). The exact evidence record format (a delimited per-id evidence
+section vs. a separate run-record) is the producer child's call; the *contract* fixed here is "gates have stable
+ids; evidence references them," so nothing is lost by moving evidence out of the block.
 
 ### Data-audit manifest: pin the design-intent block, leave the generated values mutable
 
@@ -293,10 +305,11 @@ the checklist:
 `data_audit_manifest.md#design` (the normalized byte range between the markers) is the drift-checked unit pinned
 in `brief_blobs` and included in the attested subdocument; the generated-values section below `END MANIFEST
 DESIGN` stays mutable. The rule is **required + fail-closed on the GitHub path**: a GitHub-path experiment must
-have a manifest with the design block, and a present-but-unpinned design block BLOCKs (so the load-bearing
-intent/invariants cannot be quietly omitted or silently changed after clearance). `DATA_AUDIT_MANIFEST_TEMPLATE.md`
-gains these markers (the producer child's template edit, same shape as the checklist one); markerless manifests
-on the local path keep today's behavior (back-compat, as with the checklist).
+have a manifest, and a **missing `BEGIN/END MANIFEST DESIGN` block, or a present-but-unpinned design block,
+BLOCKs** (so the load-bearing intent/invariants cannot be quietly omitted or silently changed after clearance).
+`DATA_AUDIT_MANIFEST_TEMPLATE.md` gains these markers (the producer child's template edit, same shape as the
+checklist one); markerless manifests are allowed **only on the legacy local path**, where they keep today's
+behavior (back-compat, as with the checklist).
 
 ### Path and produce/consume contract
 
@@ -469,20 +482,26 @@ generic "not cleared."
   runs consume — so it must not break a **markerless** checklist (every existing/in-flight checklist, and the
   local-handoff contract). Contract: the markers are **additive and optional**; a markerless checklist behaves
   exactly as today — the executor ticks in place as before, and the GitHub-path drift check simply has no
-  `CHECKLIST.md#gates` unit to pin (a markerless checklist is not gate-drift-checked). The markers are
-  *required only on the GitHub experiment path* (where the gates must be pinned); the local path stays
-  marker-optional with unchanged behavior. So the prior bullet's "local handoff unaffected" holds: the shared
-  template gains an optional structure, it does not change markerless behavior.
+  `CHECKLIST.md#gates` unit to pin (a markerless checklist is not gate-drift-checked). On the **GitHub path the
+  markers are mandatory and a missing block BLOCKs** (fail-closed — never fail-open on the load-bearing gates);
+  markerless is allowed *only* on the legacy local path, where behavior is unchanged. So the prior bullet's
+  "local handoff unaffected" holds: the shared template gains structure that is required on the new path and
+  optional (behavior-preserving) on the old one.
 - **Canonical record path:** adds `CLEARANCE.json` + a committed structured `findings_record` to the
   `experiments/<exp>/` layout #130 establishes — event references are pointer-only (`event_ref`/`audit_ref`
   URLs), but the per-finding evidence + findings record are committed content governed by #130's
   record-sensitivity contract (see Rollout `blocked-by`).
 - **Touches the shared GitHub-lifecycle helper (#150):** as a *consumer*, the executor needs a primitive to
   fetch + verify a non-approve clearance event (`event_id`/`event_kind` → actor/SHA/repo-PR/attested-digest,
-  assert not APPROVE) — a read, not new mutation authority. As a *producer requirement*, the audit-posting and
-  clearance-comment steps must include the findings digest / `CLEARANCE.json` digest in their event markers
-  (the external-content anchors). Both sit in the helper's posting/read surface, not its merge-authority/
-  trusted-base surface. Named here so #150 carries them.
+  assert not APPROVE). As a *producer requirement*, the audit-posting and clearance-comment steps must include
+  the findings digest / `attested_clearance` digest in their event markers (the external-content anchors). This
+  marker **verification path is run-authority**: it is exactly the authority the executor trusts to decide
+  proceed-vs-spend, so a branch-modified verifier reading its own forged marker would be the run-side analogue
+  of the merge-authority trust hole. Whether marker production/verification therefore loads from #150's
+  trusted-base source (vs plain runtime) is **#150's open trust-split decision** — this schema does **not**
+  pre-decide it (an earlier draft wrongly classified it as non-trusted-base plumbing). It only states the
+  requirement: the verification must be trustworthy under whatever #150 settles, and the implementation children
+  are `blocked-by` #150 for that classification.
 - **Depends on a structured-audit-output capability** (correcting the prior draft's "no `verify-claims`
   change"): the `findings_record` needs stable-id JSON findings, which the audit engine does not emit today.
   This is a named prerequisite of the consumer child (a thin markdown→JSON parser with id generation + a parser
