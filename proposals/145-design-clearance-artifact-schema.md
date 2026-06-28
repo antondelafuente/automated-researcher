@@ -136,7 +136,7 @@ form is the safe default precisely because it is structurally incapable of satis
     "DESIGN.md": "b1946ac9...",
     "START.md": "591785b7...",
     "CHECKLIST.md#gates": "1d229271...",
-    "data_audit_manifest.md": "84a516841..."
+    "data_audit_manifest.md#design": "84a516841..."
   },
   "design_audit": {
     "audit_ref": "https://github.com/<owner>/<repo>/pull/<n>#pullrequestreview-<id>",
@@ -156,7 +156,7 @@ form is the safe default precisely because it is structurally incapable of satis
       "id": "M2",
       "severity": "med",
       "status": "deferred",
-      "followup_issue": "<owner>/<repo>#161",
+      "followup_issue": "#161",
       "evidence": "Cross-model generalization is a separate experiment; out of scope for this run."
     }
   ]
@@ -188,7 +188,7 @@ and the surviving responses are `justified`/`deferred`, never `fixed`.
 | `approval.actor` | string | yes | The GitHub login that authored the clearance event. Must be an **authorized approver** (instance-profile policy, #153) — the executor checks the fetched event's author equals this and is authorized; a designer cannot self-clear by writing a string. |
 | `approval.cleared_sha` | 40-hex SHA | yes | The commit the clearance event names (carried in the comment marker / review SHA). Must equal `brief_commit`. |
 | `brief_commit` | 40-hex SHA | yes | The commit carrying the cleared brief — the **final** audited brief (the binding target, #130 decision 2). |
-| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus `data_audit_manifest.md` whenever the experiment has one** (it is a load-bearing design artifact — pinned when present; see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
+| `brief_files` | string[] | yes | The brief files present at `brief_commit`; `["DESIGN.md","START.md","CHECKLIST.md"]` (#130), **plus `data_audit_manifest.md` (required on the GitHub path)** — its `#design` block is drift-checked, its generated values are not (see "Data-audit manifest"). Listed so the verifier can assert presence. Drift-coverage differs per file — see `brief_blobs`. |
 | `digest_algorithm` | enum (fixed `"sha256"` in v1) | yes | The one digest algorithm for `brief_blobs`/all digests in this schema. Fixed for determinism (#130 F3 fix); a future algorithm is a schema-version bump, not a per-file choice. |
 | `brief_blobs` | object (unit→digest) | yes | `digest_algorithm` digest of each **drift-checked unit** at `brief_commit`: `DESIGN.md` whole, `START.md` whole, and `CHECKLIST.md#gates` (the gate-definition section only — the run-evidence section is excluded so the executor can write it). The integrity anchor the executor compares current content against (brief-integrity rule). |
 | `design_audit.audit_ref` | string (URL) | yes | Pointer to the posted `--design` PR review the verdict arbitrates. Pointer only — never the audit payload (#130 record-sensitivity). |
@@ -274,17 +274,29 @@ files (#130); `brief_blobs` pins `DESIGN.md` and `START.md` whole plus this gate
 definitions are pinned and drift-checked; run-evidence is not — satisfying both #130 (the brief's gates bound at
 clearance) and the run-mutability reality.
 
-### Data-audit manifest (pinned when present)
+### Data-audit manifest: pin the design-intent block, leave the generated values mutable
 
-The scaffold already treats `data_audit_manifest.md` as a standing **load-bearing design artifact**: it states
-the experiment's data purpose, sources/counts, transformations, invariants, and *what would invalidate the
-experiment* (the `--data` gate's reference). That is design-time content that must not silently drift after
-clearance for the same reason `DESIGN.md` must not — so when an experiment has one, it is a **drift-checked
-unit**, pinned whole in `brief_blobs` and included in the attested subdocument. It is **conditional, fail-closed**:
-not every experiment produces a manifest, so the rule is "if `data_audit_manifest.md` exists at `brief_commit`,
-it MUST be pinned and drift-checked; absence is fine, but a present-but-unpinned manifest BLOCKs" (so a
-load-bearing manifest cannot be quietly omitted from the integrity set). The producer lists it in `brief_files`
-and `brief_blobs` whenever the experiment has one.
+The scaffold treats `data_audit_manifest.md` as a standing **load-bearing design artifact** — purpose,
+sources, transformations, invariants, and *what would invalidate the experiment* (the `--data` gate's
+reference) — so on the GitHub path it is **required**, not optional. But like `CHECKLIST.md` it is *partly
+executor-mutated*: the executor fills in generated paths/hashes/counts *after* generating the data. So pinning
+it whole would block on those expected edits — the same trap. It gets the **same delimited-block treatment** as
+the checklist:
+
+```
+<!-- BEGIN MANIFEST DESIGN (immutable after clearance) -->
+... purpose, sources, transformations, invariants, what-would-invalidate ...
+<!-- END MANIFEST DESIGN -->
+... generated paths / hashes / counts: filled by the executor, mutable ...
+```
+
+`data_audit_manifest.md#design` (the normalized byte range between the markers) is the drift-checked unit pinned
+in `brief_blobs` and included in the attested subdocument; the generated-values section below `END MANIFEST
+DESIGN` stays mutable. The rule is **required + fail-closed on the GitHub path**: a GitHub-path experiment must
+have a manifest with the design block, and a present-but-unpinned design block BLOCKs (so the load-bearing
+intent/invariants cannot be quietly omitted or silently changed after clearance). `DATA_AUDIT_MANIFEST_TEMPLATE.md`
+gains these markers (the producer child's template edit, same shape as the checklist one); markerless manifests
+on the local path keep today's behavior (back-compat, as with the checklist).
 
 ### Path and produce/consume contract
 
@@ -323,10 +335,10 @@ identity and content:
 3. **`experiment`** equals the `experiments/<exp>/` directory name → else BLOCK (mis-filed artifact).
 4. **Brief integrity (the re-clearance trigger) — two-sided, both against `brief_blobs`.** The drift-checked
    units are `DESIGN.md` whole, `START.md` whole, the **gate-definition block of `CHECKLIST.md`** (the static
-   gates — *not* the run-evidence section the executor mutates; see "Checklist" above), and
-   **`data_audit_manifest.md` whole when one exists at `brief_commit`** (the standing data-validity design
-   artifact — see "Data-audit manifest" below). For each unit the executor performs **both** comparisons, and
-   BLOCKs on either mismatch:
+   gates — *not* the run-evidence section the executor mutates; see "Checklist" above), and the
+   **design-intent block of `data_audit_manifest.md`** (`#design` — required on the GitHub path; *not* the
+   generated paths/hashes/counts the executor fills; see "Data-audit manifest" below). For each unit the
+   executor performs **both** comparisons, and BLOCKs on either mismatch:
    - **(a) `brief_blobs` actually describes the audited commit.** Recompute the unit's digest **from the Git
      tree at `brief_commit`** and require it equals the `brief_blobs` entry. This closes the hole where a
      `brief_blobs` digest is fabricated to match drifted working-tree content while `brief_commit` (the audited
@@ -491,10 +503,12 @@ Doc-only design PR: lands the schema on `main` via the `--scaffold` gate, then s
 1. **`design-experiment`: write `CLEARANCE.json` at clearance** — the producer step: after the authorized
    non-merge-satisfying clearance event exists against the final brief commit, record the `approval` block,
    finding responses, `brief_commit`, and `brief_blobs`; commit + a writer-side schema assert. **Includes the
-   checklist contract restructure**: add the `BEGIN GATES`/`END GATES` markers to `CHECKLIST_TEMPLATE.md` and
-   update both `design-experiment` (gates defined inside the block) and `run-experiment` (evidence written
-   *outside* the block, "tick in place" relocated below `END GATES`) instructions + tests, so producer and
-   consumer hash the same gate bytes and in-place evidence edits never trip the drift check.
+   checklist + manifest contract restructure**: add the `BEGIN/END GATES` markers to `CHECKLIST_TEMPLATE.md`
+   and the `BEGIN/END MANIFEST DESIGN` markers to `DATA_AUDIT_MANIFEST_TEMPLATE.md`, and update both
+   `design-experiment` (gates/design-intent defined inside the blocks) and `run-experiment` (evidence and
+   generated values written *outside* the blocks — "tick in place" / "fill paths/hashes/counts" relocated below
+   the `END` markers) instructions + tests, so producer and consumer hash the same pinned bytes and in-place
+   executor edits never trip the drift check. Markerless files keep today's behavior (back-compat).
 2. **`run-experiment`: read + evaluate `CLEARANCE.json` as the pre-spend gate (GitHub path only)** — the
    consumer step + the 7-rule fail-closed proceed rule, with smokes that each of these BLOCKs: a
    missing/malformed file; a brief-drifted file (gate-definition section changed) — while checklist *evidence*
