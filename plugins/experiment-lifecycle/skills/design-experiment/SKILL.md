@@ -26,7 +26,7 @@ You are the **design-side agent**, working with the researcher (the human who ho
 *locked brief*; you do not run the experiment in this thread (the default) — you dispatch it (Step 4).
 
 > **Companion skills this one composes** (declare these as dependencies of your install):
-> - **`verify-claims`** — supplies the pre-launch gates (`verify_claim` on facts, `audit_experiment --design` on logic,
+> - **`verify-claims`** — supplies the pre-launch gates (`verify_claim` on facts, `audit_experiment --design` on data-trustability,
 >   `--data` on data). **Invoke the verify-claims skill; let it resolve its own scripts** — never hardcode a path to
 >   another plugin's scripts (installs are version-pinned; the companion skill is the stable interface).
 > - **`run-experiment`** — the execute half that the dispatched executor loads.
@@ -211,7 +211,7 @@ counts back as feedback.
 ## Reference
 
 - **Templates** ship with this skill under `templates/` (`START`, `CHECKLIST`, `DATA_AUDIT_MANIFEST`).
-- **Gates:** the `verify-claims` skill — `verify_claim` (facts), `audit_experiment --design` (logic), `--data`
+- **Gates:** the `verify-claims` skill — `verify_claim` (facts), `audit_experiment --design` (data-trustability), `--data`
   + `audit_data.py` (data). Invoke that skill; it owns the scripts.
 - **Execute half:** the **`run-experiment`** skill (what the dispatched executor loads). Compose this skill → that skill
   via the `START.md` handoff.

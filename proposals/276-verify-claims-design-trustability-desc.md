@@ -10,9 +10,16 @@ contract that contradicts the shipped behavior.
 
 ## Approach
 
-One-line description fix: `audit_experiment --design (the design's LOGIC)` → `audit_experiment --design (the design's
-DATA-TRUSTABILITY)`, plus the required `verify-claims` `plugin.json` version bump (0.7.8 → 0.7.9). Mirrors exactly what
-#273 did to the verify-claims SKILL body (which now reads DATA-TRUSTABILITY).
+Fix **every** stale `--design = LOGIC` point-of-need / discovery surface #273 missed (design-review F1 widened the scope
+from plugin.json-only — fixing one surface under-solves the discovery problem):
+- `verify-claims/.claude-plugin/plugin.json` description: `(the design's LOGIC)` → `(the design's DATA-TRUSTABILITY)`.
+- `verify-claims/skills/verify-claims/SKILL.md` frontmatter: `--design — the design's LOGIC (confounds, missing controls,
+  comparability, power)` → data-trustability framing (comparability / confounds / variable-pinning / anchor; claim-rigor
+  only if the design asserts a verdict).
+- `design-experiment/SKILL.md` two refs (`audit_experiment --design` "on logic" / "(logic)") → "data-trustability".
+- Required `verify-claims` `plugin.json` version bump (0.7.8 → 0.7.9).
+
+Mirrors what #273 did to the verify-claims SKILL body (which already reads DATA-TRUSTABILITY).
 
 The high-level `facts→logic→data→evidence` mnemonic in the same description is **left intact** — it's the memorable
 4-rung ladder used repo-wide (including the verify-claims SKILL.md, unchanged by #273); "logic" loosely names the
@@ -26,8 +33,8 @@ the SKILL would introduce a fresh inconsistency; keeping the fix to the parenthe
 
 ## Blast radius
 
-One file, one plugin: `verify-claims/.claude-plugin/plugin.json` (description string + version bump). No code/behavior
-change — metadata only. Reversible (revert the PR).
+Description/metadata strings only, across `verify-claims` (plugin.json + SKILL.md frontmatter, version-bumped) and
+`design-experiment/SKILL.md` (two reference lines). No code/behavior change. Reversible (revert the PR).
 
 ## Rollout + rollback
 
