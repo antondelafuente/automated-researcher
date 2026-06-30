@@ -76,7 +76,7 @@ gate_experiment() {
 gate_note() {
   local hits
   # -l: report only the FILES that match, never the matched secret text (no value leak into logs)
-  hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null || true)"
+  hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null || true)"
   [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "note contains secret-value patterns"; }
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok: secret scan clean"
@@ -98,10 +98,9 @@ case "$AUTHOR_FAMILY" in
 esac
 # F2: the input dir's repo must BE the research repo — never push/leak the record to the wrong origin.
 origin_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
-case "$origin_url" in
-  *"$RESEARCH_REPO".git|*"$RESEARCH_REPO") : ;;
-  *) die "input dir's origin '$origin_url' is not RESEARCH_REPO '$RESEARCH_REPO'" ;;
-esac
+# normalize git@github.com:owner/repo(.git) or https://github.com/owner/repo(.git) -> exact owner/repo
+origin_slug="$(printf '%s' "$origin_url" | sed -E 's#^.*[/:]([^/]+/[^/]+)$#\1#; s#\.git$##')"
+[ "$origin_slug" = "$RESEARCH_REPO" ] || die "input dir's origin ($origin_slug, from '$origin_url') is not RESEARCH_REPO ($RESEARCH_REPO)"
 # Reviewer = OPPOSITE family (independence). Token command is EXPLICIT instance config (family-keyed):
 # a command taking <owner/repo> that mints a ${REVIEWER_FAMILY,,}-engineer token. No derivation from other
 # seams; fail closed if unset. (Author push/PR/merge use ambient gh — the researcher logging to their own
@@ -120,7 +119,7 @@ cd "$REPO_ROOT"
 git fetch origin --quiet
 BRANCH="log/${SLUG}"
 WT="$(mktemp -d)/wt"
-cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; }
+cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; git branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 git worktree add -q -b "$BRANCH" "$WT" origin/main || die "could not create worktree/branch (does $BRANCH already exist?)"
 
@@ -149,7 +148,4 @@ if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
 else
   note "checkout is on $(git rev-parse --abbrev-ref HEAD), not main; skipping local sync"
 fi
-# F6: drop the temp worktree, then delete its now-merged local branch (the EXIT trap is the error-path fallback).
-git worktree remove --force "$WT" >/dev/null 2>&1 || true
-git branch -D "$BRANCH" >/dev/null 2>&1 || true
-echo "OK: logged $KIND '$REL' as PR #$PR (merged)."
+echo "OK: logged $KIND '$REL' as PR #$PR (merged)."   # the EXIT trap removes the temp worktree + its local branch
