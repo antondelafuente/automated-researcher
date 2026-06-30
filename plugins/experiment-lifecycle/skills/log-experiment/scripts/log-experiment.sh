@@ -3,8 +3,9 @@
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
-#   - experiment (has DESIGN.md + RESULTS.md): verify the close-audit is present and clean.
-#   - note (anything else):                    deterministic secret scan only.
+#   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
+#   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present + secret scan.
+#   - note         (anything else):            deterministic secret scan only.
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
 #
@@ -48,7 +49,9 @@ SLUG="$(basename "$REL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
 KIND=""
 [ -f "$DIR/KIND" ] && KIND="$(tr -d '[:space:]' < "$DIR/KIND")"
 if [ -z "$KIND" ]; then
-  if [ -f "$DIR/DESIGN.md" ] && [ -f "$DIR/RESULTS.md" ]; then KIND="experiment"; else KIND="note"; fi
+  if   [ -f "$DIR/DESIGN.md" ] && [ -f "$DIR/RESULTS.md" ]; then KIND="experiment"     # results leg: close-audit gate
+  elif [ -f "$DIR/DESIGN.md" ];                                then KIND="design-stage"  # design leg: design-audit gate
+  else                                                              KIND="note"; fi       # everything else: secret scan
 fi
 note "classified: $KIND  ($REL)"
 
@@ -75,21 +78,44 @@ gate_experiment() {
     fi
   fi
 }
-gate_note() {
+secret_scan() {
+  # Deterministic scan for secret-VALUE patterns in $DIR; dies (fail-closed) on a hit or an incomplete scan.
+  # Shared by the note gate and the design-stage gate (a DESIGN-only dir was scanned as a 'note' before the
+  # design-stage kind existed — moving it to design-stage must not drop that scan).
   local hits rc
   # -l: report only matching FILES, never the matched secret text. Capture grep's status: 0=match, 1=clean,
   # >1=error (unreadable file/traversal) -> fail closed (an incomplete scan must not read as clean).
   # The `if` keeps `set -e` from exiting on grep's normal exit 1.
   if hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
   [ "$rc" -le 1 ] || die "secret scan failed (grep exit $rc) — scan incomplete, refusing to log"
-  [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "note contains secret-value patterns"; }
+  [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "$KIND contains secret-value patterns"; }
+}
+gate_note() {
+  secret_scan
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok: secret scan clean"
 }
+gate_design_stage() {
+  # The design PR — the pre-launch leg of the two-PR flow. Verify the design-audit RAN (its numbered
+  # DESIGN_AUDIT*.md chain is the validity record design-experiment emits), then run the same secret scan a
+  # note gets. Like the experiment gate it verifies the audit is PRESENT, not that every finding was resolved
+  # (a machine-readable triage status is a documented future hardening; the researcher invoking this at design
+  # time is the clearance act — same human-in-the-loop trust model as the close gate).
+  # Defend the invariant on the KIND-override path too (auto-classify only reaches here when DESIGN.md exists,
+  # but a KIND=design-stage file bypasses that): a design-stage record IS a pre-registration.
+  [ -f "$DIR/DESIGN.md" ]  || die "design-stage dir missing DESIGN.md — a design-stage record is a pre-registration"
+  [ -f "$DIR/RESULTS.md" ] && die "design-stage dir unexpectedly has RESULTS.md — should classify as experiment"
+  compgen -G "$DIR/DESIGN_AUDIT*.md" >/dev/null 2>&1 \
+    || die "design-stage dir has DESIGN.md but no DESIGN_AUDIT*.md (design-audit not run) — surface for human"
+  secret_scan
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT*.md) and secret scan clean; pre-launch leg of the two-PR flow."
+  note "design-stage gate ok: design-audit present and secret scan clean"
+}
 case "$KIND" in
-  experiment) gate_experiment ;;
-  note)       gate_note ;;
-  *)          die "unknown KIND override: '$KIND' (expected experiment|note)" ;;
+  experiment)   gate_experiment ;;
+  design-stage) gate_design_stage ;;
+  note)         gate_note ;;
+  *)            die "unknown KIND override: '$KIND' (expected experiment|design-stage|note)" ;;
 esac
 
 if [ "$DRY_RUN" = 1 ]; then note "--dry-run: classified=$KIND, gate PASSED; stopping before any push."; exit 0; fi

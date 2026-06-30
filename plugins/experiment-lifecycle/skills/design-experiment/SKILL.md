@@ -171,6 +171,11 @@ Why fresh-context dispatch is the default:
 it to "report your first status lines and stop" — that invites a park after planning (a real failure mode). The
 executor's first action is to arm its own heartbeat/self-wake; then run to completion.
 
+**Landing the pre-registration (optional):** to land the cleared design as its own gated PR *before* the run — the
+design leg of the two-PR flow — run the **`log-experiment`** skill on the experiment dir: with a `DESIGN.md` +
+`DESIGN_AUDIT*.md` and no `RESULTS.md` it classifies as **design-stage** and gates on the design-audit. (Whether/when
+this is required — vs landing only the results PR at close — is the instance's push policy, not mandated here.)
+
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
 **do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass.
 
