@@ -61,7 +61,7 @@ gate_experiment() {
     APPROVAL_BODY="Experiment record — close-audit ran and was triaged (AUDIT.md + AUDIT_RESPONSE.md present, no unresolved-HIGH marker). Verified per registry convention."
     note "experiment gate ok: close-audit present and triaged"
   else
-    if grep -qiE 'ANCHOR_FAILED|no-?go|decision[: ]|stopped at|null result|diagnostic only' "$DIR/RESULTS.md"; then
+    if grep -qiE 'ANCHOR_FAILED|NO-?GO|gate pass=false|gate=false|stopped at [a-z0-9 _-]*gate|null result|diagnostic only' "$DIR/RESULTS.md"; then
       APPROVAL_BODY="Experiment record — eval-only/no-go run; no close-audit needed; RESULTS records a closed decision."
       note "experiment gate ok: no close-audit, RESULTS records a closed decision"
     else
@@ -71,8 +71,9 @@ gate_experiment() {
 }
 gate_note() {
   local hits
-  hits="$(grep -rnaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null | head || true)"
-  [ -z "$hits" ] || { echo "$hits" >&2; die "note contains secret-value patterns"; }
+  # -l: report only the FILES that match, never the matched secret text (no value leak into logs)
+  hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null || true)"
+  [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "note contains secret-value patterns"; }
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok: secret scan clean"
 }
@@ -101,6 +102,9 @@ REVIEWER_MINT="${LOG_EXPERIMENT_REVIEWER_TOKEN_CMD:-}"
 [ -n "$REVIEWER_MINT" ] || die "no opposite-family (${REVIEWER_FAMILY,,}) reviewer token command — set LOG_EXPERIMENT_REVIEWER_TOKEN_CMD or $eng_var"
 TOK="$($REVIEWER_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
 [ -n "$TOK" ] || die "could not mint ${REVIEWER_FAMILY,,}-engineer reviewer token for $RESEARCH_REPO"
+# Validate repo access BEFORE any mutation (a token that can't reach the repo would strand a half-open PR).
+GH_TOKEN="$TOK" gh api "repos/$RESEARCH_REPO" -q .full_name >/dev/null 2>&1 \
+  || die "reviewer token cannot access $RESEARCH_REPO (is the ${REVIEWER_FAMILY,,}-engineer App installed there?)"
 
 # ---- branch in a DEDICATED worktree (never disturbs the shared tree) ----
 cd "$REPO_ROOT"
@@ -117,6 +121,7 @@ git -C "$WT" add -- "$REL"                          # respects the dir's .gitign
 git -C "$WT" diff --cached --quiet && die "nothing to commit for $REL (all gitignored?)"
 git -C "$WT" commit -q -m "Log $KIND: $REL"
 git -C "$WT" push -q -u origin "$BRANCH"
+HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
 
 # ---- PR -> bot approve -> merge ----
 BODY="$(printf '%s\n\nLogged by log-experiment.sh (gate: %s).' "$APPROVAL_BODY" "$KIND")"
@@ -125,10 +130,14 @@ URL="$(gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base main \
 PR="$(echo "$URL" | grep -oE '[0-9]+$')"
 note "opened PR #$PR ($URL)"
 GH_TOKEN="$TOK" gh pr review "$PR" -R "$RESEARCH_REPO" --approve --body "$APPROVAL_BODY" >/dev/null
-gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch >/dev/null
-note "merged PR #$PR"
+gh pr merge "$PR" -R "$RESEARCH_REPO" --squash --delete-branch --match-head-commit "$HEAD_SHA" >/dev/null
+note "merged PR #$PR (head $HEAD_SHA)"
 
-# ---- sync local main (ff-only; never touches other uncommitted work) ----
+# ---- sync local main (ff-only, ONLY if this checkout is on main; never touches other uncommitted work) ----
 git fetch origin --quiet
-git merge --ff-only origin/main >/dev/null 2>&1 || note "note: local main not fast-forwardable; left as-is"
+if [ "$(git rev-parse --abbrev-ref HEAD)" = "main" ]; then
+  git merge --ff-only origin/main >/dev/null 2>&1 || note "local main not fast-forwardable; left as-is"
+else
+  note "checkout is on $(git rev-parse --abbrev-ref HEAD), not main; skipping local sync"
+fi
 echo "OK: logged $KIND '$REL' as PR #$PR (merged)."
