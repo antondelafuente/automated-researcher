@@ -74,6 +74,17 @@ def extract(text: str, label: str) -> str:
 # (feedback-loop's), which must still match AGENTS.md's canonical block.
 canonical = extract(agents, "AGENTS.md")
 refs = sorted(root.glob("plugins/*/skills/*/references/DISPOSITIONS.md"))
+# Assert the product's REMAINING packaged disposition references still exist — otherwise deleting them
+# would let this check vacuously pass (empty glob) while feedback-loop skills reference missing files
+# (#270 code-review F2). feedback-loop ships these in both its independently-installed skill dirs.
+required = [
+    root / "plugins/feedback-loop/skills/file-feedback/references/DISPOSITIONS.md",
+    root / "plugins/feedback-loop/skills/triage-feedback/references/DISPOSITIONS.md",
+]
+missing = [str(r.relative_to(root)) for r in required if r not in refs]
+if missing:
+    print("missing required packaged disposition reference(s): " + ", ".join(missing), file=sys.stderr)
+    sys.exit(1)
 bad = []
 for ref in refs:
     if ref.read_text() != canonical:
@@ -165,16 +176,26 @@ done
 #    changed, smoke every plugin it declares (a marketplace edit can break discovery for any of them).
 SMOKE="$ROOT/.aar-ci/fake_home_smoke.sh"
 SMOKE_PLUGS=$(printf '%s\n' "${PATHS[@]}" | grep '^plugins/' | sed -E 's#plugins/([^/]+)/.*#\1#')
+MP_DECLARED=""   # plugins DECLARED in marketplace.json (when it changed) — these MUST exist, never skipped
 if printf '%s\n' "${PATHS[@]}" | grep -q '^\.claude-plugin/marketplace.json$'; then
-  if mp=$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null); then
+  if MP_DECLARED=$(python3 -c "import json;print('\n'.join(p['name'] for p in json.load(open('$ROOT/.claude-plugin/marketplace.json'))['plugins']))" 2>/dev/null); then
     SMOKE_PLUGS="$SMOKE_PLUGS
-$mp"
+$MP_DECLARED"
   else
     err "marketplace.json changed but its plugin list could not be parsed (schema broken?) — cannot smoke discovery"
   fi
 fi
 for plug in $(printf '%s\n' "$SMOKE_PLUGS" | grep -v '^$' | sort -u); do
-  [ -d "$ROOT/plugins/$plug" ] || { ok "plugin $plug removed (no smoke)"; continue; }   # deleted plugin dir: nothing to smoke
+  # An absent plugin dir is only OK when it was DELETED in this changeset (came from a changed plugins/ path);
+  # a plugin DECLARED in marketplace.json but missing is a broken marketplace and must FAIL (#270 code-review F1).
+  if [ ! -d "$ROOT/plugins/$plug" ]; then
+    if printf '%s\n' "$MP_DECLARED" | grep -qxF "$plug"; then
+      err "marketplace.json declares plugin '$plug' but plugins/$plug is missing — discovery would break"
+    else
+      ok "plugin $plug removed (no smoke)"
+    fi
+    continue
+  fi
   if [ -f "$SMOKE" ]; then
     echo "[checks] behavior smoke: $plug" >&2
     bash "$SMOKE" "$(git rev-parse --show-toplevel)" "$plug" && ok "smoke $plug" || err "fake-HOME smoke FAILED for $plug"
