@@ -546,7 +546,10 @@ PY
 cmd_find_nonce(){
   local name=$1
   require_val "<name>" "$name"
-  case "$name" in gpujob-*) : ;; *) return 0;; esac   # not a nonce -> unknown
+  # Recover the gpujob-<hex> nonce structurally from a possibly-prefixed pod name (e.g. anton-gpujob-..),
+  # independent of any POD_NAME_PREFIX reaching this (detached reaper) process — a missing prefix env must
+  # never orphan a billing pod. A name with no gpujob- token is unknown.
+  case "$name" in *gpujob-*) name="gpujob-${name##*gpujob-}" ;; *) return 0;; esac
   [ -d "$ROOT" ] || return 0
   local f match="" count=0
   for f in "$ROOT"/*.json; do
