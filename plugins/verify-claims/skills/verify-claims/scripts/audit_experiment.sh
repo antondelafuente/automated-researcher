@@ -289,15 +289,18 @@ if [ -n "${AUDIT_DRY_RUN:-}" ]; then printf '%s\n' "$PROMPT"; exit 0; fi
 
 # --- run, with stale-output guard (FINDING 1): write to a temp file, atomic-mv only on success ----
 OUT_TMP="$(mktemp "${TMPDIR:-/tmp}/audit.XXXXXX.md")"
-# Built-in default verifiers MUST write their FINAL answer to $OUT_TMP (the harness atomically promotes it
-# to $OUT). claude's print mode writes to STDOUT, which the harness redirects to the run log — so the claude
-# default REDIRECTS stdout to $OUT_TMP (#239: a custom 'claude -p' WITHOUT this redirection wrote to the run
-# log and the harness failed closed with "auditor produced no findings file"). A custom AUDIT_VERIFIER_CMD
-# override must likewise write its final answer to "$OUT_TMP".
+# Built-in default verifiers MUST (1) run with cwd = "$EXP" so the auditor sees the experiment files the
+# PROMPT calls "the current directory" (the codex default uses --cd; the claude default cd's in a SUBSHELL
+# so the script's own cwd — and the relative $OUT/$OUT.run.log paths — are unaffected), and (2) write their
+# FINAL answer to $OUT_TMP (the harness atomically promotes it to $OUT). claude's print mode writes to
+# STDOUT, which the harness redirects to the run log — so the claude default REDIRECTS stdout to $OUT_TMP
+# (#239: a custom 'claude -p' WITHOUT this redirection wrote to the run log and the harness failed closed
+# with "auditor produced no findings file"). A custom AUDIT_VERIFIER_CMD override must likewise run in "$EXP"
+# and write its final answer to "$OUT_TMP".
 if [ -n "$VERIFIER_OVERRIDE" ]; then
   VERIFIER_CMD=$VERIFIER_OVERRIDE
 elif [ "$AUDITOR_FAMILY" = claude ]; then
-  VERIFIER_CMD="claude -p > \"$OUT_TMP\""
+  VERIFIER_CMD="( cd \"$EXP\" && claude -p ) > \"$OUT_TMP\""
 else
   VERIFIER_CMD="codex exec --sandbox read-only --skip-git-repo-check --cd \"$EXP\" -o \"$OUT_TMP\""
 fi

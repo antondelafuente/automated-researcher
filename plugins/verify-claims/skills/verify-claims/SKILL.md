@@ -81,11 +81,13 @@ or retrying solely because the findings file has not appeared.
 **Cross-family selection (required `AAR_SUBSTRATE`).** Set `AAR_SUBSTRATE` to the family that RAN the work
 (`claude` or `codex`) — it is REQUIRED and the script fails closed if unset/unknown, so a wrong default can
 never make the audit same-family (matching `log-experiment`). The auditor is ALWAYS the opposite family and
-each family has a correct built-in default verifier, so you normally set nothing else: a Claude runner audits
-with Codex, a Codex runner audits with Claude (`claude -p > "$OUT_TMP"`). `AUDIT_VERIFIER_CMD` is an OPTIONAL
-override honored only when it is a DIFFERENT family than the runner and it MUST write its final answer to
-`"$OUT_TMP"`; a same-family value — e.g. an instance `BASH_ENV` that re-injects `AUDIT_VERIFIER_CMD` into
-every non-interactive shell (#262) — is ignored with a warning and the opposite-family default is used.
+each family has a correct built-in default verifier (it runs the auditor in the experiment dir and captures
+its answer to `"$OUT_TMP"`), so you normally set nothing else: a Claude runner audits with Codex, a Codex
+runner audits with Claude (`( cd <exp> && claude -p ) > "$OUT_TMP"`). `AUDIT_VERIFIER_CMD` is an OPTIONAL
+override honored only when it is a DIFFERENT family than the runner, and it MUST run in the experiment dir
+and write its final answer to `"$OUT_TMP"`; a same-family value — e.g. an instance `BASH_ENV` that re-injects
+`AUDIT_VERIFIER_CMD` into every non-interactive shell (#262) — is ignored with a warning and the
+opposite-family default is used.
 
 **Wired into the experiment lifecycle:** `--design` at the design stage (the `design-experiment`
 skill), `--data` + close at execution (the `run-experiment` skill) — each via the experiment

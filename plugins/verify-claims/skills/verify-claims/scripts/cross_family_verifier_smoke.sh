@@ -26,10 +26,13 @@ else
   err "(a) claude runner + injected same-family verifier BLOCKED instead of self-correcting"
 fi
 
-# (b) #239 — codex runner selects the claude default AND that default redirects to $OUT_TMP.
+# (b) #239 — codex runner selects the claude default; that default runs in $EXP (cwd = experiment dir, so
+#     the auditor sees the files the prompt calls "the current directory") AND redirects to $OUT_TMP.
 if out=$(seam AAR_SUBSTRATE=codex); then
   echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(b) codex runner did not select claude auditor: $out"
-  echo "$out" | grep -q 'claude -p >'            || err "(b) claude default lacks the > \$OUT_TMP redirection (#239): $out"
+  echo "$out" | grep -q 'claude -p'               || err "(b) claude default is not 'claude -p': $out"
+  echo "$out" | grep -qF "cd \"$EXP\""            || err "(b) claude default does not run in the experiment dir (\$EXP): $out"
+  echo "$out" | grep -q ') >'                     || err "(b) claude default lacks the > \$OUT_TMP redirection (#239): $out"
 else
   err "(b) codex runner failed unexpectedly"
 fi
