@@ -193,19 +193,23 @@ secret_scan() {
   # (missing base ref, a git error, an unbuildable list) falls back to the full-dir scan below — an incomplete
   # diff must never NARROW the scan (fail-safe DIRECTION: over-scan, never under-scan). #306.
   if git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1; then
-    local diff_out others_out drc=0 orc=0
+    local df of drc=0 orc=0
+    df="$(mktemp)"; of="$(mktemp)"
     # tracked working-tree diffs vs base + untracked new files (matching `git add`'s gitignore semantics).
-    # Capture each command's status explicitly (`local` on its own line so $? is the git status, not local's).
-    diff_out="$(git -C "$REPO_ROOT" diff --name-only "origin/$BASE_BRANCH" -- "$REL" 2>/dev/null)" || drc=$?
-    others_out="$(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- "$REL" 2>/dev/null)" || orc=$?
+    # NUL-delimited (`-z`) so a path with a newline / quote / non-ASCII char is emitted RAW (not git-quoted) —
+    # else such a committed file could be skipped by the scan while still being logged (a scan bypass). Capture
+    # each command's status explicitly. Command substitution would strip NULs, so write to temp files.
+    git -C "$REPO_ROOT" diff -z --name-only "origin/$BASE_BRANCH" -- "$REL" >"$df" 2>/dev/null || drc=$?
+    git -C "$REPO_ROOT" ls-files -z --others --exclude-standard -- "$REL" >"$of" 2>/dev/null || orc=$?
     if [ "$drc" -eq 0 ] && [ "$orc" -eq 0 ]; then
       use_diff=1
       # map to absolute paths, keep only existing regular files (a diff entry can name a deleted path).
-      while IFS= read -r f; do [ -n "$f" ] && [ -f "$REPO_ROOT/$f" ] && files+=("$REPO_ROOT/$f"); done < <(
-        printf '%s\n%s\n' "$diff_out" "$others_out" | sort -u)
+      while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$REPO_ROOT/$f" ] && files+=("$REPO_ROOT/$f"); done < <(
+        cat "$df" "$of" | sort -zu)
     else
       note "secret scan: changed-file list unavailable (git diff rc=$drc, ls-files rc=$orc) — scanning the whole dir"
     fi
+    rm -f "$df" "$of"
   else
     note "secret scan: origin/$BASE_BRANCH unavailable — scanning the whole dir"
   fi
@@ -217,7 +221,7 @@ secret_scan() {
       note "secret scan: no changed files under $REL vs origin/$BASE_BRANCH — nothing to scan"
       return 0
     fi
-    if hits="$(grep -laIE "$pat" "${files[@]}" 2>/dev/null)"; then rc=0; else rc=$?; fi
+    if hits="$(grep -laIE "$pat" -- "${files[@]}" 2>/dev/null)"; then rc=0; else rc=$?; fi
   else
     if hits="$(grep -rlaIE "$pat" "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
   fi

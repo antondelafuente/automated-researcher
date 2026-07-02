@@ -89,5 +89,14 @@ if run_dry "$T/reg/note"; then
 else fail "empty-delta gate BLOCKED unexpectedly: $LAST_ERR"; fi
 rm -rf "$T"
 
+echo "[smoke] case 7: NEW file with a NON-ASCII name containing a real key -> BLOCK (NUL-delimited path handling)"
+# git quotes non-ASCII paths in --name-only / ls-files by default; without -z the quoted string is not a real
+# path and the file would be scan-skipped while still committed. -z emits raw paths so it is scanned.
+T=$(mktemp -d); make_repo "$T"
+printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), untracked -> ls-files path
+if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
+  case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi
