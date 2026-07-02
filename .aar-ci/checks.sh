@@ -262,6 +262,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 10c. log-experiment secret-scan smoke (#306): the diff-scoped scan (a pre-existing merged file no longer
+#     blocks a log that leaves it unchanged; a newly added/modified real key still blocks) + the sk- boundary
+#     guard (a hyphenated identifier containing 'sk-' is not a false-positive) + the fail-safe fallback
+#     (missing base ref -> full-dir scan) — behavior the JSON/syntax checks can't cover. Runs when the script
+#     or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/log-experiment/scripts/(log-experiment\.sh|log_experiment_secret_scan_smoke\.sh)$'; then
+  LE_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_secret_scan_smoke.sh"
+  if [ -f "$LE_SMOKE" ]; then
+    echo "[checks] log-experiment secret-scan smoke" >&2
+    bash "$LE_SMOKE" >&2 && ok "log-experiment secret-scan smoke" || err "log-experiment secret-scan smoke FAILED"
+  else
+    err "log-experiment.sh changed but log_experiment_secret_scan_smoke.sh missing — cannot verify the secret scan"
+  fi
+fi
+
 # 11. pod-lease + reaper smoke (#169): the 3-phase create + expiry-driven is-reapable + the locked
 #     reap (refresh-vs-reap race) + report-unknown-never-delete + unresolved-key report-only + legacy
 #     keepalive (future/inconclusive/past) + dry-run — behavior the JSON/syntax checks can't cover.

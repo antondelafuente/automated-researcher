@@ -32,10 +32,11 @@ gates); nothing else changes.
    (the log commits `$DIR`'s current content onto a branch forked from `origin/$BASE_BRANCH`), so a
    pre-existing merged file is never re-scanned.
 
-   **Fail-safe direction.** When `origin/$BASE_BRANCH` is unavailable as a ref, fall back to the current
-   full-dir scan — an incomplete diff must never silently narrow the scan. Staleness of the local
-   `origin/$BASE_BRANCH` only ever *over*-scans (an older base = a larger delta), so the gate never skips a
-   file that a fresh fetch would have flagged; no network fetch is added to the gate. Deleted paths named by
+   **Fail-safe direction.** The changed-file list is used ONLY when the base ref exists AND both git queries
+   (`git diff`, `git ls-files`) succeed; a missing base ref *or any git failure / unbuildable list* falls back
+   to the current full-dir scan — an incomplete diff must never silently narrow the scan. Staleness of the
+   local `origin/$BASE_BRANCH` only ever *over*-scans (an older base = a larger delta), so the gate never skips
+   a file that a fresh fetch would have flagged; no network fetch is added to the gate. Deleted paths named by
    the diff are filtered out (`[ -f ]`) before grep. An empty delta scans nothing (trivially clean); the
    existing "nothing to commit" guard still catches a truly empty log downstream.
 
@@ -56,12 +57,21 @@ Both together (the issue's recommended shape) is the right fix.
 
 ## Blast radius
 
-One helper in one script: `plugins/experiment-lifecycle/skills/log-experiment/scripts/log-experiment.sh`
-(`secret_scan()`). Product scaffold, SWE-pipeline-shipped. Affects the note and design-stage gates only; the
-experiment gate does not call `secret_scan`. No config, interface, or identity changes.
+- `plugins/experiment-lifecycle/skills/log-experiment/scripts/log-experiment.sh` (`secret_scan()`) — the fix.
+  Affects the note and design-stage gates only; the experiment gate does not call `secret_scan`. No config,
+  interface, or identity changes.
+- `plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_secret_scan_smoke.sh` (new) — an
+  offline behavior smoke that drives the real script via `--dry-run` over throwaway git fixtures (no network /
+  identity), covering both fixes + the fail-safe fallback + empty-delta.
+- `.aar-ci/checks.sh` — wires the smoke to run when the script or the smoke changes (mirrors the existing
+  per-helper smoke blocks).
+- `plugins/experiment-lifecycle/.claude-plugin/plugin.json` (0.3.16 → 0.3.17) + `CHANGELOG.md` — required
+  version bump + one changelog line for a behavior-changing script edit.
+
+Product scaffold, SWE-pipeline-shipped.
 
 ## Rollout + rollback
 
-Single-commit change; revert the commit to restore the prior scan. No migration, no state. The fail-closed
-fallback means a worst-case bug (e.g. a bad diff computation) degrades to the current full-dir behavior rather
-than to an unscanned log.
+Revert the commit to restore the prior scan. No migration, no state. The fail-safe fallback means a worst-case
+bug in the diff computation (a bad ref, a git failure) degrades to the current full-dir behavior rather than to
+an unscanned log — the scan can only over-cover, never silently under-cover.

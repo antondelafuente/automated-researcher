@@ -171,14 +171,56 @@ gate_experiment() {
   fi
 }
 secret_scan() {
-  # Deterministic scan for secret-VALUE patterns in $DIR; dies (fail-closed) on a hit or an incomplete scan.
+  # Deterministic scan for secret-VALUE patterns; dies (fail-closed) on a hit or an incomplete scan.
   # Shared by the note gate and the design-stage gate (a DESIGN-only dir was scanned as a 'note' before the
   # design-stage kind existed — moving it to design-stage must not drop that scan).
-  local hits rc
-  # -l: report only matching FILES, never the matched secret text. Capture grep's status: 0=match, 1=clean,
-  # >1=error (unreadable file/traversal) -> fail closed (an incomplete scan must not read as clean).
-  # The `if` keeps `set -e` from exiting on grep's normal exit 1.
-  if hits="$(grep -rlaIE '(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)' "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
+  #
+  # SCOPE = the files actually CHANGED vs origin/$BASE_BRANCH under $REL (tracked diffs + untracked new files),
+  # NOT the whole dir — else pre-existing merged content (e.g. a committed HTML page) permanently blocks every
+  # future note-log of that dir (#306; the journal dir is the standard synthesis-pass target). This is exactly
+  # the delta the PR introduces: the log commits $DIR's current content onto a branch forked from
+  # origin/$BASE_BRANCH. Falls back to the full-dir scan when the base ref is unavailable — an incomplete diff
+  # must never silently NARROW the scan. Staleness of the local origin/$BASE_BRANCH only ever OVER-scans (an
+  # older base = a larger delta), so no fetch is added and the gate never skips a file a fresh base would flag.
+  #
+  # The sk- alternative carries a LEFT word-boundary guard ((^|[^A-Za-z0-9_-])) so it no longer matches inside a
+  # long hyphenated identifier that merely contains 'sk-' (e.g. 'task-always-succeeds-…') (#306). The other
+  # patterns (ghp_/github_pat_/AKIA/PEM) are distinctive enough to leave unguarded.
+  local hits rc f pat use_diff=0
+  pat='(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)'
+  local -a files=()
+  # Build the changed-file list ONLY when the base ref exists AND both git queries succeed; ANY failure
+  # (missing base ref, a git error, an unbuildable list) falls back to the full-dir scan below — an incomplete
+  # diff must never NARROW the scan (fail-safe DIRECTION: over-scan, never under-scan). #306.
+  if git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1; then
+    local diff_out others_out drc=0 orc=0
+    # tracked working-tree diffs vs base + untracked new files (matching `git add`'s gitignore semantics).
+    # Capture each command's status explicitly (`local` on its own line so $? is the git status, not local's).
+    diff_out="$(git -C "$REPO_ROOT" diff --name-only "origin/$BASE_BRANCH" -- "$REL" 2>/dev/null)" || drc=$?
+    others_out="$(git -C "$REPO_ROOT" ls-files --others --exclude-standard -- "$REL" 2>/dev/null)" || orc=$?
+    if [ "$drc" -eq 0 ] && [ "$orc" -eq 0 ]; then
+      use_diff=1
+      # map to absolute paths, keep only existing regular files (a diff entry can name a deleted path).
+      while IFS= read -r f; do [ -n "$f" ] && [ -f "$REPO_ROOT/$f" ] && files+=("$REPO_ROOT/$f"); done < <(
+        printf '%s\n%s\n' "$diff_out" "$others_out" | sort -u)
+    else
+      note "secret scan: changed-file list unavailable (git diff rc=$drc, ls-files rc=$orc) — scanning the whole dir"
+    fi
+  else
+    note "secret scan: origin/$BASE_BRANCH unavailable — scanning the whole dir"
+  fi
+  # -l/-r: report only matching FILES, never the matched secret text. grep status: 0=match, 1=clean, >1=error
+  # (unreadable file/traversal) -> fail closed (an incomplete scan must not read as clean). The `if` keeps
+  # `set -e` from exiting on grep's normal exit 1.
+  if [ "$use_diff" -eq 1 ]; then
+    if [ "${#files[@]}" -eq 0 ]; then
+      note "secret scan: no changed files under $REL vs origin/$BASE_BRANCH — nothing to scan"
+      return 0
+    fi
+    if hits="$(grep -laIE "$pat" "${files[@]}" 2>/dev/null)"; then rc=0; else rc=$?; fi
+  else
+    if hits="$(grep -rlaIE "$pat" "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
+  fi
   [ "$rc" -le 1 ] || die "secret scan failed (grep exit $rc) — scan incomplete, refusing to log"
   [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "$KIND contains secret-value patterns"; }
 }
