@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306).
 #
-# Drives the REAL script via `--dry-run` (which runs the full classify+gate, incl. secret_scan, then stops
-# BEFORE any push/token/network), against throwaway git fixtures. No engineer identity or network needed.
-# Asserts the two #306 fixes end-to-end:
-#   - diff scoping: a pre-existing merged file (even one that trips a pattern) does NOT block a log that
-#     leaves it unchanged; a NEWLY added / MODIFIED file carrying a real key DOES block.
+# Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
+# runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
+# fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
+#   - staged-set scoping: a pre-existing merged file (even one that trips a pattern) does NOT block a log that
+#     leaves it unchanged (it stages nothing); a NEWLY added / MODIFIED file carrying a real key DOES block.
 #   - sk- boundary guard: a long hyphenated identifier merely CONTAINING `sk-` is not a false-positive, while
 #     a genuine `sk-…` key (after a non-word char) still blocks.
-# Plus the fail-safe direction: missing base ref -> full-dir scan; empty delta -> clean.
+# Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
+# no scan bypass), and an empty delta fails on "nothing to commit".
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,27 +74,25 @@ printf '%s\n' "$FP_LINE" > "$T/reg/note/note4.md"
 if run_dry "$T/reg/note"; then pass "hyphenated 'sk-' phrase is not a false-positive even when newly added"; else fail "boundary guard failed — FP phrase blocked: $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 5: no origin base ref -> full-dir fallback still BLOCKS a pre-existing real key"
+echo "[smoke] case 5: no origin base ref -> FAIL CLOSED (refuse to log, no scan bypass) even with a new secret"
 T=$(mktemp -d); make_repo "$T"
-git -C "$T" update-ref -d refs/remotes/origin/main       # remove the base ref -> triggers fallback
-printf 'token %s\n' "$REAL_GHP" >> "$T/reg/note/page.html"   # even 'pre-existing' content is scanned in fallback
-printf 'a new note\n' > "$T/reg/note/note5.md"
-if run_dry "$T/reg/note"; then fail "full-dir fallback did NOT block a real key with base ref missing"; else
-  case "$LAST_ERR" in *"secret-value pattern"*) pass "fallback full-dir scan blocks (fail-safe direction)";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+git -C "$T" update-ref -d refs/remotes/origin/main       # remove the base ref the log must be based on
+printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/note5.md"     # a real secret present; must NOT slip through
+if run_dry "$T/reg/note"; then fail "missing base ref did NOT refuse to log (possible scan bypass): $LAST_ERR"; else
+  case "$LAST_ERR" in *"no origin/main ref"*) pass "missing base ref refuses to log (fail-closed)";; *) fail "failed but not on the missing base ref: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 6: empty delta (nothing changed vs base) -> nothing to scan, gate PASSES"
+echo "[smoke] case 6: empty delta (nothing changed vs base) -> refuse on 'nothing to commit'"
 T=$(mktemp -d); make_repo "$T"   # branch head == origin/main, page.html unchanged, no new files
-if run_dry "$T/reg/note"; then
-  case "$LAST_ERR" in *"nothing to scan"*) pass "empty delta scans nothing and passes";; *) pass "empty delta passes";; esac
-else fail "empty-delta gate BLOCKED unexpectedly: $LAST_ERR"; fi
+if run_dry "$T/reg/note"; then fail "empty delta did NOT refuse (should be nothing to commit): $LAST_ERR"; else
+  case "$LAST_ERR" in *"nothing to commit"*) pass "empty delta refuses on nothing-to-commit";; *) fail "failed but not on nothing-to-commit: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 7: NEW file with a NON-ASCII name containing a real key -> BLOCK (NUL-delimited path handling)"
-# git quotes non-ASCII paths in --name-only / ls-files by default; without -z the quoted string is not a real
-# path and the file would be scan-skipped while still committed. -z emits raw paths so it is scanned.
+# git quotes non-ASCII paths in `diff --cached --name-only` by default; without -z the quoted string is not a
+# real path and the staged file would be scan-skipped while still committed. -z emits raw paths so it is scanned.
 T=$(mktemp -d); make_repo "$T"
-printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), untracked -> ls-files path
+printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), staged as a new file
 if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"

@@ -171,67 +171,46 @@ gate_experiment() {
   fi
 }
 secret_scan() {
-  # Deterministic scan for secret-VALUE patterns; dies (fail-closed) on a hit or an incomplete scan.
-  # Shared by the note gate and the design-stage gate (a DESIGN-only dir was scanned as a 'note' before the
-  # design-stage kind existed — moving it to design-stage must not drop that scan).
+  # Deterministic scan for secret-VALUE patterns in the EXACT set git has STAGED in the commit worktree $WT
+  # (`git diff --cached`); dies (fail-closed) on a hit or an incomplete scan. Shared by the note gate and the
+  # design-stage gate (a DESIGN-only dir was scanned as a 'note' before the design-stage kind existed — moving
+  # it to design-stage must not drop that scan). MUST be called AFTER stage_worktree.
   #
-  # SCOPE = the files actually CHANGED vs origin/$BASE_BRANCH under $REL (tracked diffs + untracked new files),
-  # NOT the whole dir — else pre-existing merged content (e.g. a committed HTML page) permanently blocks every
-  # future note-log of that dir (#306; the journal dir is the standard synthesis-pass target). This is exactly
-  # the delta the PR introduces: the log commits $DIR's current content onto a branch forked from
-  # origin/$BASE_BRANCH. Falls back to the full-dir scan when the base ref is unavailable — an incomplete diff
-  # must never silently NARROW the scan. Staleness of the local origin/$BASE_BRANCH only ever OVER-scans (an
-  # older base = a larger delta), so no fetch is added and the gate never skips a file a fresh base would flag.
+  # SCOPE = the staged set == precisely what the PR will introduce, computed against the SAME base the worktree
+  # was created from and under that base's .gitignore. This is why a pre-existing merged file (e.g. a committed
+  # HTML page) no longer blocks a log that leaves it unchanged — `cp` writes identical bytes over the base
+  # checkout, so `git add` stages nothing for it and it is not scanned (#306). Scanning the staged set (not a
+  # working-tree-vs-base reconstruction) also means the scanned set can never diverge from the committed set:
+  # no stale-base skew (we scan the post-fetch base the worktree holds) and no ignore-rule skew (the worktree's
+  # index, not the dirty checkout's, decides what is staged).
   #
   # The sk- alternative carries a LEFT word-boundary guard ((^|[^A-Za-z0-9_-])) so it no longer matches inside a
   # long hyphenated identifier that merely contains 'sk-' (e.g. 'task-always-succeeds-…') (#306). The other
   # patterns (ghp_/github_pat_/AKIA/PEM) are distinctive enough to leave unguarded.
-  local hits rc f pat use_diff=0
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: secret_scan called before stage_worktree (no staged worktree)"
+  local hits rc f pat; local -a files=()
   pat='(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)'
-  local -a files=()
-  # Build the changed-file list ONLY when the base ref exists AND both git queries succeed; ANY failure
-  # (missing base ref, a git error, an unbuildable list) falls back to the full-dir scan below — an incomplete
-  # diff must never NARROW the scan (fail-safe DIRECTION: over-scan, never under-scan). #306.
-  if git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1; then
-    local df of drc=0 orc=0
-    df="$(mktemp)"; of="$(mktemp)"
-    # tracked working-tree diffs vs base + untracked new files (matching `git add`'s gitignore semantics).
-    # NUL-delimited (`-z`) so a path with a newline / quote / non-ASCII char is emitted RAW (not git-quoted) —
-    # else such a committed file could be skipped by the scan while still being logged (a scan bypass). Capture
-    # each command's status explicitly. Command substitution would strip NULs, so write to temp files.
-    git -C "$REPO_ROOT" diff -z --name-only "origin/$BASE_BRANCH" -- "$REL" >"$df" 2>/dev/null || drc=$?
-    git -C "$REPO_ROOT" ls-files -z --others --exclude-standard -- "$REL" >"$of" 2>/dev/null || orc=$?
-    if [ "$drc" -eq 0 ] && [ "$orc" -eq 0 ]; then
-      use_diff=1
-      # map to absolute paths, keep only existing regular files (a diff entry can name a deleted path).
-      while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$REPO_ROOT/$f" ] && files+=("$REPO_ROOT/$f"); done < <(
-        cat "$df" "$of" | sort -zu)
-    else
-      note "secret scan: changed-file list unavailable (git diff rc=$drc, ls-files rc=$orc) — scanning the whole dir"
-    fi
-    rm -f "$df" "$of"
-  else
-    note "secret scan: origin/$BASE_BRANCH unavailable — scanning the whole dir"
-  fi
-  # -l/-r: report only matching FILES, never the matched secret text. grep status: 0=match, 1=clean, >1=error
+  # NUL-delimited (`-z`) so a path with a newline / quote / non-ASCII char is read RAW (not git-quoted) — else
+  # such a staged file could be skipped by the scan while still being committed (a scan bypass). Keep only
+  # existing regular files (a staged deletion names a path that is gone).
+  while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$WT/$f" ] && files+=("$WT/$f"); done < <(
+    git -C "$WT" diff --cached -z --name-only)
+  # stage_worktree already fails closed on an empty staged set ("nothing to commit"), so a scan reaching here
+  # normally has files; guard anyway (a staged pure-deletion would leave nothing to scan — nothing to leak).
+  [ "${#files[@]}" -gt 0 ] || { note "secret scan: no staged file content — nothing to scan"; return 0; }
+  # -l: report only matching FILES, never the matched secret text. grep status: 0=match, 1=clean, >1=error
   # (unreadable file/traversal) -> fail closed (an incomplete scan must not read as clean). The `if` keeps
   # `set -e` from exiting on grep's normal exit 1.
-  if [ "$use_diff" -eq 1 ]; then
-    if [ "${#files[@]}" -eq 0 ]; then
-      note "secret scan: no changed files under $REL vs origin/$BASE_BRANCH — nothing to scan"
-      return 0
-    fi
-    if hits="$(grep -laIE "$pat" -- "${files[@]}" 2>/dev/null)"; then rc=0; else rc=$?; fi
-  else
-    if hits="$(grep -rlaIE "$pat" "$DIR" 2>/dev/null)"; then rc=0; else rc=$?; fi
-  fi
+  if hits="$(grep -laIE "$pat" -- "${files[@]}" 2>/dev/null)"; then rc=0; else rc=$?; fi
   [ "$rc" -le 1 ] || die "secret scan failed (grep exit $rc) — scan incomplete, refusing to log"
-  [ -z "$hits" ] || { echo "secret-value pattern found in (values redacted):" >&2; echo "$hits" >&2; die "$KIND contains secret-value patterns"; }
+  [ -z "$hits" ] || { echo "secret-value pattern found in staged content (values redacted):" >&2
+    printf '%s\n' "$hits" | sed "s#^$WT/#  #" >&2; die "$KIND contains secret-value patterns"; }
 }
+# Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved).
+scan_if_needed() { case "$KIND" in note|design-stage) secret_scan ;; esac; }
 gate_note() {
-  secret_scan
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
-  note "note gate ok: secret scan clean"
+  note "note gate ok (secret scan runs on the staged set)"
 }
 gate_design_stage() {
   # The design PR — the pre-launch leg of the two-PR flow. Verify the design-audit RAN (its numbered
@@ -251,9 +230,8 @@ gate_design_stage() {
     if [[ "$(basename "$_f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then _da=1; break; fi
   done
   [ "$_da" = 1 ] || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md; a *_RESPONSE.md does not count) — surface for human"
-  secret_scan
   APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) and secret scan clean; pre-launch leg of the two-PR flow."
-  note "design-stage gate ok: design-audit present and secret scan clean"
+  note "design-stage gate ok: design-audit present (secret scan runs on the staged set)"
 }
 case "$KIND" in
   experiment)   gate_experiment ;;
@@ -262,9 +240,39 @@ case "$KIND" in
   *)            die "unknown KIND override: '$KIND' (expected experiment|design-stage|note)" ;;
 esac
 
-if [ "$DRY_RUN" = 1 ]; then note "--dry-run: classified=$KIND, gate PASSED; stopping before any push."; exit 0; fi
+# ---- dedicated worktree: stage $REL off origin/$BASE_BRANCH so the secret scan sees EXACTLY the commit set ----
+# Used by BOTH the --dry-run gate and the real push path, so the SCANNED tree IS the COMMITTED tree — there is
+# no working-tree-vs-index or stale-base skew between what we scan and what we push. cleanup + trap are armed
+# before the first worktree creation on either path.
+WT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it
+cleanup() { [ -n "$WT" ] && git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
+            [ "$CREATED_BRANCH" = 1 ] && git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+stage_worktree() {
+  git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
+  git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1 \
+    || die "no origin/$BASE_BRANCH ref to base the log on — fetch origin (or set LOG_EXPERIMENT_BASE_BRANCH)"
+  WT="$(mktemp -d)/wt"
+  git -C "$REPO_ROOT" worktree add -q -b "$BRANCH" "$WT" "origin/$BASE_BRANCH" || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
+  CREATED_BRANCH=1
+  mkdir -p "$WT/$(dirname "$REL")"
+  cp -r "$DIR" "$WT/$(dirname "$REL")/"
+  git -C "$WT" add -- "$REL"                          # respects the BASE tree's .gitignore (large artifacts stay on R2)
+  # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
+  # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
+  if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
+}
 
-# ---- resolve identities + mint the cross-family reviewer token up front (fail before mutating) ----
+if [ "$DRY_RUN" = 1 ]; then
+  # Stage off the LOCAL origin/$BASE_BRANCH (no fetch, no tokens) and run the SAME staged secret scan a real
+  # run would — so --dry-run validates the ACTUAL gate, not an approximation. Worktree is trap-cleaned on exit.
+  stage_worktree
+  scan_if_needed
+  note "--dry-run: classified=$KIND, gate PASSED (staged secret scan clean); stopping before any push."
+  exit 0
+fi
+
+# ---- resolve identities + mint the cross-family reviewer token up front (fail before mutating remote) ----
 [ -n "$RESEARCH_REPO" ] || die "RESEARCH_REPO is required (instance config; no default target)"
 case "$AUTHOR_FAMILY" in
   claude) REVIEWER_FAMILY=CODEX  ;;
@@ -305,22 +313,13 @@ GIT_AUTHOR="${!gitauthor_var:-}"
 [[ "$GIT_AUTHOR" =~ ^.+\ \<[^@[:space:]]+@[^@[:space:]]+\>$ ]] || die "$gitauthor_var is malformed (expected 'Name <email>'): $GIT_AUTHOR"
 GA_NAME="${GIT_AUTHOR% <*}"; GA_EMAIL="${GIT_AUTHOR#*<}"; GA_EMAIL="${GA_EMAIL%>}"
 
-# ---- branch in a DEDICATED worktree (never disturbs the shared tree) ----
+# ---- stage in the DEDICATED worktree off the FRESH base, then secret-scan the EXACT staged set ----
+# (never disturbs the shared tree). Fetch first so the PR is based on latest origin/$BASE_BRANCH AND the scan
+# runs against that same fetched base (the scanned set can't diverge from the committed set).
 cd "$REPO_ROOT"
 git fetch origin --quiet
-BRANCH="log/${SLUG}"
-WT="$(mktemp -d)/wt"
-CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it (never a pre-existing one)
-cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; [ "$CREATED_BRANCH" = 1 ] && git branch -D "$BRANCH" >/dev/null 2>&1 || true; }
-trap cleanup EXIT
-git show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
-git worktree add -q -b "$BRANCH" "$WT" "origin/$BASE_BRANCH" || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
-CREATED_BRANCH=1
-
-mkdir -p "$WT/$(dirname "$REL")"
-cp -r "$DIR" "$WT/$(dirname "$REL")/"
-git -C "$WT" add -- "$REL"                          # respects the dir's .gitignore (large artifacts stay on R2)
-git -C "$WT" diff --cached --quiet && die "nothing to commit for $REL (all gitignored?)"
+stage_worktree
+scan_if_needed
 # Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
 GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \
 GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \

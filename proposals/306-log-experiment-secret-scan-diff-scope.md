@@ -17,28 +17,30 @@ compounding bugs (issue #306):
 
 ## Approach
 
-Both fixes land in the shared `secret_scan()` helper in `log-experiment.sh` (used by the note and design-stage
-gates); nothing else changes.
+Two changes, both in `log-experiment.sh`; the gate structure is otherwise preserved.
 
 1. **Boundary guard.** Change the `sk-` alternative to `(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}` so a match must
    begin at start-of-line or after a non-word/non-hyphen char. The other patterns (`ghp_`/`github_pat_`/`AKIA`/
    PEM) are distinctive enough to leave as-is. Verified: the guard clears the `task-always-…` false-positive
    while still matching real OpenAI/Anthropic-style keys (which appear after `=`, space, quote, or `:`).
 
-2. **Scope to the changed files.** Compute the files under `$REL` that actually differ from
-   `origin/$BASE_BRANCH` — tracked diffs (`git diff --name-only origin/$BASE_BRANCH -- "$REL"`, i.e. working
-   tree vs base) plus untracked new files (`git ls-files --others --exclude-standard -- "$REL"`, matching the
-   `git add`'s gitignore semantics) — and scan only those. This is exactly the delta the PR will introduce
-   (the log commits `$DIR`'s current content onto a branch forked from `origin/$BASE_BRANCH`), so a
-   pre-existing merged file is never re-scanned.
+2. **Scan the exact staged set, in the worktree that gets committed.** Rather than reconstruct "what changed"
+   from the *current* working tree against a *stale* `origin/$BASE_BRANCH` (two things that can both diverge
+   from what git actually commits), the scan now runs on the set git has **staged** in the dedicated commit
+   worktree: `git diff --cached -z --name-only` in the same worktree the push uses, created off the freshly
+   fetched base. The log already stages by `cp`-ing `$DIR` over a base checkout and `git add`-ing `$REL`; a file
+   unchanged vs base stages nothing, so a pre-existing merged file (the #306 wiki page) is simply not in the set
+   — no special-casing needed. Because we scan *the staged index of the worktree we commit*, the scanned set is
+   the committed set **by construction**: no stale-base skew (we hold the fetched base) and no ignore-rule skew
+   (the worktree's index, under the base tree's `.gitignore`, decides what is staged — not the possibly-dirty
+   checkout). The staging helper is shared by `--dry-run` (which stages off the local base, no tokens/network,
+   and runs the identical scan, then stops) and the real push path, so `--dry-run` validates the actual gate.
 
-   **Fail-safe direction.** The changed-file list is used ONLY when the base ref exists AND both git queries
-   (`git diff`, `git ls-files`) succeed; a missing base ref *or any git failure / unbuildable list* falls back
-   to the current full-dir scan — an incomplete diff must never silently narrow the scan. Staleness of the
-   local `origin/$BASE_BRANCH` only ever *over*-scans (an older base = a larger delta), so the gate never skips
-   a file that a fresh fetch would have flagged; no network fetch is added to the gate. Deleted paths named by
-   the diff are filtered out (`[ -f ]`) before grep. An empty delta scans nothing (trivially clean); the
-   existing "nothing to commit" guard still catches a truly empty log downstream.
+   Paths are read NUL-delimited (`-z` / `read -d ''`) so a newline / quote / non-ASCII filename is scanned RAW
+   rather than git-quoted-and-skipped (a scan bypass). A missing base ref, or an empty staged delta, now fails
+   **closed** ("no `origin/$BASE_BRANCH` ref" / "nothing to commit") rather than falling back to a whole-dir
+   scan — the log cannot proceed without a base to commit against anyway, so refusing is strictly safer than
+   scanning something other than the commit.
 
 The scan stays fail-closed on grep errors (`rc>1` → die) and still reports only matching filenames, never the
 matched secret text.
@@ -48,21 +50,28 @@ matched secret text.
 - **Boundary guard alone** (issue's option a): unblocks *this* case but leaves the whole-dir scan, so any
   future merged file carrying a real-looking `sk-`/`ghp_`/`AKIA` string still permanently blocks the dir.
   Rejected as half a fix.
-- **Diff-scope alone** (issue's option b): unblocks the recurring journal case but leaves the brittle `sk-`
-  regex to false-positive on any *newly added* hyphenated phrase. Rejected as half a fix.
-- **Fetching `origin/$BASE_BRANCH` in the gate** for an exact delta: rejected — adds a network dependency to
-  the gate (and to `--dry-run`) for no safety gain, since staleness only over-scans.
-
-Both together (the issue's recommended shape) is the right fix.
+- **Working-tree-vs-base diff scoping** (issue's option b; the first-cut implementation here): scan the files
+  that differ from `origin/$BASE_BRANCH` via `git diff`/`ls-files` against the *current* tree. Rejected on
+  review: the scanned set is reconstructed from the current working tree + a stale local base, which can
+  diverge from what git actually commits — a file unchanged vs the stale ref but reintroduced vs the fetched
+  ref, or a file un-ignored in the commit worktree but ignored by the dirty checkout, would be committed without
+  being scanned. Scanning the actual staged index of the commit worktree removes that whole class by
+  construction.
+- **Fetching a base in the gate just to compute a diff**: unnecessary once we scan the staged worktree — the
+  real path already fetches + stages there, and `--dry-run` stages off the local base offline.
 
 ## Blast radius
 
-- `plugins/experiment-lifecycle/skills/log-experiment/scripts/log-experiment.sh` (`secret_scan()`) — the fix.
-  Affects the note and design-stage gates only; the experiment gate does not call `secret_scan`. No config,
-  interface, or identity changes.
+- `plugins/experiment-lifecycle/skills/log-experiment/scripts/log-experiment.sh` — the `sk-` guard + the
+  `secret_scan`→staged-set rework + a `stage_worktree` helper shared by the `--dry-run` and push paths.
+  Affects the note and design-stage gates only; the experiment gate does not scan. No config, interface, or
+  identity changes. The push/PR/merge machinery below the staging point is unchanged (it already used this
+  worktree); the only reorder is that staging now also runs under `--dry-run` (and, on the real path, after
+  token minting — still "fail before mutating the remote", since the worktree is local and trap-cleaned).
 - `plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_secret_scan_smoke.sh` (new) — an
   offline behavior smoke that drives the real script via `--dry-run` over throwaway git fixtures (no network /
-  identity), covering both fixes + the fail-safe fallback + empty-delta.
+  identity), covering the boundary guard, the staged-set scoping (unchanged file passes, new/modified secret
+  blocks), non-ASCII path handling, missing-base fail-closed, and empty-delta.
 - `.aar-ci/checks.sh` — wires the smoke to run when the script or the smoke changes (mirrors the existing
   per-helper smoke blocks).
 - `plugins/experiment-lifecycle/.claude-plugin/plugin.json` (0.3.16 → 0.3.17) + `CHANGELOG.md` — required
@@ -72,6 +81,6 @@ Product scaffold, SWE-pipeline-shipped.
 
 ## Rollout + rollback
 
-Revert the commit to restore the prior scan. No migration, no state. The fail-safe fallback means a worst-case
-bug in the diff computation (a bad ref, a git failure) degrades to the current full-dir behavior rather than to
-an unscanned log — the scan can only over-cover, never silently under-cover.
+Revert the commit to restore the prior scan. No migration, no state. Failure modes are fail-closed: a missing
+base ref or an empty delta refuses to log (never an unscanned push), and the scanned set is the committed set by
+construction, so the scan cannot silently under-cover what the PR introduces.
