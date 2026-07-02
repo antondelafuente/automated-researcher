@@ -1,7 +1,7 @@
 {
   "name": "experiment-lifecycle",
   "description": "Run GPU experiments like a researcher \u2014 the full lifecycle in three skills. design-experiment: propose with taste, write a DESIGN.md data-collection spec (what reliable, comparable data this produces + what it's designed to inform \u2014 not a pre-registered verdict), clear it with the human through verify-claims gates, emit a thin START.md brief + CHECKLIST.md gates, dispatch to a fresh-context executor. run-experiment: the zero-context executor \u2014 arm an independent self-wake for autonomous detached runs, acquire compute (gpu-job), provision + drive + collect + close (RESULTS describes the data per the DESIGN spec, cross-family audit, teardown). log-experiment: log a finished experiment, a design-stage pre-registration, or a note to the research repo as a GATED pull request and merge it \u2014 classified by the registry convention (experiment \u2192 verify the close-audit; design-stage \u2192 verify the design-audit + secret scan; note \u2192 deterministic secret scan), cross-family bot approval satisfies branch protection. Instance specifics live in an execution profile; pairs with gpu-job (backend) and verify-claims (gates).",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "author": {
     "name": "Anton de la Fuente"
   }

@@ -185,14 +185,24 @@ Why fresh-context dispatch is the default:
 - **It kills implicit-context fragility** (recycles, model-fallbacks, long threads lose warm context) and decouples
   heavy design from delegatable, fan-out execution.
 
-**The kickoff:** point the executor at `START.md` with the run-to-completion + arm-self-wake-first directive. Do NOT ask
-it to "report your first status lines and stop" — that invites a park after planning (a real failure mode). The
-executor's first action is to arm its own heartbeat/self-wake; then run to completion.
+**Land the design-stage PR FIRST — MANDATORY for pre-registered experiments (the dispatch gate).** The design-audit
+(Step 2) is the *scientific* gate: a cross-family review of the design's DATA-TRUSTABILITY. Landing it is a *separate,
+GitHub* step — the **design leg of the two-PR flow** (design merge before execution; closeout merge after results). Once
+the researcher has cleared the design, run the **`log-experiment`** skill on the experiment dir
+(`log-experiment.sh <registry-dir>`): with a `DESIGN.md` + `DESIGN_AUDIT*.md` and no `RESULTS.md` it classifies as
+**design-stage**, gates on the design-audit + a deterministic secret scan, posts that audit as the PR review record, gets
+opposite-family bot approval, and merges. It **reuses the already-run design-audit as its review record — it does NOT
+re-run the science.** **Do NOT dispatch the executor until this design-stage PR is merged.** This gate is
+substrate-neutral: it holds whether the executor is Claude, Codex, or any other substrate — there is no separate
+per-family wrapper, so a Codex-family design agent reads this same instruction. A design-side agent that has cleared the
+design-audit but not landed + merged the design-stage PR is **not done**. (Genuinely exploratory, designer-driven work
+that is never dispatched — see the last paragraph — has no pre-registration to land; this gate is the pre-registered /
+dispatch path, matching `run-experiment`'s existing close-stage `log-experiment` requirement.)
 
-**Landing the pre-registration (optional):** to land the cleared design as its own gated PR *before* the run — the
-design leg of the two-PR flow — run the **`log-experiment`** skill on the experiment dir: with a `DESIGN.md` +
-`DESIGN_AUDIT*.md` and no `RESULTS.md` it classifies as **design-stage** and gates on the design-audit. (Whether/when
-this is required — vs landing only the results PR at close — is the instance's push policy, not mandated here.)
+**The kickoff (only after the design-stage PR is merged):** point the executor at `START.md` with the
+run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your first status lines and stop" — that
+invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
+then run to completion.
 
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
 **do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass.
