@@ -255,9 +255,23 @@ actually working — this is a liveness poke, not driving it, see below). Real p
 with specifics. Stop the loop when the executor reports DONE or is reaped. Exactly **one** supervision level — the
 launcher watches the executor; nobody watches the launcher (two nested failures is out of scope). Rationale: a model
 watcher can judge idle-vs-working from the transcript — the discrimination a model-free probe (#172) cannot make.
-(Proven pattern: the 2026-07-03 hereditary-ccp-platform run, designer-of-record `/loop 20m` watchdog.) If the pane
-shows a long-running GPU step, the watchdog may fold `nvidia-smi` utilization into its periodic check too (see
-`run-experiment`'s concurrency directive).
+(Proven pattern: the 2026-07-03 hereditary-ccp-platform run, designer-of-record `/loop 20m` watchdog.)
+
+**When the pane shows a long-running GPU-bound step, fold utilization into the same cycle — a series, not a
+point read (#323).** A single `nvidia-smi` read is exactly the one-sample noise this skill distrusts elsewhere (cf.
+the DATA AUDIT gate's distrust of a 2-sample self-smoke): sample several times across the ~20-min window instead —
+`nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` run directly over the pod's SSH endpoint (resolve
+it from the run-supervision record's `lease_pod_ids` via `pod_lease.sh find-by-pod <pod-id>` → `pod_lease.sh show
+<nonce>`; this samples independently of the executor's tmux pane, so a busy pane never blocks it) — and keep the
+running series across your own loop iterations (this watchdog's own `/loop` context; the executor's
+run-supervision record is strictly relaunch-scoped state and is not the place for it). **Judge the series IN
+CONTEXT of the executor's current step**, not against a flat threshold: 0% during "waiting on judge API" is fine;
+0% for 40+ min during "training/generating" is a flatline — you already have the current-step read from bullet (b)
+above, so reuse it rather than judging utilization in isolation. **Restart-over-wait bias:** with checkpointed
+resumable state (the resume contract this skill already requires), restarting a flatlined job costs minutes while
+waiting costs hours — don't kill on one bad sample, but do recommend a restart on a sustained flatline against a
+GPU-bound step. (The sibling API-side instinct — start high, let backoff find the ceiling — is `run-experiment`'s
+concurrency directive, Execution discipline.)
 
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
 **do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass. The watchdog

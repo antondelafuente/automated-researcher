@@ -323,6 +323,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   limiting) and note what you changed in the run log — don't let a rented GPU idle at 15%. (Runtime backstop for #311;
   the dispatcher watchdog may fold `nvidia-smi` utilization into its periodic check when the pane shows a long-running
   GPU step — see `design-experiment`'s watchdog.)
+- **API loops start HIGH, not low (#323).** Any API loop (an LLM judge, corpus generation, batch scoring) starts at
+  ~**50 concurrent requests** — not 2-3 — with exponential backoff on 429/timeout and re-ramp back up after recovery
+  (not a permanent step-down). Discovering the provider's real limit is the backoff's job, not the initial guess's: a
+  conservative initial guess just burns wall-clock for nothing (a neutral-corpus generation crawled at ~50 rows/min for
+  hours against an over-conservative client; separately, judging at 2-3 workers made judging the bottleneck at ~15
+  min/student when ~50 workers cost nothing). ~50 is this default's *starting point*, not a hard cap — where your
+  **execution profile** documents a real, tighter provider quota or cost policy (`Cost / API discipline is your
+  execution profile's policy`, below), that policy governs; absent one, start at ~50 and let backoff find the ceiling.
 - **Smoke-test ladder, always.** Small model first (and any multi-unit path tested small) → smoke → full model → smoke →
   real run. Never jump straight to the full model. On a NEW dataset, smoke the first batches (memory is data-dependent).
 - **Read full samples at every stage** — *actual text*, not just aggregates. This is enforced as a **STANDING two-layer

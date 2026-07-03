@@ -36,7 +36,8 @@ directive exists yet in `run-experiment` — it names something #323 is what cre
 
 ## Approach
 
-Two text-only runtime-directive edits, no new tooling (matches the issue's "Homes" section):
+Two text-only runtime-directive edits, no new tooling (matches the issue's "Homes" section), plus the
+plugin's own version-bump + changelog convention.
 
 **1. `run-experiment` SKILL.md — new "API loops start high" bullet in Execution discipline.** Added
 immediately after the existing "Saturate the hardware" bullet (same section, same altitude, distinct
@@ -49,6 +50,10 @@ point for any pure API loop):
 - States the principle directly: discovering the provider's real limit is the backoff's job, not the
   initial guess's — an initial guess erring conservative just burns wall-clock for free.
 - Cites both motivating incidents (corpus generation, E1 judging) so the number isn't arbitrary-looking.
+- **~50 is a starting point, not a hard cap that overrides instance policy**: where the execution profile
+  documents a real, tighter provider quota or cost policy, that policy governs (cross-referencing the
+  skill's existing "Cost / API discipline is your execution profile's policy" line) — this keeps the
+  runtime default from leaking a universal number into instance-specific territory.
 
 No literal "modest concurrency" string exists in the current skill text (checked directly), so this is a
 pure addition, not a replacement — but the new bullet is written to pre-empt any future conservative
@@ -58,9 +63,15 @@ default being added here.
 `nvidia-smi` utilization into its periodic check too" with the full pattern:
 
 - Sample `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` **several times across the
-  ~20-min window**, not once.
-- **Append the series** to the run-supervision record — a trend over time, not a point read (matches the
-  skill's existing distrust of single-sample judgments elsewhere).
+  ~20-min window**, not once, run directly over the pod's SSH endpoint — resolved via the *existing*
+  `gpu-job` lookup chain (run-supervision record's `lease_pod_ids` → `pod_lease.sh find-by-pod <pod-id>` →
+  `pod_lease.sh show <nonce>` → its `ssh` field), independent of the executor's tmux pane so a busy pane
+  never blocks the sample.
+- **Keep the running series across the watchdog's own `/loop` iterations** — a trend over time, not a
+  point read (matches the skill's existing distrust of single-sample judgments elsewhere). Explicitly
+  *not* the executor's run-supervision record: that record is strictly relaunch-scoped machine-consumed
+  state (`desired_active`/`stopped`/`closed`/`lease_pod_ids`/…, one product-owned schema) and is not the
+  right home for a watchdog's own observational log.
 - **Judge in context of the executor's current step**, not against a flat threshold: 0% during "waiting on
   judge API" is fine; 0% for 40+ min during "training/generating" is a flatline. This requires the
   watchdog to already know which checklist step the executor is on — it does (bullet (b) in the same
@@ -74,6 +85,18 @@ The stale cross-reference is fixed in the same edit: `design-experiment`'s point
 API side vs GPU side), and `run-experiment`'s existing pointer to "`design-experiment`'s watchdog" is left
 as the forward pointer for the fuller pattern (no change needed there beyond a small wording touch — it
 already exists per the issue's "pointer in run-experiment" requirement).
+
+**3. `plugin.json` version bump + `CHANGELOG.md` entry.** `experiment-lifecycle` 0.3.21 → 0.3.22, per the
+repo's enforced version-bump check (`.aar-ci/checks.sh`, dimension 5: a plugin's non-manifest file changed
+→ its `plugin.json` version must strictly increase) and the standing changelog convention (every recent
+entry in `CHANGELOG.md` pairs a version bump with a dated, issue-numbered summary).
+
+**Design-review revisions (round 1, `--scaffold`):** the initial draft said "append the series to the
+run-supervision record" and left the `nvidia-smi` sampling target/seam unstated. Both are corrected above —
+the series lives in the watchdog's own loop context (not the strictly-scoped relaunch record), and the
+sample is taken over the pod's SSH endpoint via the existing `pod_lease.sh` lookup chain (no new tooling).
+The concurrency bullet also gained the execution-profile carve-out so ~50 reads as a default, not a
+universal override of instance policy.
 
 ## Alternatives considered
 
@@ -92,11 +115,14 @@ already exists per the issue's "pointer in run-experiment" requirement).
 
 ## Blast radius
 
-Text-only edits to two files, both in `plugins/experiment-lifecycle/skills/`:
-`run-experiment/SKILL.md` and `design-experiment/SKILL.md`. No code, no scripts, no schema changes, no
-config. Affects future experiment executions (both the executor's own API-loop defaults and the
-dispatcher's watchdog judgment) going forward; does not touch any in-flight run's state or any committed
-experiment records. Pure product-scaffold change — no instance-specific config, no secrets.
+Text-only edits to two skill files, both in `plugins/experiment-lifecycle/skills/`:
+`run-experiment/SKILL.md` and `design-experiment/SKILL.md`, plus the plugin's `plugin.json` version bump
+and a `CHANGELOG.md` entry. No code, no scripts, no schema changes, no config — the watchdog's `nvidia-smi`
+sampling and pod-SSH-endpoint resolution both reuse existing `gpu-job` tooling (`pod_lease.sh`) rather than
+adding any. Affects future experiment executions (both the executor's own API-loop defaults and the
+dispatcher's watchdog judgment) going forward; does not touch any in-flight run's state, the
+run-supervision record's schema, or any committed experiment records. Pure product-scaffold change — no
+instance-specific config, no secrets.
 
 ## Rollout + rollback
 
