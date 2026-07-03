@@ -1,3 +1,20 @@
+- experiment-lifecycle 0.3.22 (2026-07-03): runtime throughput defaults — API concurrency starts high, watchdog
+  tracks GPU utilization over time (#323, companion to #322). Motivating incidents: a neutral-corpus generation
+  crawled at ~50 rows/min for hours against an over-conservative client, and E1 judging at 2-3 workers made
+  judging the eval bottleneck (~15 min/student) when ~50 workers cost nothing. (1) `run-experiment` SKILL.md's
+  Execution discipline gets a new bullet: any API loop (LLM judge, corpus generation, batch scoring) starts at
+  ~50 concurrent requests, not 2-3, with exponential backoff on 429/timeout and re-ramp after recovery —
+  discovering the provider's real limit is the backoff's job, not the initial guess's; ~50 is the starting
+  point, not a hard cap, and a documented tighter execution-profile quota still governs. (2) `design-experiment`
+  SKILL.md's #292 dispatcher-watchdog paragraph is extended: during a long-running GPU-bound step, sample
+  `nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` several times across the ~20-min window
+  (over the pod's SSH endpoint via the existing `pod_lease.sh find-by-pod`/`show` lookup, independent of the
+  executor's tmux pane), keep the series across the watchdog's own loop iterations (not the executor's
+  run-supervision record, which is strictly relaunch-scoped state), and judge it in context of the executor's
+  current step — 0% during "waiting on judge API" is fine, 0% for 40+ min during "training/generating" is a
+  flatline. Restart-over-wait bias: with checkpointed resumable state, a flatlined job is cheap to restart and
+  expensive to wait out — don't kill on one bad sample, do recommend restart on a sustained flatline against a
+  GPU-bound step. Text-only; no new tooling. (#323)
 - experiment-lifecycle 0.3.21 / verify-claims 0.7.14 (2026-07-03): replace the #311/#312 serial-edge
   JUSTIFICATION framing with parallelism ENUMERATION (#322) — justification-mode invited circular
   rationalization, observed same-day in restriction-sweep-1 ("single shared GPU is the resource limit"
