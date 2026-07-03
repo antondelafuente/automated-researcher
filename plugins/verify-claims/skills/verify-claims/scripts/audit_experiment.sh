@@ -42,7 +42,12 @@
 # reproduction, cheaper-decisive alternatives. Claim-rigor (decision rules, claim-scope, power) is audited
 # ONLY if the design asserts a verdict — measurement designs state a purpose, not a claim. Motivated by
 # midtrain-interp v2, whose two real flaws (in-sample steering eval; no random-direction control)
-# were DESIGN flaws only caught at close.
+# were DESIGN flaws only caught at close. Dimension 7 (SCHEDULE EFFICIENCY, #311) is motivated by the
+# 2026-07-03 hereditary-ccp-platform incident: a DESIGN.md declared serial-overnight Tinker training "the
+# cheap default" for 15 LoRA runs on a false per-wallclock premise — Tinker bills per training compute, so
+# 14 parallel submissions cost the same as 14 serial ones — caught only by the researcher in conversation
+# after the design had already passed this same audit; wall-clock ETA dropped ~2-4 days to ~1 day at zero
+# cost delta.
 # Env: AAR_SUBSTRATE=claude|codex (family that RAN the exp; REQUIRED — fails closed if unset/unknown so a
 #                                  wrong default can't make the audit same-family; auditor = opposite family)
 #      AUDIT_VERIFIER_CMD=...      (OVERRIDE the auditor; honored only if a DIFFERENT family than the runner,
@@ -148,6 +153,15 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    falsifiers with thresholds; claim-scope: does the evidence license the claim — causal strength,
    generality, in-sample-vs-held-out; power: can it distinguish the asserted hypotheses at the planned n).
    If the design states a PURPOSE but no verdict, this dimension is 'no material finding' — NOT 'incomplete.'
+7. SCHEDULE EFFICIENCY (falsifiable) — does the schedule justify EVERY serial edge (a step that waits on a
+   prior step finishing rather than launching alongside it)? Each one must name what it buys: a validation
+   gate (a pilot/smoke that must pass first), a true data dependency (step B needs step A's output), or a
+   shared-resource limit (e.g. one GPU, one rate-limited endpoint) — NOT bare "cheaper" or "simpler" without
+   a billing argument. If the design calls a serial arrangement cheaper, does its reasoning actually match
+   the billing model — does compute cost PER-COMPUTE (Tinker-style: N parallel submissions cost the same as
+   N serial ones, so serializing to save money is a false economy) or PER-WALLCLOCK (a rented pod, where
+   concurrency needs more units, not zero-cost parallelism)? Flag a serial default that (a) names no reason,
+   or (b) claims a cost saving under the wrong billing model for that resource.
 
 Also emit, separate from the findings, a one-line QUALITATIVE EVIDENCE-QUALITY read — the good/bad signal the
 researcher wants — e.g. 'this will produce a clean comparable number' / 'this confound will muddy it' /
