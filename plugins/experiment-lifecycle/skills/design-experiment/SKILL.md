@@ -223,7 +223,8 @@ no crash, so a crash supervisor never fires and the executor's own self-wake (wh
 API-wedged turn in its own rate-limited session) can't reliably un-wedge it. So the moment you dispatch an executor,
 arm **one watchdog loop per executor** (~20 min cadence) — a **Claude Code** designer uses its built-in **`/loop`**
 (`/loop 20m <check run-<exp>'s tmux pane, assess, nudge if wedged>`); a **Codex** designer has no equivalent today —
-that's the open gap tracked at #223, not something to invent here. Each iteration the watchdog reads the executor's
+that's the open gap tracked at #223, not something to invent here, so note the gap and fall back to ad hoc / manual
+checks on the same ~20 min cadence until #223 lands — this does NOT block dispatch. Each iteration the watchdog reads the executor's
 live state (e.g. `tmux capture-pane -t run-<exp> -p | tail -40`) and assesses three things: (a) making progress vs
 wedged, (b) which checklist step it's on, (c) whether it flagged a load-bearing fork/question that's sitting
 unanswered. Wedged → send a cheap, idempotent nudge (even `hello` resumes an API-errored session; low harm if it was
