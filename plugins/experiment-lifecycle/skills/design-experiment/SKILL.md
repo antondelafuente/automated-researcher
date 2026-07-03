@@ -86,7 +86,8 @@ are not.** Pin:
   starts at ~50.** Per-wallclock cost is linear in pod count, so pod-count conservatism buys nothing. The only
   real caps, name them explicitly per step: (a) **setup/warmup fraction** — fan out until setup is roughly
   20-30% of the unit of work (e.g. ~15-20 min pod warmup against a 1h generation unit is fine at one pod per
-  unit), (b) **GPU stock/quota**, (c) a **true data dependency or validation gate**. A resource limit that is
+  unit), (b) **GPU stock/quota, or a real API/provider rate limit** (a documented requests-per-minute or
+  concurrent-request cap, not a guess), (c) a **true data dependency or validation gate**. A resource limit that is
   itself a discretionary design choice (e.g. "only one pod") is not a valid cap — it's the thing enumeration
   is supposed to catch. (This is the generative half; Step 2's design-audit runs the adversarial half — it
   checks the enumeration is complete and the design sits at max fan-out per step, or the researcher explicitly

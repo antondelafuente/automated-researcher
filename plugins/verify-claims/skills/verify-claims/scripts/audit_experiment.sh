@@ -166,7 +166,8 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    this audit as a justification, where the single GPU was itself a discretionary one-pod choice made a line
    earlier). Instead independently ask, for each serial edge: what stops this step from fanning out? The only
    valid caps are (a) setup/warmup fraction too high relative to the unit of work, (b) a genuine GPU stock/
-   quota ceiling, (c) a true data dependency (step B needs step A's output) or a validation gate (a pilot/
+   quota ceiling OR a real API/provider rate limit (a documented requests-per-minute or concurrent-request
+   cap, not a guess), (c) a true data dependency (step B needs step A's output) or a validation gate (a pilot/
    smoke that must pass first). A resource limit that is ITSELF a discretionary design choice (e.g. 'only one
    pod') is NOT a valid cap — flag it as under-enumerated, not as unjustified. Separately: if the design calls
    a serial arrangement cheaper, does its reasoning actually match the billing model — does compute cost
