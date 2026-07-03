@@ -162,6 +162,11 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    N serial ones, so serializing to save money is a false economy) or PER-WALLCLOCK (a rented pod, where
    concurrency needs more units, not zero-cost parallelism)? Flag a serial default that (a) names no reason,
    or (b) claims a cost saving under the wrong billing model for that resource.
+8. PRESENTATION-DATA PERSISTENCE — if the design has a Presentation subsection (per-figure/table plots +
+   the columns/fields each needs, at what granularity), does the data-collection spec actually PERSIST every
+   field the Presentation section requires, at the granularity it requires? A Presentation section that names
+   a column or a per-arm/per-row breakdown the collection plan never records is an execution-under-specification
+   gap that surfaces only after the run. No Presentation subsection → 'no material finding,' not incomplete.
 
 Also emit, separate from the findings, a one-line QUALITATIVE EVIDENCE-QUALITY read — the good/bad signal the
 researcher wants — e.g. 'this will produce a clean comparable number' / 'this confound will muddy it' /
