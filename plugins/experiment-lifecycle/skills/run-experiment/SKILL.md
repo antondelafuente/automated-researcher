@@ -245,6 +245,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     showing, and an artifact-store pointer for each.
   Render figures and populate dataset entries per what the cleared DESIGN.md Presentation spec asked for — this is
   implementation of an agreed spec, not improvisation. An arm/dataset the spec never mentioned needs no entry.
+  The manifest's `title` and `labels` follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an
+  optional env var naming a path or URI) is set — unset, the plain-language requirement above stands on its own.
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
   adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The

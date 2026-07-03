@@ -68,7 +68,9 @@ are not.** Pin:
   spec, same posture as the rest of `DESIGN.md`). Cover both halves: the headline-figure spec, and the dataset/column
   organization (training + eval datasets, which columns are worth surfacing) — so both get cleared by the researcher
   in this SAME design-clearance pass, with no separate gate. This is what `design-audit` (Step 2) checks the
-  data-collection plan actually persists.
+  data-collection plan actually persists. The figure captions, story wording, and the experiment's human-facing
+  title follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an optional env var naming a path or
+  URI) is set — unset, the plain-language requirement above stands on its own.
 - **Provenance gets verified or flagged, never asserted.** Before stating any lineage/provenance, sweep the archive for
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
