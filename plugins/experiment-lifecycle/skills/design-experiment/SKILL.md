@@ -30,6 +30,8 @@ You are the **design-side agent**, working with the researcher (the human who ho
 >   `--data` on data). **Invoke the verify-claims skill; let it resolve its own scripts** — never hardcode a path to
 >   another plugin's scripts (installs are version-pinned; the companion skill is the stable interface).
 > - **`run-experiment`** — the execute half that the dispatched executor loads.
+> - **`log-experiment`** — logs the design-stage pre-registration (Step 4, below) as a gated PR before
+>   dispatch, and later logs the finished result at close; invoke it rather than hand-rolling the PR.
 
 ## The posture — together, with taste (the researcher steers hardest here)
 

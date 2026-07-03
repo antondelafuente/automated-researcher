@@ -30,25 +30,41 @@ Two independent doc-currency gaps, both docs-only:
 
 ## Approach
 
-Both fixes are mechanical text syncs, no code/behavior change.
+Both fixes are mechanical text syncs, no code/behavior change. Revised in response to `--scaffold`
+review (see Alternatives considered): the `log-experiment` fix needed to cover every install/discovery
+surface, not just README, and the DISPOSITIONS sync needed to also touch its packaged mirrors and keep
+`AGENTS.md` as this product's canonical copy rather than inverting ownership to `agentic-engineering`.
 
-**README.md:**
-- In the "If you are a coding agent" Codex/Agent-Skills symlink block: change "`experiment-lifecycle`
-  has two" → "`experiment-lifecycle` has three", and add the `log-experiment` `ln -s` line alongside the
-  existing `design-experiment` / `run-experiment` lines (same plugin, same directory-naming pattern).
-- In the modules table's `experiment-lifecycle` row: extend the description from
-  `design-experiment (…) → run-experiment (…)` to also name `log-experiment`'s role — landing the
-  design-stage pre-registration (and, later, the finished result) to the research repo as a gated PR —
-  so the row reflects all three skills and their order in the lifecycle.
+**`log-experiment` doc-currency (README + the other surfaces the review found still stale):**
+- README's "If you are a coding agent" Codex/Agent-Skills symlink block: "`experiment-lifecycle` has
+  two" → "has three", plus the `log-experiment` `ln -s` line alongside `design-experiment` /
+  `run-experiment`.
+- README's modules table `experiment-lifecycle` row: extended to name all three skills and their order
+  — `design-experiment` → `log-experiment` (land the design-stage pre-registration, later the finished
+  result, as a gated PR) → `run-experiment`.
+- Root `.claude-plugin/marketplace.json`'s `experiment-lifecycle` description: same three-skill update
+  (per-plugin `plugins/experiment-lifecycle/.claude-plugin/plugin.json`'s own description already names
+  all three — only the root marketplace copy was stale).
+- `design-experiment/SKILL.md`'s "Companion skills this one composes" list: added `log-experiment` (the
+  skill's own body already instructs "run the `log-experiment` skill" at Step 4, but the declared
+  dependency list omitted it — the two were out of sync within the same file).
+- `experiment-lifecycle`'s `plugin.json` version bumped (0.3.22 → 0.3.23): a non-manifest file in that
+  plugin dir changed (`design-experiment/SKILL.md`), and `.aar-ci/checks.sh` requires the version to
+  move so version-pinned installs pick up the fix.
 
-**AGENTS.md:**
-- Replace this repo's `<!-- DISPOSITIONS:START -->` … `<!-- DISPOSITIONS:END -->` block with the current
-  canonical text from `agentic-engineering`'s `references/DISPOSITIONS.md` (read fresh from that repo's
-  checkout at implementation time — the merged #37 state), preserving the block markers so
-  `.aar-ci/checks.sh`'s drift check continues to find and diff it.
-- Add one line inside the block noting that `agentic-engineering`'s copy is canonical and this one is a
-  synced mirror — so a future drift is caught as "this copy is stale," not silently re-diverged, and a
-  future editor knows which file to change first.
+**AGENTS.md DISPOSITIONS sync (kept AGENTS.md canonical, not inverted):**
+- Replaced this repo's `<!-- DISPOSITIONS:START -->` … `<!-- DISPOSITIONS:END -->` block with the
+  current canonical text (the #315 no-self-flip contract + the fixed dangling `#49` reference), sourced
+  from `agentic-engineering`'s `references/DISPOSITIONS.md` as of the merged #37 state — but as *source
+  material for the text*, not as a change of which repo owns the definition. `AGENTS.md` already states
+  "This is the definition (the product-owned, versioned part)"; that ownership is unchanged here. No
+  "agentic-engineering is canonical" line was added (see Alternatives considered).
+- Applied the identical sync to `automated-researcher`'s own two packaged mirrors that
+  `.aar-ci/checks.sh` requires to byte-match the `AGENTS.md` block:
+  `plugins/feedback-loop/skills/file-feedback/references/DISPOSITIONS.md` and
+  `plugins/feedback-loop/skills/triage-feedback/references/DISPOSITIONS.md`.
+- `feedback-loop`'s `plugin.json` version bumped (0.1.3 → 0.1.4) for the same reason as
+  `experiment-lifecycle` above — its packaged references changed.
 
 ## Alternatives considered
 
@@ -60,13 +76,27 @@ Both fixes are mechanical text syncs, no code/behavior change.
 - **Leave the `#49` reference as a link instead of removing the issue number.** Rejected: matching the
   canonical text verbatim is the point of a "sync" fix — a locally-reworded version would just be a new
   drift instance in miniature.
+- **Note that `agentic-engineering`'s copy is canonical.** Rejected on `--scaffold` review (HIGH-adjacent
+  MED finding): this repo's `AGENTS.md` explicitly declares itself "the definition (the product-owned,
+  versioned part)," and `.aar-ci/checks.sh` extracts *from* `AGENTS.md` as the source of truth for its
+  own packaged-mirror drift check. Declaring `agentic-engineering` canonical here would invert that
+  ownership and contradict both the existing constitution text and the check that already treats
+  `AGENTS.md` as canonical — the text happened to land in `agentic-engineering`'s copy first, but that's
+  an editing-order accident, not a change of which repo owns the definition.
+- **Update README/marketplace.json only, leaving `design-experiment/SKILL.md`'s companion list and the
+  per-plugin manifest version stale.** Rejected on `--scaffold` review: a zero-context install that reads
+  only the companion-skill dependency list (not the prose that mentions `log-experiment` later in the
+  same file) would still under-install, and a changed packaged file without a version bump defeats
+  version-pinned installs' ability to detect the fix.
 
 ## Blast radius
 
-Docs only: `README.md` and `AGENTS.md` in `automated-researcher`. No scripts, skills, or CI behavior
-change. `.aar-ci/checks.sh`'s DISPOSITIONS drift check (if present) should pass post-sync rather than
-flag drift. Does not touch anything else in AGENTS.md — issue #327 is scoped to a separate follow-up
-touching the same file after this merges.
+Docs + manifests only, across two plugins: `README.md`, `AGENTS.md`, `.claude-plugin/marketplace.json`,
+`plugins/experiment-lifecycle/.claude-plugin/plugin.json`, `plugins/experiment-lifecycle/skills/design-experiment/SKILL.md`,
+`plugins/feedback-loop/.claude-plugin/plugin.json`, and both `feedback-loop` packaged
+`references/DISPOSITIONS.md` copies. No scripts, skill logic, or CI behavior change. Does not touch
+anything else in `AGENTS.md` — issue #327 is scoped to a separate follow-up touching the same file after
+this merges.
 
 ## Rollout + rollback
 

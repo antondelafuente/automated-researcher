@@ -33,12 +33,13 @@ Your human wants these skills available. Do this, in order:
      `ship-change` (the `aar-engineering` plugin) — lives in the separate `agentic-engineering` repo;
      install it from there only if you're developing these skills, not just using them.)
    - *Codex CLI / other Agent-Skills harnesses* — symlink each source skill dir into the harness's
-     skills directory (note a plugin can expose more than one skill — `experiment-lifecycle` has two):
+     skills directory (note a plugin can expose more than one skill — `experiment-lifecycle` has three):
      ```
      mkdir -p ~/.codex/skills
      ln -s ~/automated-researcher/plugins/gpu-job/skills/gpu-job                    ~/.codex/skills/gpu-job
      ln -s ~/automated-researcher/plugins/verify-claims/skills/verify-claims        ~/.codex/skills/verify-claims
      ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/design-experiment ~/.codex/skills/design-experiment
+     ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/log-experiment    ~/.codex/skills/log-experiment
      ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/run-experiment    ~/.codex/skills/run-experiment
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/file-feedback        ~/.codex/skills/file-feedback
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/triage-feedback      ~/.codex/skills/triage-feedback
@@ -82,7 +83,7 @@ Your human wants these skills available. Do this, in order:
 |---|---|---|
 | **gpu-job** | disposable cloud GPU pods: deploy, run detached, persist artifacts, verified teardown — never bill an idle GPU | shipped |
 | **verify-claims** | adversarial fact / design / data / code review of load-bearing work, read by an independent model *family* — the cross-family validity gate | shipped |
-| **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) | shipped |
+| **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `log-experiment` (land the design-stage pre-registration, and later the finished result, to the research repo as a gated PR) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) | shipped |
 | **feedback-loop** | report and triage scaffold friction: `file-feedback` captures product/user pain while fresh, `triage-feedback` maintains dispositions and routes fixes through the product workflow | shipped |
 | *reproduce-paper* | point an agent at a paper, get a graded reproduction | planned |
 
