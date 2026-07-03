@@ -39,7 +39,8 @@ in the reusable scaffold. Search existing Issues first:
 gh issue list -R "$FEEDBACK_PRODUCT_REPO" --state open --limit 100 --search "<terms>"
 ```
 
-If an Issue exists, add a recurrence comment instead of duplicating it. If not, file a new Issue with a type label
+If an Issue exists, add a recurrence comment instead of duplicating it (check it's still live first — see
+Etiquette). If not, file a new Issue with a type label
 (`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly one disposition label when the disposition is
 clear (`ready`, `needs-shaping`, `blocked`, `parked`, or `other`). If you cannot judge disposition yet,
 leave the disposition off rather than guessing. Read `references/DISPOSITIONS.md` for the label contract.
@@ -98,3 +99,10 @@ researcher's clearance.
 - One root cause per entry.
 - Keep product facts in product Issues and deployment facts in the consuming instance.
 - Prefer code or a checklist gate over prose when a recurring footgun can be prevented mechanically.
+- Before posting an addendum or scope-change comment on an existing issue, check its state and whether an
+  implementing PR/branch is already in flight (`gh issue view <N> -R "$FEEDBACK_PRODUCT_REPO" --json
+  state,closed` / `gh pr list -R "$FEEDBACK_PRODUCT_REPO" --search "<N>" --state open`) — on a deployment with
+  fast auto-implementation the tracker is a queue, not a notebook, and a `ready` issue can close within the
+  hour. If it is closed or in flight, file a new small ticket linking the old one instead: a comment there is
+  a dead letter the implementor never sees. Shaping comments on an open `needs-shaping` issue remain the
+  intended flow.
