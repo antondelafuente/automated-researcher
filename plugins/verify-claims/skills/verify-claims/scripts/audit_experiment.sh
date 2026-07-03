@@ -47,7 +47,12 @@
 # cheap default" for 15 LoRA runs on a false per-wallclock premise — Tinker bills per training compute, so
 # 14 parallel submissions cost the same as 14 serial ones — caught only by the researcher in conversation
 # after the design had already passed this same audit; wall-clock ETA dropped ~2-4 days to ~1 day at zero
-# cost delta.
+# cost delta. Dimension 7 was REFRAMED #322 (same day as #311/#312 shipped): the original "justify every
+# serial edge" framing produced a CIRCULAR justification in restriction-sweep-1 ("single shared GPU is the
+# resource limit" justifying a serial edge, where the single GPU was itself a discretionary one-pod choice
+# made a line earlier) that this same audit PASSED, because both author and auditor were in
+# justification-mode — defending/checking the plan as drawn instead of generating the parallel alternative.
+# The dimension now asks the auditor to enumerate, not adjudicate a justification.
 # Env: AAR_SUBSTRATE=claude|codex (family that RAN the exp; REQUIRED — fails closed if unset/unknown so a
 #                                  wrong default can't make the audit same-family; auditor = opposite family)
 #      AUDIT_VERIFIER_CMD=...      (OVERRIDE the auditor; honored only if a DIFFERENT family than the runner,
@@ -153,15 +158,23 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    falsifiers with thresholds; claim-scope: does the evidence license the claim — causal strength,
    generality, in-sample-vs-held-out; power: can it distinguish the asserted hypotheses at the planned n).
    If the design states a PURPOSE but no verdict, this dimension is 'no material finding' — NOT 'incomplete.'
-7. SCHEDULE EFFICIENCY (falsifiable) — does the schedule justify EVERY serial edge (a step that waits on a
-   prior step finishing rather than launching alongside it)? Each one must name what it buys: a validation
-   gate (a pilot/smoke that must pass first), a true data dependency (step B needs step A's output), or a
-   shared-resource limit (e.g. one GPU, one rate-limited endpoint) — NOT bare "cheaper" or "simpler" without
-   a billing argument. If the design calls a serial arrangement cheaper, does its reasoning actually match
-   the billing model — does compute cost PER-COMPUTE (Tinker-style: N parallel submissions cost the same as
-   N serial ones, so serializing to save money is a false economy) or PER-WALLCLOCK (a rented pod, where
-   concurrency needs more units, not zero-cost parallelism)? Flag a serial default that (a) names no reason,
-   or (b) claims a cost saving under the wrong billing model for that resource.
+7. SCHEDULE EFFICIENCY (falsifiable, ENUMERATION not justification — #322) — for each step in the schedule,
+   does the design ENUMERATE its max sensible fan-out (how many pods/API calls it could run at once) and
+   price it, and is the design actually AT that max fan-out — or did the researcher explicitly decline it?
+   Do not check whether a serial edge is 'justified' — that invites the author and the auditor to both anchor
+   on the plan as drawn (real case, restriction-sweep-1: 'single shared GPU is the resource limit' passed
+   this audit as a justification, where the single GPU was itself a discretionary one-pod choice made a line
+   earlier). Instead independently ask, for each serial edge: what stops this step from fanning out? The only
+   valid caps are (a) setup/warmup fraction too high relative to the unit of work, (b) a genuine GPU stock/
+   quota ceiling OR a real API/provider rate limit (a documented requests-per-minute or concurrent-request
+   cap, not a guess), (c) a true data dependency (step B needs step A's output) or a validation gate (a pilot/
+   smoke that must pass first). A resource limit that is ITSELF a discretionary design choice (e.g. 'only one
+   pod') is NOT a valid cap — flag it as under-enumerated, not as unjustified. Separately: if the design calls
+   a serial arrangement cheaper, does its reasoning actually match the billing model — does compute cost
+   PER-COMPUTE (Tinker-style: N parallel submissions cost the same as N serial ones, so serializing to save
+   money is a false economy) or PER-WALLCLOCK (a rented pod, where concurrency needs more units, not
+   zero-cost parallelism)? Flag (a) a step with no fan-out enumeration at all, (b) a serial default sitting
+   below its own stated max with no cap named, or (c) a claimed cost saving under the wrong billing model.
 8. PRESENTATION-DATA PERSISTENCE — if the design has a Presentation subsection (per-figure/table plots +
    the columns/fields each needs, at what granularity), does the data-collection spec actually PERSIST every
    field the Presentation section requires, at the granularity it requires? A Presentation section that names
