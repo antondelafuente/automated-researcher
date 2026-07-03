@@ -54,7 +54,10 @@ evidence** ladder — each rung read by a foreign model family you're too invest
   comparability / co-measurement, confounds that corrupt the number, variable-pinning, anchor reproduction,
   honest component / parse% reporting, right/cheapest-data — plus a qualitative evidence-quality read.
   Claim-rigor (decision rules, claim-scope, power) fires **only if the design asserts a verdict** — a
-  measurement design states a purpose, not a claim. (Audit once → triage as a peer → surface survivors to the
+  measurement design states a purpose, not a claim. **Schedule efficiency (#311):** does every serial edge in
+  the schedule justify itself (a validation gate / true data dependency / shared-resource limit), and does
+  its cost reasoning distinguish per-compute billing (N parallel costs the same as N serial) from
+  per-wallclock billing (a rented pod)? (Audit once → triage as a peer → surface survivors to the
   human; on a re-run it's a peer debate, not a fresh scan.)
 - **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
   vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a

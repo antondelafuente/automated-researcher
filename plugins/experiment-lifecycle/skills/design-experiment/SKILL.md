@@ -66,7 +66,16 @@ are not.** Pin:
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
   silently corrupts every comparison built on it.) State unverified readings as "documented reading, unverified."
-- **Cost estimate** (GPU $/hr × runtime; API cascade) + the parallel-wave shape (independent arms launch together).
+- **While sketching the schedule, actively brainstorm what can run concurrently** — not just within a wave, but
+  restructuring: shard a monolithic step, or start a step before its wave fully completes. **Multi-pod fan-out is an
+  acceptable DEFAULT answer, not a special case that needs justifying** — wall-clock matters. (This is the generative
+  half; Step 2's design-audit runs the adversarial half — every serial edge you *do* keep must justify itself there.)
+- **Cost estimate** (GPU $/hr × runtime; API cascade) + **justify every serialization**: each serial edge in the
+  schedule must name what it buys (a validation gate, a true data dependency, or a shared-resource limit) — stating
+  "arms within a wave launch in parallel" is not enough if a *later* step is serialized without a reason. "Cheaper"
+  only counts if the billing model actually charges for concurrency: **per-compute billing** (e.g. Tinker — N parallel
+  runs cost the same as N serial ones) makes serializing to "save money" a false economy, unlike **per-wallclock
+  billing** (a rented pod, where concurrency needs more units to get more wall-clock for the same $).
 
 ## Step 2 — The pre-launch gates (both MANDATORY for a new design, before any GPU/$ spend)
 
@@ -82,7 +91,11 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   execution under-specification, and is-this-the-right/cheapest-data. It leads with a qualitative evidence-quality read
   ("this will produce a clean comparable number" / "this confound will muddy it"). Claim-rigor dimensions (decision-rule
   soundness, claim-scope, power) fire **only if the design actually asserts a verdict** — a measurement design that states a
-  purpose but no decision rule is not "incomplete." (Origin: a real case where two design flaws survived until close because
+  purpose but no decision rule is not "incomplete." **Schedule efficiency (#311):** every serial edge must justify what it
+  buys (a gate / true data dependency / shared-resource limit), and cost reasoning must distinguish per-compute billing
+  (Tinker-style — parallel is free) from per-wallclock billing (a rented pod) — the check that would have failed the
+  2026-07-03 hereditary-ccp-platform incident (serial Tinker training called "cheap" on a false per-wallclock premise).
+  (Origin: a real case where two design flaws survived until close because
   nothing audited the *logic* pre-launch — and two later cases where every claim-rigor HIGH dissolved the moment the
   researcher said "just plot the data," while every measurement-validity finding survived and mattered.)
 - **The loop: audit ONCE → triage as a PEER → surface survivors to the researcher → they arbitrate.**
@@ -204,8 +217,29 @@ run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your
 invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
 then run to completion.
 
+**Arm the dispatcher-side watchdog (standard, the same moment you kick off) — the #292 pattern.** A dispatched
+executor can hit a Claude-Code-side API error (usually a rate limit) and go **silent-idle mid-turn**: process alive,
+no crash, so a crash supervisor never fires and the executor's own self-wake (which is for *benign* idle, not an
+API-wedged turn in its own rate-limited session) can't reliably un-wedge it. So the moment you dispatch an executor,
+arm **one watchdog loop per executor** (~20 min cadence) — a **Claude Code** designer uses its built-in **`/loop`**
+(`/loop 20m <check run-<exp>'s tmux pane, assess, nudge if wedged>`); a **Codex** designer has no equivalent today —
+that's the open gap tracked at #223, not something to invent here, so note the gap and fall back to ad hoc / manual
+checks on the same ~20 min cadence until #223 lands — this does NOT block dispatch. Each iteration the watchdog reads the executor's
+live state (e.g. `tmux capture-pane -t run-<exp> -p | tail -40`) and assesses three things: (a) making progress vs
+wedged, (b) which checklist step it's on, (c) whether it flagged a load-bearing fork/question that's sitting
+unanswered. Wedged → send a cheap, idempotent nudge (even `hello` resumes an API-errored session; low harm if it was
+actually working — this is a liveness poke, not driving it, see below). Real problems → surface to the researcher
+with specifics. Stop the loop when the executor reports DONE or is reaped. Exactly **one** supervision level — the
+launcher watches the executor; nobody watches the launcher (two nested failures is out of scope). Rationale: a model
+watcher can judge idle-vs-working from the transcript — the discrimination a model-free probe (#172) cannot make.
+(Proven pattern: the 2026-07-03 hereditary-ccp-platform run, designer-of-record `/loop 20m` watchdog.) If the pane
+shows a long-running GPU step, the watchdog may fold `nvidia-smi` utilization into its periodic check too (see
+`run-experiment`'s concurrency directive).
+
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
-**do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass.
+**do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass. The watchdog
+nudge above is bounded health supervision, not driving: it pokes an idle session back to life, it does not answer
+design questions or steer the method — a real question still routes back to you as a load-bearing flag, same as always.
 
 **When to keep the designer driving instead (per-experiment, reversible):** genuinely exploratory / iterative work where
 the design *is* the discovery and can't be fully pre-specified. For pre-registered, well-specified designs, dispatch it.

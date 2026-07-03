@@ -1,7 +1,7 @@
 {
   "name": "verify-claims",
   "description": "Verification gates across the experiment lifecycle — deterministic + cross-family: verify_claim (the brief's FACTS), audit_experiment --design (the design's DATA-TRUSTABILITY), the data layer (audit_data.py full-pool determinism + --data cross-family semantics, the DATA's sanity vs intent), and close (the result's EVIDENCE). facts→logic→data→evidence; the model-judged rungs are read by a foreign model family. (The SWE-review modes --scaffold/--code live in agentic-engineering's verify-claims, sourced by ship-change.)",
-  "version": "0.7.11",
+  "version": "0.7.12",
   "author": {
     "name": "Anton de la Fuente"
   }

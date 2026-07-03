@@ -295,6 +295,13 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 ## Execution discipline (how to run the science well)
 
 - **Parallelize, then iterate.** Run a batch at once (parallel units); use the *whole set* to decide the next batch.
+  **Independent units (training runs, evals, API calls) run concurrently by default** — serialize only when it buys
+  something real (a validation gate, a true data dependency, a shared-resource limit), matching the design's own
+  serialization-justification requirement (`design-experiment` Step 1). **Saturate the hardware:** when GPU utilization
+  is low during a long-running step, raise the bottleneck knob (batch size, concurrent requests, whatever's actually
+  limiting) and note what you changed in the run log — don't let a rented GPU idle at 15%. (Runtime backstop for #311;
+  the dispatcher watchdog may fold `nvidia-smi` utilization into its periodic check when the pane shows a long-running
+  GPU step — see `design-experiment`'s watchdog.)
 - **Smoke-test ladder, always.** Small model first (and any multi-unit path tested small) → smoke → full model → smoke →
   real run. Never jump straight to the full model. On a NEW dataset, smoke the first batches (memory is data-dependent).
 - **Read full samples at every stage** — *actual text*, not just aggregates. This is enforced as a **STANDING two-layer
