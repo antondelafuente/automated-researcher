@@ -75,16 +75,27 @@ are not.** Pin:
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
   silently corrupts every comparison built on it.) State unverified readings as "documented reading, unverified."
-- **While sketching the schedule, actively brainstorm what can run concurrently** — not just within a wave, but
-  restructuring: shard a monolithic step, or start a step before its wave fully completes. **Multi-pod fan-out is an
-  acceptable DEFAULT answer, not a special case that needs justifying** — wall-clock matters. (This is the generative
-  half; Step 2's design-audit runs the adversarial half — every serial edge you *do* keep must justify itself there.)
-- **Cost estimate** (GPU $/hr × runtime; API cascade) + **justify every serialization**: each serial edge in the
-  schedule must name what it buys (a validation gate, a true data dependency, or a shared-resource limit) — stating
-  "arms within a wave launch in parallel" is not enough if a *later* step is serialized without a reason. "Cheaper"
-  only counts if the billing model actually charges for concurrency: **per-compute billing** (e.g. Tinker — N parallel
-  runs cost the same as N serial ones) makes serializing to "save money" a false economy, unlike **per-wallclock
-  billing** (a rented pod, where concurrency needs more units to get more wall-clock for the same $).
+- **While sketching the schedule, ENUMERATE — don't justify (#322).** For each step, name its max sensible
+  fan-out and price it, rather than defending whatever serialization is already on the page: justification
+  recruits motivated reasoning in both author and auditor (real case, restriction-sweep-1: "single shared GPU
+  is the resource limit" justified a serial edge, where the single GPU was itself a discretionary one-pod
+  choice made a line earlier — the design-audit's schedule-efficiency dimension passed it because both sides
+  were defending the plan as drawn instead of generating the parallel alternative). Concrete defaults for this
+  researcher's instance (adjust to your own execution profile / provider quota if it differs): **5-10 pods is
+  the NORMAL fan-out for parallelizable GPU work — not an escalation needing permission; API concurrency
+  starts at ~50.** Per-wallclock cost is linear in pod count, so pod-count conservatism buys nothing. The only
+  real caps, name them explicitly per step: (a) **setup/warmup fraction** — fan out until setup is roughly
+  20-30% of the unit of work (e.g. ~15-20 min pod warmup against a 1h generation unit is fine at one pod per
+  unit), (b) **GPU stock/quota**, (c) a **true data dependency or validation gate**. A resource limit that is
+  itself a discretionary design choice (e.g. "only one pod") is not a valid cap — it's the thing enumeration
+  is supposed to catch. (This is the generative half; Step 2's design-audit runs the adversarial half — it
+  checks the enumeration is complete and the design sits at max fan-out per step, or the researcher explicitly
+  declined it.)
+- **Cost estimate** (GPU $/hr × runtime; API cascade): price each step's max-fan-out alternative alongside its
+  serialized form. "Cheaper" only counts if the billing model actually charges for concurrency: **per-compute
+  billing** (e.g. Tinker — N parallel runs cost the same as N serial ones) makes serializing to "save money" a
+  false economy, unlike **per-wallclock billing** (a rented pod, where concurrency needs more units to get
+  more wall-clock for the same $).
 
 ## Step 2 — The pre-launch gates (both MANDATORY for a new design, before any GPU/$ spend)
 
@@ -100,10 +111,12 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   execution under-specification, and is-this-the-right/cheapest-data. It leads with a qualitative evidence-quality read
   ("this will produce a clean comparable number" / "this confound will muddy it"). Claim-rigor dimensions (decision-rule
   soundness, claim-scope, power) fire **only if the design actually asserts a verdict** — a measurement design that states a
-  purpose but no decision rule is not "incomplete." **Schedule efficiency (#311):** every serial edge must justify what it
-  buys (a gate / true data dependency / shared-resource limit), and cost reasoning must distinguish per-compute billing
-  (Tinker-style — parallel is free) from per-wallclock billing (a rented pod) — the check that would have failed the
-  2026-07-03 hereditary-ccp-platform incident (serial Tinker training called "cheap" on a false per-wallclock premise).
+  purpose but no decision rule is not "incomplete." **Schedule efficiency (#311, reframed #322):** enumerate the
+  parallelizable steps and their max sensible fan-out; is the design at max fan-out for each, or did the researcher
+  explicitly decline it? A resource limit that is itself a discretionary design choice (e.g. "only one pod") is NOT
+  a valid reason to serialize. Cost reasoning must distinguish per-compute billing (Tinker-style — parallel is free)
+  from per-wallclock billing (a rented pod) — the check that would have failed the 2026-07-03 hereditary-ccp-platform
+  incident (serial Tinker training called "cheap" on a false per-wallclock premise).
   (Origin: a real case where two design flaws survived until close because
   nothing audited the *logic* pre-launch — and two later cases where every claim-rigor HIGH dissolved the moment the
   researcher said "just plot the data," while every measurement-validity finding survived and mattered.)

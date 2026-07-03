@@ -1,3 +1,21 @@
+- experiment-lifecycle 0.3.21 / verify-claims 0.7.14 (2026-07-03): replace the #311/#312 serial-edge
+  JUSTIFICATION framing with parallelism ENUMERATION (#322) — justification-mode invited circular
+  rationalization, observed same-day in restriction-sweep-1 ("single shared GPU is the resource limit"
+  justified a serial edge whose single GPU was itself a discretionary one-pod choice made a line earlier;
+  design-audit's schedule-efficiency dimension passed it because both author and auditor were defending/
+  checking the plan as drawn instead of generating the parallel alternative). `design-experiment` SKILL.md's
+  schedule-sketching step now asks for enumeration (each step's max sensible fan-out, priced) instead of a
+  justification for each serial edge, with this researcher's concrete defaults stated as norms: 5-10 pods is
+  the NORMAL fan-out for parallelizable GPU work (not an escalation needing permission), API concurrency
+  starts at ~50, and per-wallclock cost is linear in pod count so pod-count conservatism buys nothing — the
+  only real caps are setup/warmup fraction (~20-30% of the unit of work), GPU stock/quota, and a true data
+  dependency or validation gate. `audit_experiment.sh --design` dimension 7 (schedule efficiency) is reframed
+  to match: enumerate the parallelizable steps and their max sensible fan-out, and check the design sits at
+  max fan-out per step or the researcher explicitly declined it; a resource limit that is itself a
+  discretionary design choice (e.g. "only one pod") is NOT a valid reason to serialize. The per-compute vs
+  per-wallclock billing distinction from #311 is kept unchanged — it correctly caught the 2026-07-03
+  hereditary-ccp-platform incident and isn't part of what broke. `run-experiment`'s runtime concurrency/
+  watchdog text is untouched here — that's companion issue #323. (#322)
 - verify-claims 0.7.12 (2026-07-03): add SCHEDULE EFFICIENCY as design-audit dimension 7 (#311), and make the
   dispatcher-side executor watchdog a first-class fact of the lifecycle. `audit_experiment.sh --design`'s
   prompt now checks whether the schedule justifies every serial edge (a validation gate / true data dependency

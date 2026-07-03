@@ -31,6 +31,9 @@ the researcher's concrete numbers landing verbatim in spirit:
    parallel is allowed. State the researcher's defaults directly (not as escalation thresholds, as norms):
    - 5-10 pods is the NORMAL fan-out for parallelizable GPU work — not a special case needing permission.
    - API concurrency starts at ~50.
+   (These are stated as this researcher's/instance's current defaults, adjustable to a design's actual
+   execution profile / provider quota — not a universal product constant — same pattern the skill already
+   uses for `AAR_STYLE_GUIDE`.)
    - Per-wallclock cost is linear in pod count, so pod-count conservatism buys nothing under that billing
      model — the only real caps are (a) setup/warmup fraction (fan out until setup is roughly 20-30% of
      the unit of work — e.g. ~15-20 min pod warmup against a 1h generation unit is fine at one pod per
@@ -74,11 +77,14 @@ concurrent edits to the same file.
 
 ## Blast radius
 
-Product-scaffold only: two skill docs in `automated-researcher`
-(`plugins/experiment-lifecycle/skills/design-experiment/SKILL.md` and
-`plugins/verify-claims/skills/verify-claims/SKILL.md` and its `scripts/audit_experiment.sh`). No code
-paths, no schemas, no other skills. Affects every future experiment design and design-audit pass; does not
-touch `run-experiment`'s runtime text (companion issue #323) or any in-flight experiment.
+Product-scaffold only, in `automated-researcher`: `plugins/experiment-lifecycle/skills/design-experiment/
+SKILL.md` (prose), and `plugins/verify-claims/skills/verify-claims/SKILL.md` (prose) + its
+`scripts/audit_experiment.sh` — a behavior-affecting change to the prompt text the cross-family design-audit
+reads, not just documentation, since it changes what the auditor is asked to check. Both changed plugins
+(`experiment-lifecycle`, `verify-claims`) get a `plugin.json` version bump + a `CHANGELOG.md` entry per repo
+convention, checked by `.aar-ci/checks.sh`'s version-bump gate. No other skills, no schemas. Affects every
+future experiment design and design-audit pass; does not touch `run-experiment`'s runtime text (companion
+issue #323, landing right after this PR merges) or any in-flight experiment.
 
 ## Rollout + rollback
 
