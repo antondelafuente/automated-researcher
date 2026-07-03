@@ -5,8 +5,10 @@ description: Run an explicit maintainer pass over automated-researcher feedback.
 
 # triage-feedback - maintainer pass
 
-You are switching hats from product user to maintainer. Run this only when explicitly asked; a maintainer pass can edit
-shared tracker state and route fixes.
+**You are switching hats from product user to maintainer — the two hats are separated in time, never worn at
+once** (see `file-feedback` for the user hat). Run this only when explicitly asked (researcher-triggered,
+single-writer — no other maintainer pass runs concurrently); a maintainer pass can edit shared tracker state and
+route fixes.
 
 ## Config
 

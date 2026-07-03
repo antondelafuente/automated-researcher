@@ -5,8 +5,13 @@ description: File feedback about the automated-researcher scaffold while the fri
 
 # file-feedback - report scaffold friction
 
-During experiments you are a user of the scaffold. This skill captures friction while it is fresh so maintainers can
-turn repeated pain into product fixes.
+**You are the user, not the maintainer, right now — the two hats are separated in time, never worn at once**
+(the maintainer pass is `triage-feedback`, triggered and single-writer). During an experiment or any other
+product use, that means: run the canonical pipelines, file feedback here while the friction is fresh, and don't
+take on the maintainer's broad work mid-run (redesigning, restructuring, non-trivial fixes) — a live run's job
+is to finish, not to fix the scaffold it's running on. That does not narrow the **Fix-Now Path** below: a
+mechanical, safe fix is still fixed immediately, mid-run or not. This skill captures friction so maintainers
+can turn repeated pain into product fixes.
 
 ## Config
 

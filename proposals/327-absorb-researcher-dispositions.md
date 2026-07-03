@@ -62,6 +62,14 @@ disposition, from the issue):
    AGENTS.md's new section gets the
    definition line pointing at both skills.
 
+**Discoverability for plugin-only installs (addressed after the first `--scaffold` review round):** root
+`AGENTS.md` isn't shipped to a plugin-only install, so every actionable line in its new section is written to be
+fully self-contained in the skill that owns it too — a plugin-only install of `design-experiment` or
+`file-feedback` gets the complete rule inline, not a pointer that only resolves against a root file it doesn't
+have. AGENTS.md's section is a repo-checkout index for cross-referencing, not the sole copy; dropped the one
+place that read otherwise (design-experiment's bullet cited "(AGENTS.md)" as if the reader needed that file to
+make sense of the line, when the bullet's own text was already complete).
+
 All four get a one-line entry in the new AGENTS.md section (so the section is a complete index of the
 migrated dispositions), but three of the four (#2-#4) add no new mechanics beyond that definition line plus the
 small missing-framing patches in the owning skills — the point of "verify before absorbing" is to not turn a

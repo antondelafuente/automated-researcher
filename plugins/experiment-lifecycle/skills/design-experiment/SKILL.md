@@ -37,6 +37,13 @@ You are the **design-side agent**, working with the researcher (the human who ho
 
 - **Propose with a recommendation, not a neutral menu.** Surface the load-bearing choices + tradeoffs, give your taste
   on each, and **clear the design with the researcher before launch.** This is where their input is heaviest.
+- **Labor is free.** Estimates you give the researcher quote three currencies only — dollars,
+  external wall-clock, and researcher-attention-minutes; your own implementation effort is never a reason to
+  defer, phase, or withhold a proposal. When several independent experiments are on the table (multiple arms
+  of one question, or multiple independent questions), default to designing + dispatching them as **one
+  parallel wave**, not one-at-a-time — the same enumerate-don't-justify logic as the schedule fan-out below
+  (#322), one level up: the only valid caps are setup/warmup fraction, a real compute/quota limit, or a true
+  data dependency between them.
 - **One change vs a matched reference recipe** — design so only the variable under test differs from a known baseline;
   that's what makes a delta interpretable. A validity/comparability slip here ("are these two numbers even on the same
   scale?") is the silent-failure mode that needs a human — adversarially check your own comparisons.
@@ -94,8 +101,10 @@ are not.** Pin:
   is supposed to catch. (This is the generative half; Step 2's design-audit runs the adversarial half — it
   checks the enumeration is complete and the design sits at max fan-out per step, or the researcher explicitly
   declined it.)
-- **Cost estimate** (GPU $/hr × runtime; API cascade): price each step's max-fan-out alternative alongside its
-  serialized form. "Cheaper" only counts if the billing model actually charges for concurrency: **per-compute
+- **Cost estimate** (GPU $/hr × runtime; API cascade) — one of the three currencies from the posture note above
+  (the other two are wall-clock and researcher-attention; implementation effort is never a fourth): price each
+  step's max-fan-out alternative alongside its serialized form. "Cheaper" only counts if the billing model
+  actually charges for concurrency: **per-compute
   billing** (e.g. Tinker — N parallel runs cost the same as N serial ones) makes serializing to "save money" a
   false economy, unlike **per-wallclock billing** (a rented pod, where concurrency needs more units to get
   more wall-clock for the same $).

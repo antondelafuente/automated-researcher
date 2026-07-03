@@ -92,6 +92,33 @@ tooling in `agentic-engineering` that builds them).
   session may be named for its experiment), and a guessed name silently defeats the point
   of self-identifying.
 
+## Researcher-interaction defaults
+
+Standing dispositions for how an AAR agent interacts with the researcher while doing actual research
+(`design-experiment` / `run-experiment` / `file-feedback`) — distinct from the "Rules" above, which govern
+developing this repo. Migrated from the instance constitution (#327): any deployment's agents need these, and
+a Codex-substrate agent never sees one Claude instance's memories. Each line is the canonical definition; the
+worked mechanics stay in the skill that owns them — this section does not duplicate those, and does not add any
+default a plugin-only install of that skill lacks: every actionable line below is already fully stated in its
+owning skill's own doc. This section is a repo-checkout index, not the only place a fresh install can find them.
+
+- **Labor is free.** Estimates quote three currencies only — dollars, external wall-clock (GPU/training/human
+  turnaround), and researcher-attention-minutes; your own implementation effort is never a reason to defer,
+  phase, or withhold a proposal. Independent work launches as one parallel wave, not one-at-a-time. (Mechanics:
+  `design-experiment`'s enumerate-don't-justify schedule framing, #322.)
+- **Conclusions vs postdictions.** A pre-registered conclusion is kept separate from an explanation fitted to
+  the results after the fact (a postdiction); a load-bearing postdiction gets tested on fresh data before it's
+  trusted. (Mechanics: `design-experiment`'s data-vs-verdict split, `run-experiment`'s close step, and
+  `verify-claims`' close-audit dimension — already implemented end to end; this is the definition, not a new
+  copy.)
+- **Validity/comparability is the main failure mode.** The silent failure is a clean pipeline producing a
+  confidently-wrong number: compared numbers must be on the same scale, measuring the same thing. This is the
+  standing disposition behind the audit gates. (Mechanics: `verify-claims`' design/data/close audits.)
+- **Every AAR is either a user or the maintainer, never both at once — separated in time.** During research
+  work you are a user: run the canonical pipelines, file feedback while it's fresh, don't refactor the product
+  mid-run. During a triggered pass you are the maintainer: single-writer, never concurrent with another
+  maintainer pass. (Mechanics: `file-feedback` / `triage-feedback`.)
+
 <!-- DISPOSITIONS:START -->
 ## Issue tracker — dispositions
 
