@@ -30,20 +30,27 @@ verify-claim + design-audit — neither audits the *schedule*.
 All changes are skill-text edits to `experiment-lifecycle` (`design-experiment`, `run-experiment`) and
 `verify-claims` (`audit_experiment.sh --design`'s prompt) — no new scripts, no new plugins.
 
-**1. (#292) Standard dispatcher-side watchdog — `design-experiment` SKILL.md, Step 4 (dispatch).** Arming a
-watchdog becomes a required part of the dispatch step, alongside the existing self-wake-arming instruction
-given to the executor: the moment the designer dispatches an executor, the designer arms its own `/loop`
-(~20 min cadence), one loop per executor. `/loop` is named explicitly as a **Claude Code** facility (the
-scheduled-wakeup-that-re-injects-the-prompt mechanism); a Codex designer has no equivalent today — that gap is
-cross-referenced to #223 rather than invented here. Each iteration the watchdog reads the executor's live
-state (deployment example: `tmux capture-pane -t run-<exp> -p | tail -40`) and assesses three things:
-(a) progress vs wedged, (b) which checklist step it's on, (c) whether a load-bearing fork/question is sitting
-unanswered. Wedged → a cheap idempotent nudge (`hello`; low-harm if the executor was actually fine). Real
-problems → surfaced to the researcher with specifics. The loop stops when the executor reports DONE or is
-reaped. Exactly **one** supervision level: the launcher watches the executor; nobody watches the launcher
-(two nested failures is out of scope, matching the issue). One-line rationale carried in the text: a model
-watcher can judge idle-vs-working from the transcript — the discrimination a model-free probe (#172) cannot
-make. Cites the proven pattern (2026-07-03 hereditary-ccp-platform, designer-of-record `/loop 20m`).
+**1. (#292) Standard dispatcher-side watchdog — `design-experiment` SKILL.md, Step 4 (dispatch).** The
+*requirement* is stated substrate-neutral, matching the dispatch contract's existing pattern (Step 4 already
+lists Claude Code / Codex / other substrates separately for the self-wake requirement): the moment the
+designer dispatches an executor, the designer arms **dispatch-side watchdog supervision** for it — one watcher
+per executor, ~20 min cadence — with a per-substrate implementation, not a Claude-only mandate.
+**Claude Code implementation (concrete, today):** the designer's own `/loop` (~20 min), scoped to that one
+executor. **Codex: no equivalent today** — cross-referenced as the open gap at #223 rather than invented here;
+a Codex designer notes the gap and falls back to ad hoc / manual checks until #223 lands, rather than being
+blocked from dispatching. Each iteration the watchdog reads the executor's live state (deployment example:
+`tmux capture-pane -t run-<exp> -p | tail -40`) and assesses three things: (a) progress vs wedged, (b) which
+checklist step it's on, (c) whether a load-bearing fork/question is sitting unanswered. Wedged → a cheap
+idempotent **liveness nudge** (`hello`; low-harm if the executor was actually fine) — this is bounded health
+supervision, not steering: it does not answer design questions, change the method, or otherwise drive the
+executor (that stays the "don't drive it mid-run" invariant in the designer-of-record section, which the text
+now cross-references explicitly so the two don't read as contradictory). Real problems (a load-bearing
+question, a genuine stall the nudge doesn't clear) → surfaced to the researcher with specifics, same as
+always. The loop stops when the executor reports DONE or is reaped. Exactly **one** supervision level: the
+launcher watches the executor; nobody watches the launcher (two nested failures is out of scope, matching the
+issue). One-line rationale carried in the text: a model watcher can judge idle-vs-working from the transcript
+— the discrimination a model-free probe (#172) cannot make. Cites the proven pattern (2026-07-03
+hereditary-ccp-platform, designer-of-record `/loop 20m`).
 
 **2. (#311) Efficiency-mindedness, generative vs adversarial (per the issue's shaping resolution).**
 
@@ -61,7 +68,9 @@ make. Cites the proven pattern (2026-07-03 hereditary-ccp-platform, designer-of-
   dimension (7, after the existing 6): does the schedule justify every serial edge per (b), and does its cost
   reasoning distinguish per-compute from per-wallclock billing? This is the check that would have failed the
   motivating incident — a design that stated the parallel-wave shape (satisfying the old, weaker line) but
-  still snuck an unchallenged serial default past every existing dimension.
+  still snuck an unchallenged serial default past every existing dimension. The script's header incident list
+  (which already cites the design-audit's motivating cases) gets one more line citing this 2026-07-03
+  serial-vs-parallel/Tinker-billing incident, alongside the new dimension.
 - **(d) Runtime backstop — `run-experiment` SKILL.md, Execution discipline.** Independent units (training
   runs, evals, API calls) run concurrently by default; when GPU utilization is low during a long step, raise
   the bottleneck knob (batch size / concurrent requests) and note it in the run log. One line ties back to
@@ -101,3 +110,17 @@ new text.
 
 Low risk, additive prose + one new audit dimension. Rollback is a plain revert of the diff (no state, no
 migration to unwind). No staged rollout needed.
+
+## Design-audit responses (pass 1)
+
+- **FINDING 1 (HIGH, right seam/contract clarity — `/loop` stated Claude-only instead of a substrate-neutral
+  requirement): ACCEPT.** Reworded above: the *requirement* is dispatch-side watchdog supervision
+  (substrate-neutral), `/loop` is named as the concrete Claude Code implementation, and the Codex gap is an
+  explicit cross-reference to #223 (not a block on Codex dispatch). Matches the existing self-wake
+  requirement's pattern in the same Step 4.
+- **FINDING 2 (MED, watchdog nudge vs "don't drive it mid-run"): ACCEPT.** Reworded above to state the nudge
+  is bounded health supervision (a liveness poke), not steering — it doesn't answer design questions or change
+  method/parameters, so it doesn't conflict with the designer-of-record invariant. The implementation will
+  cross-reference this distinction at both points of need in `design-experiment` SKILL.md.
+- **FINDING 3 (LOW, missing incident citation in `audit_experiment.sh`'s header): ACCEPT.** Cheap and correct;
+  the implementation adds one header line citing the 2026-07-03 incident alongside the new dimension 7.
