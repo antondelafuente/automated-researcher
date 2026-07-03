@@ -50,6 +50,9 @@
 - ☐ [BLOCK] RESULTS.md written — describes the data (numbers / plot) per the DESIGN spec; any
       lightweight qualitative read stays separable from the numbers (no pre-registered verdict). If
       RESULTS does assert a claim, conclusions are separated from postdictions.                  ev:
+- ☐ [BLOCK] presentation_manifest.json written next to RESULTS.md — unconditional, config-free.
+      Required {title, labels}; figures/datasets all-optional, populated per the DESIGN.md
+      Presentation subsection (no unconfigured-viewer exception — write it regardless).           ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake cleared.                         ev:

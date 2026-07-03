@@ -235,6 +235,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   and understand the data **from this dir alone**.* **Describe each arm's data (the numbers / the plot) per the DESIGN
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
   assert a claim, separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm wave, not per-arm.
+- **Write `presentation_manifest.json` next to `RESULTS.md` — unconditional, config-free.** Every close writes this file,
+  whether or not an instance viewer is configured (a no-op consumer is fine — the manifest still stands alone as
+  plain-language arm documentation). Required: `{title, labels: [{match, label}]}` (`title` — one plain sentence
+  naming the experiment; `labels` — a lookup table mapping each raw arm/artifact identifier your data uses to a
+  human-readable label). All-optional beyond that, per the DESIGN.md Presentation subsection:
+  - `figures`: `[{path, caption}]` — the headline figures you rendered at close, `path` relative to this registry dir.
+  - `datasets`: `[{name, role: "training"|"eval", columns, source}]` — the datasets worth surfacing, the columns worth
+    showing, and an artifact-store pointer for each.
+  Render figures and populate dataset entries per what the cleared DESIGN.md Presentation spec asked for — this is
+  implementation of an agreed spec, not improvisation. An arm/dataset the spec never mentioned needs no entry.
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
   adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The
@@ -258,6 +268,15 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   `log-experiment.sh <exp-dir>` opens a gated PR, verifies the close-audit is present + clean (or, for a
   no-go/eval-only run, a closed `RESULTS.md` decision), takes the cross-family bot approval, and merges — one
   command, not the by-hand branch/approve/merge dance. This is how a finished experiment becomes a GitHub record.
+- **The publish leg past the manifest is consuming-instance work, not this skill's.** Turning
+  `presentation_manifest.json` into a rendered viewer page, and rebuilding any experiment gallery/index, happens
+  through the consuming instance's viewer guidance — an instance with no viewer configured is simply a no-op here
+  (the manifest still stands on its own as plain-language arm documentation). Where an instance DOES build
+  per-experiment overview pages, that page is deliberately **bespoke, not a generic manifest-to-template
+  generator** — a template flattens the "tell this experiment's story" quality a hand-built page has. The
+  designer-of-record authors it against the cleared DESIGN.md Presentation spec at publish time (sharing only
+  house style — a shared page-building library + prior bespoke pages as pattern), single-writer at results
+  review, same convention as the rest of this skill's landing steps.
 - **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.

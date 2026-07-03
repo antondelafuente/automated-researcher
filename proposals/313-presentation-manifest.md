@@ -36,17 +36,22 @@ granularity it requires? This is a mechanical trustability check — a Presentat
 the collection plan never records is exactly the kind of execution-under-specification gap `design-audit`
 already exists to catch, so it's an added line inside the existing dimension list, not a new gate.
 
-**3. `run-experiment`'s close checklist gains one unconditional, config-free step:** the executor writes
-`presentation_manifest.json` into the experiment registry dir, next to `RESULTS.md`. Schema = the existing
-dashboard manifest schema verbatim (proven by the backfilled manifests already in
-`~/research-lab/dashboard/manifests/*.json`): `{title, labels: [{match, label}]}`, extended with two
-all-optional fields per the researcher-confirmed addenda:
+**3. `run-experiment`'s close checklist gains one unconditional, config-free `[BLOCK]` gate** (both in
+`SKILL.md` prose and in `CHECKLIST_TEMPLATE.md`, matching the existing `RESULTS.md`-write gate right next to
+it — the checklist is the actual forcing function, not the prose): the executor writes
+`presentation_manifest.json` into the experiment registry dir, next to `RESULTS.md`. The schema is defined
+**self-contained in the product** (`run-experiment/SKILL.md`'s manifest-format note) — required
+`{title, labels: [{match, label}]}`, plus two all-optional fields:
 - `figures`: `[{path, caption}]` — the experiment's rendered headline figures, paths relative to the registry
   dir, matching the DESIGN.md Presentation spec. Rendered by the EXECUTOR at close time (not a later viz
   pass) — the researcher's only remaining touch is clearing the design, then viewing the page.
 - `datasets`: `[{name, role: "training"|"eval", columns, source}]` — what a later overview page would render
   as dataset cards linking into the Inspect bundles.
 
+This is not a new invention: the required `{title, labels}` core matches the schema already proven in
+production by an existing consuming instance's dashboard (a backfilled set of per-experiment manifest files
+using exactly this shape) — but the product doc defines the fields on its own terms rather than pointing at
+that instance's path, so the contract stands on its own regardless of which instance (if any) consumes it.
 Nothing beyond `{title, labels}` is required; an executor with no figures/datasets to report writes the
 existing two-field shape, unchanged. This step is unconditional (every close writes the file) and config-free
 (no flag, no viewer check) — the manifest is useful as plain-language arm documentation even for an instance
@@ -86,9 +91,12 @@ consistent with the rest of the design-clearance model.
 
 ## Blast radius
 
-- **Product** (this repo): `design-experiment/SKILL.md` (Step 1 — new subsection), `verify-claims`'
-  `audit_experiment.sh --design` prompt (one new checklist line), `run-experiment/SKILL.md` (one new close-step
-  bullet + a manifest-format note). No new scripts, no schema-generator code, no template-generator tooling.
+- **Product** (this repo): `design-experiment/SKILL.md` (Step 1 — new subsection) and its
+  `CHECKLIST_TEMPLATE.md` (one new `[BLOCK]` line, mirroring the existing `RESULTS.md` gate), `verify-claims`'
+  `audit_experiment.sh --design` prompt (one new checklist dimension), `run-experiment/SKILL.md` (one new
+  close-step bullet + a self-contained manifest-format note). No new scripts, no schema-generator code, no
+  template-generator tooling. Version bump (`plugin.json`) on both `experiment-lifecycle` and `verify-claims`
+  per the repo's behavior-change convention.
 - **Not touched:** any manifest-consuming code (dashboard rendering, gallery rebuild, `build_<exp>_page.py`) —
   that's instance-side by design and explicitly out of scope for this issue.
 - **Downstream (consuming instance, informational only):** existing dashboard manifests

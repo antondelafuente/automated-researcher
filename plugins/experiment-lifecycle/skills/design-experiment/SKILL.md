@@ -62,6 +62,13 @@ are not.** Pin:
   must NOT make a rigorous pre-registered claim ("H confirmed / refuted at threshold") — the rigorous interpretation is the
   researcher's separate analysis step. (Hygiene survives: a read *fitted* from the data is a postdiction — unverified; if
   load-bearing, test on FRESH data.)
+- **Presentation — per figure/table, what it plots and what that requires.** For each headline figure or table the
+  experiment will produce: what it plots, and which columns/fields it needs at what granularity (per-arm? per-row?
+  aggregated?) — **never what it should show** (no pre-registered verdict here either; this is a data-organization
+  spec, same posture as the rest of `DESIGN.md`). Cover both halves: the headline-figure spec, and the dataset/column
+  organization (training + eval datasets, which columns are worth surfacing) — so both get cleared by the researcher
+  in this SAME design-clearance pass, with no separate gate. This is what `design-audit` (Step 2) checks the
+  data-collection plan actually persists.
 - **Provenance gets verified or flagged, never asserted.** Before stating any lineage/provenance, sweep the archive for
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
