@@ -37,7 +37,8 @@ the researcher's concrete numbers landing verbatim in spirit:
    - Per-wallclock cost is linear in pod count, so pod-count conservatism buys nothing under that billing
      model — the only real caps are (a) setup/warmup fraction (fan out until setup is roughly 20-30% of
      the unit of work — e.g. ~15-20 min pod warmup against a 1h generation unit is fine at one pod per
-     unit), (b) GPU stock/quota, and (c) a true data dependency or validation gate.
+     unit), (b) GPU stock/quota or a real, documented API/provider rate limit, and (c) a true data
+     dependency or validation gate.
    Keep the per-compute vs per-wallclock billing distinction (Tinker-style parallel-is-free vs a rented
    pod) — that framing correctly caught the 2026-07-03 hereditary-ccp-platform incident and isn't part of
    what broke.

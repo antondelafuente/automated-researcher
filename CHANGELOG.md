@@ -8,9 +8,10 @@
   justification for each serial edge, with this researcher's concrete defaults stated as norms: 5-10 pods is
   the NORMAL fan-out for parallelizable GPU work (not an escalation needing permission), API concurrency
   starts at ~50, and per-wallclock cost is linear in pod count so pod-count conservatism buys nothing — the
-  only real caps are setup/warmup fraction (~20-30% of the unit of work), GPU stock/quota, and a true data
-  dependency or validation gate. `audit_experiment.sh --design` dimension 7 (schedule efficiency) is reframed
-  to match: enumerate the parallelizable steps and their max sensible fan-out, and check the design sits at
+  only real caps are setup/warmup fraction (~20-30% of the unit of work), GPU stock/quota or a real,
+  documented API/provider rate limit, and a true data dependency or validation gate.
+  `audit_experiment.sh --design` dimension 7 (schedule efficiency) is reframed to match: enumerate the
+  parallelizable steps and their max sensible fan-out, and check the design sits at
   max fan-out per step or the researcher explicitly declined it; a resource limit that is itself a
   discretionary design choice (e.g. "only one pod") is NOT a valid reason to serialize. The per-compute vs
   per-wallclock billing distinction from #311 is kept unchanged — it correctly caught the 2026-07-03
