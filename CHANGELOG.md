@@ -1,3 +1,20 @@
+- AGENTS.md / experiment-lifecycle 0.3.24 / feedback-loop 0.1.5 (2026-07-03): absorb four researcher-interaction
+  dispositions from the instance constitution into the product (#327) — the instance file kept only per-box
+  values (this box, this customer), not conventions any deployment's agents need, and a Codex-substrate agent
+  never sees one Claude instance's memories. AGENTS.md gains a "Researcher-interaction defaults" section
+  carrying the canonical one-line definition of each, pointing at the skill that already carries the mechanics:
+  (1) labor is free — estimates quote three currencies only (dollars, external wall-clock,
+  researcher-attention-minutes), implementation effort never defers a proposal, independent work launches as
+  one parallel wave; `design-experiment` SKILL.md gets a matching posture bullet (generalizing #322's
+  enumerate-don't-justify logic one level up, to independent experiments) and ties its Cost estimate bullet to
+  the same three currencies. (2) conclusions vs postdictions — verified already fully carried end to end by
+  `design-experiment` / `run-experiment` / `verify-claims`; AGENTS.md gets the definition line only, no new
+  mechanics. (3) validity/comparability as the main failure mode — same: already the standing disposition
+  behind every `verify-claims` audit; definition line only. (4) user/maintainer separation + the feedback
+  loop — `file-feedback` and `triage-feedback` SKILL.md already had the "user" framing but not the "separated
+  in time, never both hats at once" statement or the "don't refactor mid-run" / "single-writer" lines; both
+  gained the missing framing (no duplication of what was already there). No procedure changes, no schema
+  changes.
 - experiment-lifecycle 0.3.22 (2026-07-03): runtime throughput defaults — API concurrency starts high, watchdog
   tracks GPU utilization over time (#323, companion to #322). Motivating incidents: a neutral-corpus generation
   crawled at ~50 rows/min for hours against an over-conservative client, and E1 judging at 2-3 workers made
