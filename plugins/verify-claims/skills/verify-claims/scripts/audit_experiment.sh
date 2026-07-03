@@ -161,14 +161,14 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
 7. SCHEDULE EFFICIENCY (falsifiable, ENUMERATION not justification — #322) — for each step in the schedule,
    does the design ENUMERATE its max sensible fan-out (how many pods/API calls it could run at once) and
    price it, and is the design actually AT that max fan-out — or did the researcher explicitly decline it?
-   Do not check whether a serial edge is "justified" — that invites the author and the auditor to both anchor
-   on the plan as drawn (real case, restriction-sweep-1: "single shared GPU is the resource limit" passed
+   Do not check whether a serial edge is 'justified' — that invites the author and the auditor to both anchor
+   on the plan as drawn (real case, restriction-sweep-1: 'single shared GPU is the resource limit' passed
    this audit as a justification, where the single GPU was itself a discretionary one-pod choice made a line
    earlier). Instead independently ask, for each serial edge: what stops this step from fanning out? The only
    valid caps are (a) setup/warmup fraction too high relative to the unit of work, (b) a genuine GPU stock/
    quota ceiling, (c) a true data dependency (step B needs step A's output) or a validation gate (a pilot/
-   smoke that must pass first). A resource limit that is ITSELF a discretionary design choice (e.g. "only one
-   pod") is NOT a valid cap — flag it as under-enumerated, not as unjustified. Separately: if the design calls
+   smoke that must pass first). A resource limit that is ITSELF a discretionary design choice (e.g. 'only one
+   pod') is NOT a valid cap — flag it as under-enumerated, not as unjustified. Separately: if the design calls
    a serial arrangement cheaper, does its reasoning actually match the billing model — does compute cost
    PER-COMPUTE (Tinker-style: N parallel submissions cost the same as N serial ones, so serializing to save
    money is a false economy) or PER-WALLCLOCK (a rented pod, where concurrency needs more units, not
