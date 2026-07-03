@@ -54,7 +54,12 @@ disposition, from the issue):
    statement (both skills), "don't refactor the product mid-run" (file-feedback — genuinely absent; grepped for
    "refactor" across the experiment-lifecycle and feedback-loop skills, no hits), and "single-writer — no other
    maintainer pass runs concurrently" (triage-feedback — the skill's frontmatter already says "Never run
-   automatically" but the single-writer property specifically was unstated). AGENTS.md's new section gets the
+   automatically" but the single-writer property specifically was unstated). **The new "don't refactor mid-run"
+   line is scoped explicitly against the skill's existing Fix-Now Path** ("if the fix is mechanical and safe,
+   fix the canonical home immediately") so the two don't read as contradictory: "mid-run" bars the maintainer's
+   *broad* work (redesigning, restructuring, non-trivial fixes) while a user is running an experiment; it does
+   not narrow the already-established Fix-Now Path exception, which stays scoped to mechanical/safe fixes only.
+   AGENTS.md's new section gets the
    definition line pointing at both skills.
 
 All four get a one-line entry in the new AGENTS.md section (so the section is a complete index of the
@@ -94,6 +99,10 @@ and doc reads; no in-flight experiment or tracker state.
 ## Rollout + rollback
 
 Doc-only change (prose in AGENTS.md + two SKILL.md files), takes effect on the next read of each file — no
-migration, no staged rollout. Per the issue, once this lands the instance file's residual copies of these four
-dispositions get deleted at its own next drain (out of scope for this PR — a separate, instance-side edit).
-Rollback is a plain revert of the merge commit if any of the added framing turns out wrong in practice.
+migration, no staged rollout. **Same-day pointer rule (AGENTS.md "Same-day pointer rule"), applied on merge, not
+deferred:** immediately after this PR merges, the instance's `~/AGENTS.md` "Labor is free" bullet (the one
+residual copy actually live today — items 2-4 were already absorbed out of the instance file in an earlier
+rewrite, and the fourth's user/maintainer text does not currently exist there to duplicate) gets replaced with a
+one-line pointer at this same box, same day, to this product's new "Researcher-interaction defaults" section —
+not left for a later, unscheduled drain pass. Rollback is a plain revert of the merge commit if any of the added
+framing turns out wrong in practice; the instance pointer edit reverts independently (it's a separate repo/commit).
