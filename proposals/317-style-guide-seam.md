@@ -22,16 +22,20 @@ publish leg (viewer guidance is consuming-instance work, referenced abstractly, 
 product doc):
 
 1. **`design-experiment/SKILL.md`, Presentation subsection.** Append one sentence: the figure captions, story
-   wording, and the experiment's human-facing title follow the instance's prose style guide when one is
-   configured. Unconfigured: the existing plain-language requirement stands on its own — no-op.
+   wording, and the experiment's human-facing title follow the instance's prose style guide when the optional
+   `AAR_STYLE_GUIDE` env var (a path or URI, read at the point of writing) is set. Unset: the existing
+   plain-language requirement stands on its own — no-op.
 2. **`run-experiment/SKILL.md`, close/manifest step.** Append the same sentence, scoped to the manifest's
    `title`/`labels` fields (the two fields that become human-readable text on an instance dashboard).
 
-Both touches are pure instance-seam prose — an abstract pointer ("the instance's prose style guide, when
-configured"), never a config key, a file path, or content belonging to any one instance. This mirrors the
-existing viewer-guidance seam in `run-experiment/SKILL.md`'s publish-leg paragraph: the product states that an
-instance-owned convention exists and where it applies; the instance supplies (or doesn't supply) the guide
-itself.
+**Design-review finding (accepted, MED):** the first draft of this doc said "when the instance configures
+one" with no discoverable seam — an autonomous, zero-context `run-experiment` executor has no way to check
+whether a guide exists or where to read it (unlike, say, `EXPERIMENT_SESSION_REAP_CMD` or
+`FEEDBACK_INSTANCE_GUIDANCE`, which name a concrete env var). Fixed by naming `AAR_STYLE_GUIDE` directly in
+both touches: an optional env var holding a path or URI, mirroring the existing narrow-seam pattern (a named
+pointer, not a schema field) rather than the vaguer, unnamed "viewer guidance" phrasing #316 used for a
+different (human-driven, at-publish-time) step. The product still carries only the seam **name** — never the
+guide's content or a hardcoded instance path.
 
 Explicitly out of scope (per the issue): `RESULTS.md` prose, issue text, review text — those are
 agent-to-agent surfaces, not reader-facing, and stay untouched.
@@ -46,10 +50,15 @@ convention already used by #316) since both files it edits (`design-experiment/S
   that "the product carries only the seam, never the instance's guide content"; hardcoding a path couples the
   product to one instance's layout, exactly what the seam pattern (viewer guidance, feedback guidance) exists
   to avoid.
-- **A new config key in the execution profile (e.g. `[presentation] style_guide_path`).** Rejected — over-scoped
-  for a one-line prose seam. The existing seams in this doc (viewer guidance, feedback guidance) don't invent
-  config schema either; they state the convention abstractly and let the instance wire it however it likes.
-  Nothing in the issue asks for a resolvable path or a script to consult it.
+- **A fully abstract, unnamed pointer ("when the instance configures one," no env var).** The first draft's
+  approach — rejected by the design review (see finding above): `run-experiment`'s executor is explicitly
+  zero-context and autonomous, so "when configured" with nothing to check against is not actionable. A named
+  env var (`AAR_STYLE_GUIDE`) is the minimal fix that keeps the executor's read mechanical.
+- **A new field in the `aar-profile` execution-profile schema (`SCHEMA.md`).** Rejected as over-scoped — that
+  schema is versioned, dual-copy-synced, and validated by `.aar-ci/checks.sh`; a MAJOR-version-free optional
+  field would still mean touching both `SCHEMA.md` copies and the profile init/validate scripts for a single
+  prose convention. A bare env var (matching the `EXPERIMENT_SESSION_REAP_CMD` / `FEEDBACK_INSTANCE_GUIDANCE`
+  precedent already in this plugin family) reaches the same discoverability without the schema machinery.
 - **Cover `RESULTS.md` / issue / review text too.** Rejected per the issue's explicit scope — those are
   agent-to-agent surfaces, not reader-facing, and the researcher's shaping conversation drew the line there.
 
