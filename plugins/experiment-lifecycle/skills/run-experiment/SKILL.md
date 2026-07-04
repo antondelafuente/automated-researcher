@@ -297,8 +297,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   load-bearing flags). Too many = the brief was under-pinned → feeds back to `design-experiment`. A clean run files
   little.
 - **Self-audit the close (the last verification — verify state, not your memory of doing it).** Re-CHECK by inspection:
-  artifacts listed in the store, ledger has BOTH launch + done events, compute gone per the control plane of the deploying
-  account, `RESULTS.md` committed + pushed, waker + marker cleared. "I ran the step" ≠ "the state is right."
+  artifacts listed in the store, **the ledger's folded/latest status is terminal** (`done`/`failed`/`killed`, or
+  whatever terminal set the instance's ledger recipe defines) — not merely that a launch event exists somewhere
+  in its history — compute gone per the control plane of the deploying account, `RESULTS.md` committed + pushed,
+  waker + marker cleared. "I ran the step" ≠ "the state is right." **Never backfill a `running`/`launched`/
+  `deploying` event after a terminal one has already landed**: a last-non-null-field-wins ledger fold means that
+  write silently reopens a finished run for every consumer, even though artifacts/teardown/`RESULTS.md`/close are
+  all already done (`automated-researcher#338`). If launch metadata turns out to be missing at this point, attach
+  it as a non-status note, or re-emit it on a fresh event that itself carries a terminal status — never as a
+  non-terminal status event. If the ledger recipe's terminal set isn't discoverable at all, don't guess: fail
+  closed and flag it rather than write a non-terminal status to find out.
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:

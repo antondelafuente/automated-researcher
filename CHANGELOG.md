@@ -1,3 +1,15 @@
+- experiment-lifecycle 0.3.25 (2026-07-04): prevent retroactive launch ledger events from reopening closed
+  runs (#338). Incident: `carrier-divergence-2` reached `done` with `RESULTS.md` written, then the executor
+  backfilled a missing launch event with a `running` ledger write during close self-audit; because the
+  ledger fold is last-non-null-field-wins, the folded state flipped back to `running` and the dashboard
+  showed a finished run as still running. `run-experiment` SKILL.md's Step 5 self-audit now requires the
+  ledger's folded/latest status to be TERMINAL (not just that a launch event exists somewhere in history)
+  and explicitly forbids backfilling `running`/`launched`/`deploying` after a terminal event — missing
+  launch metadata becomes a non-status note or a fresh terminal-status event instead. The
+  `CHECKLIST_TEMPLATE.md` UNIVERSAL gates gain a matching `[BLOCK]` gate so the mechanical close checklist
+  enforces it, not just skill prose. Hardening `ledger.py` itself and an optional dashboard-side warn are
+  instance-owned follow-ups (the ledger recipe lives in the consuming instance, not this repo) — out of
+  scope here.
 - AGENTS.md / experiment-lifecycle 0.3.24 / feedback-loop 0.1.5 (2026-07-03): absorb four researcher-interaction
   dispositions from the instance constitution into the product (#327) — the instance file kept only per-box
   values (this box, this customer), not conventions any deployment's agents need, and a Codex-substrate agent

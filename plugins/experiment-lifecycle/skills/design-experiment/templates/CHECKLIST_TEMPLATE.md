@@ -53,6 +53,12 @@
 - ☐ [BLOCK] presentation_manifest.json written next to RESULTS.md — unconditional, config-free.
       Required {title, labels}; figures/datasets all-optional, populated per the DESIGN.md
       Presentation subsection (no unconfigured-viewer exception — write it regardless).           ev:
+- ☐ [BLOCK] Ledger's folded/latest status is TERMINAL (`done`/`failed`/`killed`, or the instance's
+      ledger recipe's terminal set) — not just that a launch event exists somewhere in its history. Never
+      backfill a `running`/`launched`/`deploying` event after a terminal one: a last-non-null-field-wins
+      fold reopens a finished run for every consumer (dashboards included) even though the run is actually
+      done (`automated-researcher#338`). Missing launch metadata at this point is a non-status note or a
+      fresh terminal-status event — never a non-terminal one.                                    ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake cleared.                         ev:
