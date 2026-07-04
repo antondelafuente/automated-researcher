@@ -23,18 +23,26 @@ write a non-terminal status now."
 
 Tighten the Step 5 self-audit line in `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` (the
 line that currently reads "ledger has BOTH launch + done events") so it instead requires the ledger's
-**folded/latest status to be terminal** (`done` / `failed` / `killed`, and any deployment-specific
-terminal status such as `torn_down` the profile defines) — not merely that a launch event exists
-somewhere in history. Pair that with an explicit prohibition: an executor must never backfill a
-`running` / `launched` / `deploying` event after a terminal event has already landed, because a
+**folded/latest status to be terminal** (`done` / `failed` / `killed`, or whatever terminal set the
+*instance's own ledger recipe* defines — the schema only carries a typed pointer to that recipe, it
+defines no terminal-status field itself, so an executor who can't discover the recipe's terminal set
+must fail closed and flag it rather than guess) — not merely that a launch event exists somewhere in
+history. Pair that with an explicit prohibition: an executor must never backfill a `running` /
+`launched` / `deploying` event after a terminal event has already landed, because a
 last-non-null-field-wins fold means that write silently reopens the run for every consumer. If launch
 metadata turns out to be missing during the close audit, the guidance now tells the executor to attach
 it as a non-status note, or re-emit it on a fresh event that itself carries a terminal status — never as
 a non-terminal status event.
 
-This is a single guidance edit, scoped to the text an executor reads during Step 5 close. It is the
-first bullet of the issue's three-part proposed fix (run-experiment close guidance), and it is the part
-that lives in this repo (`automated-researcher`, the product/scaffold repo).
+The same requirement is added as a `[BLOCK]` gate in `design-experiment`'s
+`CHECKLIST_TEMPLATE.md` UNIVERSAL section, so the mechanical close checklist the cross-family close audit
+actually verifies against artifacts enforces this too — not just prose an executor reads once in the
+skill. Both files live in the `experiment-lifecycle` plugin, so its `plugin.json` version moves
+(0.3.24 → 0.3.25) with a matching `CHANGELOG.md` entry, per this repo's own version-bump check.
+
+This is a guidance + checklist-gate edit, scoped to the text and mechanical gate an executor reads/ticks
+at close. It is the first bullet of the issue's three-part proposed fix (run-experiment close guidance),
+and it is the part that lives in this repo (`automated-researcher`, the product/scaffold repo).
 
 The other two parts of the issue's proposed fix are explicitly out of scope for this repo:
 
@@ -69,10 +77,13 @@ a different repo and is out of this PR's scope per the dispatch brief's scope di
 
 ## Blast radius
 
-Touches only `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` — the Step 5 close
-self-audit bullet. Doc-only change (guidance text), no scripts, no schema, no runtime behavior change.
-Read by every future `run-experiment` executor at close time; no effect on in-flight runs or historical
-ledger data.
+Touches `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md` (Step 5 close self-audit bullet),
+`plugins/experiment-lifecycle/skills/design-experiment/templates/CHECKLIST_TEMPLATE.md` (one new
+UNIVERSAL `[BLOCK]` gate), and the plugin's `.claude-plugin/plugin.json` + `CHANGELOG.md` (version bump
+that change requires). Doc/template-only change — no scripts, no schema, no runtime behavior change.
+Read by every future `run-experiment` executor at close time and instantiated into every future
+experiment's `CHECKLIST.md` by `design-experiment`; no effect on in-flight runs or historical ledger
+data.
 
 ## Rollout + rollback
 
