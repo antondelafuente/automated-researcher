@@ -258,8 +258,9 @@ guaranteed cache-cold past the 5-min prompt-cache TTL, ~$150–250/run-day of av
 
 - **The executor's own independent self-wake owns IDLE detection** — benign waiting, dead in-session monitors,
   no-progress-while-billing escalation, and GPU-utilization judgment (`run-experiment`: "Arm your self-wake" + the
-  #323 utilization-series discipline under Execution discipline). This is why `CHECKLIST.md` requires the self-wake
-  to be an independent recurring cron, not an in-session watcher. None of it is the designer's job — no pod SSH, no
+  #323 utilization-series discipline under Execution discipline). This is why `CHECKLIST.md`'s self-wake gate makes
+  autonomous detached runs name an *independent* waker — parking on an in-process monitor is FAIL; a substrate that
+  can't arm one runs controller-supervised instead. None of it is the designer's job — no pod SSH, no
   GPU sampling, no checklist-step progress accounting from the designer session.
 - **The designer side owns only SESSION-WEDGE**: the executor's session API-stuck mid-turn (usually a rate limit) —
   process alive, no crash, so a crash supervisor never fires; the one failure the executor's own wake cannot cure,
