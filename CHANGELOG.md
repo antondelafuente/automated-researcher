@@ -1,3 +1,18 @@
+- experiment-lifecycle 0.3.26 (2026-07-05): designer-side supervision goes two-layer — event-driven monitor +
+  long merged heartbeat instead of `/loop 20m` per executor (#342). The old dispatcher-watchdog contract ran
+  a 20-min model loop inside the designer session; at ~500k tokens of accumulated designer context and a
+  5-min prompt-cache TTL every tick was cache-cold (~$300 of a ~$337 measured session was cache traffic, two
+  concurrent executors doubled it). `design-experiment` SKILL.md now splits supervision by failure mode: the
+  executor's own independent self-wake owns IDLE detection (benign waits, dead in-session monitors,
+  no-progress-while-billing, GPU-utilization judgment); the designer owns only SESSION-WEDGE (the executor's
+  session API-stuck mid-turn — the one failure its own wake can't cure) via an event-driven shell monitor
+  per pane (DONE/BLOCKED/pane-gone; zero model turns while healthy) + ONE merged 45–60 min pane-read
+  heartbeat (advancing-vs-frozen judgment, `send-keys` nudge), optionally dispatched to a separate small
+  session when designer context is known-large. The #323 utilization-series obligations (series not point
+  read, judge in context of the current step, restart-over-wait on sustained flatline) relocate to
+  `run-experiment` Execution discipline, sampled on the executor's own self-wake ticks — nothing deleted,
+  ownership moved. Plus a context-hygiene line: designers route bulk reads through subagents/forks during
+  supervision phases. Codex-designer gap (#223) and the one-supervision-level invariant unchanged.
 - experiment-lifecycle 0.3.25 (2026-07-04): prevent retroactive launch ledger events from reopening closed
   runs (#338). Incident: `carrier-divergence-2` reached `done` with `RESULTS.md` written, then the executor
   backfilled a missing launch event with a `running` ledger write during close self-audit; because the

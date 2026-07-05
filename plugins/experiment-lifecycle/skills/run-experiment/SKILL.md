@@ -328,9 +328,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   something real (a validation gate, a true data dependency, a shared-resource limit), matching the design's own
   serialization-justification requirement (`design-experiment` Step 1). **Saturate the hardware:** when GPU utilization
   is low during a long-running step, raise the bottleneck knob (batch size, concurrent requests, whatever's actually
-  limiting) and note what you changed in the run log — don't let a rented GPU idle at 15%. (Runtime backstop for #311;
-  the dispatcher watchdog may fold `nvidia-smi` utilization into its periodic check when the pane shows a long-running
-  GPU step — see `design-experiment`'s watchdog.)
+  limiting) and note what you changed in the run log — don't let a rented GPU idle at 15%. (Runtime backstop for #311.)
+- **Utilization is judged as a series, in context — and YOU own that judgment, not the designer (#323, relocated by
+  #342).** A single `nvidia-smi` read is one-sample noise (cf. the DATA AUDIT gate's distrust of a 2-sample
+  self-smoke): during a long-running GPU-bound step, sample `nvidia-smi
+  --query-gpu=utilization.gpu,memory.used --format=csv` over the run's SSH endpoint on your self-wake ticks and keep
+  the running series. **Judge the series IN CONTEXT of the current step**, not against a flat threshold: 0% during
+  "waiting on judge API" is fine; 0% for 40+ min during "training/generating" is a flatline. **Restart-over-wait
+  bias:** with checkpointed resumable state (the resume contract above), restarting a flatlined job costs minutes
+  while waiting costs hours — don't kill on one bad sample, but do restart on a sustained flatline against a
+  GPU-bound step.
 - **API loops start HIGH, not low (#323).** Any API loop (an LLM judge, corpus generation, batch scoring) starts at
   ~**50 concurrent requests** — not 2-3 — with exponential backoff on 429/timeout and re-ramp back up after recovery
   (not a permanent step-down). Discovering the provider's real limit is the backoff's job, not the initial guess's: a

@@ -31,28 +31,45 @@ monitors ("waiting on a monitor whose process silently died"), and no-progress-w
 the executor's job — its self-wake is already required by `CHECKLIST.md` to be an *independent recurring
 wake* (cron), precisely so it survives in-session watcher death, and `run-experiment` already carries the
 tick contract (done-marker + liveness + positive-progress) and the GPU-saturation runtime backstop (#311).
-No new text is needed on the executor side; the designer contract simply stops duplicating it.
+One relocation is needed so removal from the designer side loses nothing: the #323 utilization obligations —
+sample a *series*, not a point read; judge the series in context of the current step (0% during "waiting on
+judge API" is fine, 0% for 40+ min during "training" is a flatline); restart-over-wait bias on a sustained
+flatline given the checkpointed resume contract — move into `run-experiment`'s Execution discipline, next to
+the #311 saturation backstop they extend. The executor samples on its self-wake ticks during GPU-bound
+steps, over the run's own SSH endpoint — which it already holds, with none of the lease-record resolution
+hop the designer-side version needed.
 
 **Layer 2 — the designer side owns only SESSION-WEDGE**: the executor's Claude session API-stuck mid-turn,
 the one failure the executor's own wake cannot cure (its wake queues behind the stuck turn). Prescribed
 implementation, in order:
 
-1. **A shell-side monitor on the executor pane — event-driven, zero model turns while healthy.** On Claude
-   Code, the built-in `Monitor` tool (an until-loop watching `tmux capture-pane` output) armed for the
-   terminal transitions: the DONE/BLOCKED line and pane-gone. It fires a designer turn only when something
-   actually happened; a healthy multi-hour run costs nothing.
+1. **A shell-side monitor on the executor pane — event-driven, zero model turns while healthy.** The
+   substrate-neutral pattern: a detached shell watcher that polls the executor's pane text (e.g.
+   `tmux capture-pane -t run-<exp> -p | tail -5`) for the terminal transitions — the executor's DONE/BLOCKED
+   line, or the pane/session gone — and on trigger delivers one notification turn to whoever holds the
+   heartbeat duty. Lifecycle: armed at dispatch (one per executor — it's model-free and costs nothing),
+   stopped when that run is reaped. On Claude Code the harness's `Monitor` primitive (a visible, cancellable
+   until-loop that re-invokes the arming session when its condition fires) is the natural implementation; any
+   substrate with a background shell can run the equivalent loop. It fires a model turn only when something
+   actually happened; a healthy multi-hour run costs zero model turns.
 2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection** — a pane *read* that judges
    advancing-vs-frozen against the previous read and nudges with `send-keys` if frozen (the same cheap,
    idempotent liveness poke as today). When the designer supervises multiple executors, this is **one merged
    heartbeat covering all panes, not one loop per run**.
 3. **Optionally, run the heartbeat in a separate small session (a dispatched watchdog)** when the designer
    context is known-large — the heartbeat needs ~2k tokens of context, so a fresh session makes each tick
-   near-free instead of a full-history re-cache.
+   near-free instead of a full-history re-cache. Lifecycle contract: the designer spawns it at kickoff with
+   the list of panes to watch; it owns *only* the layer-2 duty (monitor triggers route to it, it runs the
+   merged heartbeat, it escalates real problems to the designer/researcher with specifics); it terminates
+   when every supervised run reports DONE or is reaped. It is the designer's *delegated* watch, not a new
+   supervision level: nobody watches the watchdog, exactly as nobody watches the launcher today — the
+   one-supervision-level invariant is preserved with the level relocated.
 
 **Explicitly removed from the designer contract:** pod SSH, GPU-utilization sampling (the #323 series
-paragraph), and checklist-step progress accounting — those belong to the executor's loop, where they already
-live. The stale cross-reference in `run-experiment/SKILL.md` ("the dispatcher watchdog may fold `nvidia-smi`
-utilization into its periodic check — see `design-experiment`'s watchdog") is updated to match.
+paragraph — relocated to `run-experiment` as above, not deleted), and checklist-step progress accounting —
+those belong to the executor's loop. The stale cross-reference in `run-experiment/SKILL.md` ("the dispatcher
+watchdog may fold `nvidia-smi` utilization into its periodic check — see `design-experiment`'s watchdog") is
+replaced by the relocated obligations themselves.
 
 **Kept:** the designer-of-record posture (a nudge is a liveness poke, not driving), exactly one supervision
 level, and the Codex-designer gap note — the shell monitor is substrate-neutral, but the heartbeat needs a
@@ -81,9 +98,10 @@ every future turn of the session, including every heartbeat tick.
 ## Blast radius
 
 Product skill text only: the watchdog section of
-`plugins/experiment-lifecycle/skills/design-experiment/SKILL.md` (the #292 + #323 paragraphs), one stale
-cross-reference sentence in `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md`, and the
-`experiment-lifecycle` plugin version bump. No scripts, no templates (CHECKLIST already requires the
+`plugins/experiment-lifecycle/skills/design-experiment/SKILL.md` (the #292 + #323 paragraphs), the
+relocated #323 utilization obligations in `plugins/experiment-lifecycle/skills/run-experiment/SKILL.md`
+(replacing the stale designer-watchdog cross-reference), and the `experiment-lifecycle` plugin version
+bump. No scripts, no templates (CHECKLIST already requires the
 executor self-wake as an independent cron), no instance config. The `ship-change` dispatcher contract in
 agentic-engineering (a deliberate ~5-min cadence for short-lived code implementors, watched from small
 dispatcher sessions) is a different trade-off and is not touched. Live designer sessions pick the new

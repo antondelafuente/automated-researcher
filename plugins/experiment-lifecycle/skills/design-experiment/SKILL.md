@@ -251,41 +251,50 @@ run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your
 invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
 then run to completion.
 
-**Arm the dispatcher-side watchdog (standard, the same moment you kick off) — the #292 pattern.** A dispatched
-executor can hit a Claude-Code-side API error (usually a rate limit) and go **silent-idle mid-turn**: process alive,
-no crash, so a crash supervisor never fires and the executor's own self-wake (which is for *benign* idle, not an
-API-wedged turn in its own rate-limited session) can't reliably un-wedge it. So the moment you dispatch an executor,
-arm **one watchdog loop per executor** (~20 min cadence) — a **Claude Code** designer uses its built-in **`/loop`**
-(`/loop 20m <check run-<exp>'s tmux pane, assess, nudge if wedged>`); a **Codex** designer has no equivalent today —
-that's the open gap tracked at #223, not something to invent here, so note the gap and fall back to ad hoc / manual
-checks on the same ~20 min cadence until #223 lands — this does NOT block dispatch. Each iteration the watchdog reads the executor's
-live state (e.g. `tmux capture-pane -t run-<exp> -p | tail -40`) and assesses three things: (a) making progress vs
-wedged, (b) which checklist step it's on, (c) whether it flagged a load-bearing fork/question that's sitting
-unanswered. Wedged → send a cheap, idempotent nudge (even `hello` resumes an API-errored session; low harm if it was
-actually working — this is a liveness poke, not driving it, see below). Real problems → surface to the researcher
-with specifics. Stop the loop when the executor reports DONE or is reaped. Exactly **one** supervision level — the
-launcher watches the executor; nobody watches the launcher (two nested failures is out of scope). Rationale: a model
-watcher can judge idle-vs-working from the transcript — the discrimination a model-free probe (#172) cannot make.
-(Proven pattern: the 2026-07-03 hereditary-ccp-platform run, designer-of-record `/loop 20m` watchdog.)
+**Arm designer-side supervision (standard, the same moment you kick off) — the two-layer split (#292, #342).**
+Supervision divides by failure mode, and the designer's share is deliberately small. (The prior contract — one
+`/loop 20m` watchdog per executor, in the designer session — ran every tick with the full designer history:
+guaranteed cache-cold past the 5-min prompt-cache TTL, ~$150–250/run-day of avoidable spend measured 2026-07-05.)
 
-**When the pane shows a long-running GPU-bound step, fold utilization into the same cycle — a series, not a
-point read (#323).** A single `nvidia-smi` read is exactly the one-sample noise this skill distrusts elsewhere (cf.
-the DATA AUDIT gate's distrust of a 2-sample self-smoke): sample several times across the ~20-min window instead —
-`nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv` run directly over the pod's SSH endpoint (resolve
-it from the run-supervision record's `lease_pod_ids` via `pod_lease.sh find-by-pod <pod-id>` → `pod_lease.sh show
-<nonce>`; this samples independently of the executor's tmux pane, so a busy pane never blocks it) — and keep the
-running series across your own loop iterations (this watchdog's own `/loop` context; the executor's
-run-supervision record is strictly relaunch-scoped state and is not the place for it). **Judge the series IN
-CONTEXT of the executor's current step**, not against a flat threshold: 0% during "waiting on judge API" is fine;
-0% for 40+ min during "training/generating" is a flatline — you already have the current-step read from bullet (b)
-above, so reuse it rather than judging utilization in isolation. **Restart-over-wait bias:** with checkpointed
-resumable state (the resume contract this skill already requires), restarting a flatlined job costs minutes while
-waiting costs hours — don't kill on one bad sample, but do recommend a restart on a sustained flatline against a
-GPU-bound step. (The sibling API-side instinct — start high, let backoff find the ceiling — is `run-experiment`'s
-concurrency directive, Execution discipline.)
+- **The executor's own independent self-wake owns IDLE detection** — benign waiting, dead in-session monitors,
+  no-progress-while-billing escalation, and GPU-utilization judgment (`run-experiment`: "Arm your self-wake" + the
+  #323 utilization-series discipline under Execution discipline). This is why `CHECKLIST.md` requires the self-wake
+  to be an independent recurring cron, not an in-session watcher. None of it is the designer's job — no pod SSH, no
+  GPU sampling, no checklist-step progress accounting from the designer session.
+- **The designer side owns only SESSION-WEDGE**: the executor's session API-stuck mid-turn (usually a rate limit) —
+  process alive, no crash, so a crash supervisor never fires; the one failure the executor's own wake cannot cure,
+  because its wake queues behind the stuck turn (#292).
+
+For the session-wedge duty, arm at dispatch, in this order:
+
+1. **An event-driven shell monitor per executor pane — zero model turns while healthy.** A detached shell watcher
+   polling the pane text (e.g. `tmux capture-pane -t run-<exp> -p | tail -5`) for the terminal transitions — the
+   executor's DONE/BLOCKED line, or the pane gone — delivering one notification turn to whoever holds the heartbeat
+   duty when it fires; stop it when the run is reaped. (Claude Code: the harness `Monitor` primitive — visible,
+   cancellable harness machinery, not an ad-hoc background sleep-loop the harness can kill without anyone noticing.
+   Any substrate with a background shell can run the equivalent loop.)
+2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection.** Read each executor's pane and judge
+   advancing-vs-frozen against your previous read — the discrimination a model-free probe (#172) cannot make.
+   Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
+   it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
+   unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several
+   executors → ONE merged heartbeat over all their panes, never one loop per run.** (Claude Code: `/loop 45m`; a
+   **Codex** designer has no periodic-reinvocation primitive today — the open gap tracked at #223, not something to
+   invent here: note the gap, fall back to ad hoc / manual checks at the same cadence, and do NOT block dispatch.)
+3. **Designer context known-large → dispatch the heartbeat to a separate small session (optional).** The heartbeat
+   needs ~2k tokens (pane text + the rubric above) but a loop in the designer session executes with the whole
+   designer history, re-cached cold on every tick. The dispatched watchdog is spawned at kickoff with the list of
+   panes to watch, owns only this layer's duty (monitor triggers route to it; it runs the merged heartbeat and
+   escalates real problems), and terminates when every supervised run reports DONE or is reaped. It is the
+   designer's *delegated* watch, not a new level: nobody watches the watchdog — exactly **one** supervision level,
+   as always (the launcher watches the executor; nobody watches the launcher; two nested failures is out of scope).
+
+**Context hygiene while supervising:** route bulk reads (RESULTS.md, screenshots, long logs) through subagents/forks
+during supervision phases — context accumulated while babysitting is rent paid on every future turn of the designer
+session, including every heartbeat tick.
 
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
-**do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass. The watchdog
+**do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass. The heartbeat
 nudge above is bounded health supervision, not driving: it pokes an idle session back to life, it does not answer
 design questions or steer the method — a real question still routes back to you as a load-bearing flag, same as always.
 
