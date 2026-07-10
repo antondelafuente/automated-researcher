@@ -1,3 +1,18 @@
+- experiment-lifecycle 0.3.30 (2026-07-10): define ledger terminal status as OPERATIONAL run health, never a
+  scientific verdict (#376). Incident: an executor closed two correctly-executed Helena evaluations with
+  ledger `failed` because an instrument-calibration gate and a parse-coverage gate did not pass — a planned,
+  correctly-executed no-go, not a broken execution — and the dashboard truthfully rendered two good runs as
+  broken ones. `run-experiment` SKILL.md's ledger-write step (Step 4) now defines three product-owned abstract
+  outcomes — completed-as-designed (includes a correctly executed planned no-go / validity-gate stop),
+  technical-failure (a genuine execution failure or experiment bug), deliberate-abandon (`killed`, unchanged)
+  — and requires the instance's ledger recipe (still narrative prose, no schema change) to map these onto its
+  concrete terminal strings; an executor fails closed if that mapping is undiscoverable or contradictory,
+  never guessing. `[BLOCK] FAIL` in `CHECKLIST.md` is explicitly named as a validity-trail term, distinct from
+  ledger `technical-failure` — the two can legitimately co-occur with either ledger outcome. The
+  `CHECKLIST_TEMPLATE.md` legend + ledger `[BLOCK]` gate gain matching cross-references. No numerical
+  hypothesis threshold introduced; the data-vs-verdict philosophy is unchanged. The consuming-instance
+  compatibility/backfill (correcting this box's two mislabeled Helena ledger rows, append-only) is tracked
+  separately at `research-lab#211`.
 - experiment-lifecycle 0.3.29 (2026-07-10): give `visualize-results` its own editorial publish-destination
   recipe, `[recipes.visualization_publish]`, instead of reusing `[recipes.viewer]` (#369). Instance mismatch
   found before rollout: `run-experiment`'s close-time publish leg (#347) lands operational experiment pages
