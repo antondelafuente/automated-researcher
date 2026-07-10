@@ -379,4 +379,20 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^\.aar-ci/(checks|checks_marketplace_
   fi
 fi
 
+# 14. repo-janitor worktree-sweep smoke (#364): the three-tier classification (deterministic/owner/
+#     residual), the live-owner tier-1 VETO, fail-closed UNKNOWN facts never reaching tier 1, the silent
+#     (in-progress / just-merged-and-fresh) cases, --fetch freshness vs the cached-ref default, --reap-tier1
+#     deleting ONLY tier-1 entries (with --dry-run touching nothing), the --json shape, and CLI argument
+#     validation — behavior the JSON/syntax/py-compile checks can't cover. Runs when the sweep or its smoke
+#     changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/repo-janitor/skills/repo-janitor/scripts/(worktree_sweep\.py|worktree_sweep_smoke\.sh)$'; then
+  RJ_SMOKE="$ROOT/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep_smoke.sh"
+  if [ -f "$RJ_SMOKE" ]; then
+    echo "[checks] repo-janitor worktree-sweep smoke" >&2
+    bash "$RJ_SMOKE" >&2 && ok "worktree_sweep smoke" || err "worktree_sweep smoke FAILED"
+  else
+    err "worktree_sweep.py changed but worktree_sweep_smoke.sh missing — cannot verify the sweep classifier"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

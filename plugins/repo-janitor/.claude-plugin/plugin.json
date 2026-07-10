@@ -1,0 +1,8 @@
+{
+  "name": "repo-janitor",
+  "description": "Deterministic weekly sweep of git worktrees + the shared checkout, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Report-only by default; no state, no auto-reap.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Anton de la Fuente"
+  }
+}

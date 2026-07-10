@@ -32,10 +32,10 @@ report format. The **instance** supplies: which repo(s) + worktree root to point
 live sessions and message them, and the timer that invokes it. None of that instance wiring lands here;
 `repo-janitor`'s `SKILL.md` documents the seam contract so a consuming instance can wire it same-day.
 
-### The sweep: `worktree_sweep.sh`
+### The sweep: `worktree_sweep.py`
 
 ```
-worktree_sweep.sh --repo <path> [--repo <path> ...]
+python3 scripts/worktree_sweep.py --repo <path> [--repo <path> ...]
                    [--worktree-root <path>]      # default: unset -> ownership never derived
                    [--owner-depth N]             # default 1 (path segments under root -> candidate owner id)
                    [--min-age-days N]            # default 7
@@ -190,7 +190,7 @@ New plugin `plugins/repo-janitor/`:
 - `skills/repo-janitor/SKILL.md` — the sweep contract, the tier semantics, the seam contract
   (`REPO_JANITOR_LIVE_SESSIONS_CMD`) an instance wires, and the explicit "timer never passes
   `--reap-tier1`" rule.
-- `skills/repo-janitor/scripts/worktree_sweep.sh` — the sweep + reap implementation above.
+- `skills/repo-janitor/scripts/worktree_sweep.py` — the sweep + reap implementation above.
 - `skills/repo-janitor/scripts/worktree_sweep_smoke.sh` — offline fixture repo(s) covering: tier-1
   (merged+clean+old, and prunable), tier-2 (stray content under a live owner), tier-3 (stray content under
   a not-live/no owner, a stale-unmerged-and-old branch with no owner, and shared-checkout drift), the
