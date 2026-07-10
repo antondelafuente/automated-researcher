@@ -247,6 +247,32 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   implementation of an agreed spec, not improvisation. An arm/dataset the spec never mentioned needs no entry.
   The manifest's `title` and `labels` follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an
   optional env var naming a path or URI) is set — unset, the plain-language requirement above stands on its own.
+- **The publish leg — YOURS when the brief carries a viewer recipe (#347); manifest-only otherwise.** Check the
+  `START.md` instance-profile snapshot for a **`[recipes.viewer]`** pointer (a typed, pinned recipe pointer like
+  any other — you read ONLY the snapshot, never a live profile or env var). **No viewer recipe in the snapshot →
+  the close is manifest-only** — the manifest still stands on its own as plain-language arm documentation, and
+  any later page build is consuming-instance work. **Recipe present → building and publishing the page is part
+  of YOUR close**, after upload verification + `RESULTS.md` + `presentation_manifest.json` (it consumes the same verified
+  artifacts) and **before the independent close audit and `log-experiment`**, so the audit and the landed
+  record see the committed source + the gate's evidence:
+  - **The recipe doc must name** (1) the viewer repo and its gated landing path (reusing the instance's existing
+    engineer-identity seams — no new credential surface), (2) the shared page-building library and at least one
+    committed prior page as the pattern, (3) the assemble → render → bundle → gallery-rebuild commands or worked
+    examples, and (4) where per-experiment page source lives in the viewer repo. A resolved recipe missing any of
+    these is a **load-bearing brief gap**: flag it and fall back to manifest-only — don't improvise a publish path.
+  - **The work:** assemble the per-cell transcripts, author the bespoke per-experiment builder against the
+    cleared `DESIGN.md` Presentation spec, render the pinned figures, bundle, update the gallery, and land the
+    viewer change through the recipe's gated path. The page is deliberately **bespoke, not a generic
+    manifest-to-template generator** — a template flattens the "tell this experiment's story" quality; share only
+    house style (the page lib + prior pages as pattern).
+  - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
+    land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
+    shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
+    source is what keeps that post-close tweak a one-script edit.
+  - **The page prose is a FIRST-PASS draft** the researcher polishes on the live page — the plain-language /
+    no-verdict / mark-postdictions discipline is exactly what's easy to get wrong; produce a live first-pass
+    page, never a finished story. The mechanical bar (figures per spec, source committed, page landed) is the
+    checklist gate; prose quality is explicitly not.
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
   adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The
@@ -270,31 +296,6 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   `log-experiment.sh <exp-dir>` opens a gated PR, verifies the close-audit is present + clean (or, for a
   no-go/eval-only run, a closed `RESULTS.md` decision), takes the cross-family bot approval, and merges — one
   command, not the by-hand branch/approve/merge dance. This is how a finished experiment becomes a GitHub record.
-- **The publish leg — YOURS when the brief carries a viewer recipe (#347); manifest-only otherwise.** Check the
-  `START.md` instance-profile snapshot for a **`[recipes.viewer]`** pointer (a typed, pinned recipe pointer like
-  any other — you read ONLY the snapshot, never a live profile or env var). **No viewer recipe in the snapshot →
-  the close is manifest-only** — the manifest still stands on its own as plain-language arm documentation, and
-  any later page build is consuming-instance work. **Recipe present → building and publishing the page is part
-  of YOUR close**, after upload verification + `RESULTS.md` (it consumes the same verified artifacts) and before
-  the final close self-audit, so the cross-family close audit sees the committed source + evidence:
-  - **The recipe doc must name** (1) the viewer repo and its gated landing path (reusing the instance's existing
-    engineer-identity seams — no new credential surface), (2) the shared page-building library and at least one
-    committed prior page as the pattern, (3) the assemble → render → bundle → gallery-rebuild commands or worked
-    examples, and (4) where per-experiment page source lives in the viewer repo. A resolved recipe missing any of
-    these is a **load-bearing brief gap**: flag it and fall back to manifest-only — don't improvise a publish path.
-  - **The work:** assemble the per-cell transcripts, author the bespoke per-experiment builder against the
-    cleared `DESIGN.md` Presentation spec, render the pinned figures, bundle, update the gallery, and land the
-    viewer change through the recipe's gated path. The page is deliberately **bespoke, not a generic
-    manifest-to-template generator** — a template flattens the "tell this experiment's story" quality; share only
-    house style (the page lib + prior pages as pattern).
-  - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
-    land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
-    shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
-    source is what keeps that post-close tweak a one-script edit.
-  - **The page prose is a FIRST-PASS draft** the researcher polishes on the live page — the plain-language /
-    no-verdict / mark-postdictions discipline is exactly what's easy to get wrong; produce a live first-pass
-    page, never a finished story. The mechanical bar (figures per spec, source committed, page landed) is the
-    checklist gate; prose quality is explicitly not.
 - **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
