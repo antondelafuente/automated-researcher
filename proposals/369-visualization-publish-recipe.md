@@ -47,7 +47,14 @@ Files touched:
   canonical copies) — the normative field table's recipe-name examples and the `[recipes.visualization_preview]`
   prose paragraph gain a sibling `[recipes.visualization_publish]` paragraph; the existing `[recipes.viewer]`
   paragraph is untouched except removing the now-stale "the *publish* half of `visualize-results` reuses
-  `[recipes.viewer]`" cross-reference.
+  `[recipes.viewer]`" cross-reference. The "Who resolves live vs who reads the snapshot" role-split section
+  (the paragraph naming `visualize-results` as a live reader) also names `[recipes.visualization_publish]`
+  instead of `[recipes.viewer]` as the pointer it resolves on explicit publish — that sentence is maintained
+  contract text a zero-context agent reads, not just an example, so it must change too (design-review finding).
+- `.aar-ci/checks.sh` — the smoke-description comment above the `visualize_results_smoke.sh` staleness check
+  currently narrates the resolver's explicit-publish boundary in terms of `[recipes.viewer]`; retarget that
+  comment to `[recipes.visualization_publish]` so the deterministic-check narration matches the resolver's
+  actual behavior post-change (design-review finding).
 - `visualize_results_smoke.sh` — existing publish-boundary assertions retarget from `[recipes.viewer]` to
   `[recipes.visualization_publish]`; add a new case proving the two recipes don't cross-resolve (an instance
   profile where `viewer` and `visualization_publish` point at different repos/paths; assert publish mode
@@ -84,6 +91,19 @@ that hasn't configured it simply gets a BLOCK on `--publish` (same as today, jus
 
 Additive schema change (new optional recipe key), no MAJOR bump. No migration needed for instances that
 haven't wired `visualize-results --publish` yet (none have — the issue states instance #1's rollout is
-paused on this landing). An instance that wants editorial publish now configures
-`[recipes.visualization_publish]` pointing at its own site's recipe doc, distinct from `[recipes.viewer]`.
-Rollback is a plain revert — no state migration, since nothing consumes the new key until this change lands.
+paused on this landing, so a plain revert is safe **today**, before any instance has adopted the new key).
+An instance that wants editorial publish now configures `[recipes.visualization_publish]` pointing at its
+own site's recipe doc, distinct from `[recipes.viewer]`.
+
+**Rollback is NOT unconditionally a plain code revert once an instance has adopted the new key**
+(design-review finding): after an instance configures `[recipes.visualization_publish]`, a bare revert of
+this change would make `resolve_visualization_recipe.sh --publish` fall back to resolving `[recipes.viewer]`
+again — silently reintroducing the exact wrong-destination bug this issue exists to fix, rather than
+blocking. So the rollback procedure is: (1) confirm no instance profile has configured
+`[recipes.visualization_publish]` yet, in which case a plain revert is safe (the pre-change and post-revert
+behavior are identical); otherwise (2) coordinate the code revert with removing/disabling that instance's
+`[recipes.visualization_publish]` entry and pausing its `visualize-results --publish` usage in the same
+change, so the resolver never lands in the ambiguous state of no code path reading a still-configured
+editorial-publish recipe. This is the same category of coordinated-rollback discipline other additive recipe
+keys (`viewer` itself, #347) would need once an instance depends on them — an additive schema key becomes
+load-bearing the moment an instance configures it.
