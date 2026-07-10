@@ -71,13 +71,19 @@ are not.** Pin:
   must NOT make a rigorous pre-registered claim ("H confirmed / refuted at threshold") — the rigorous interpretation is the
   researcher's separate analysis step. (Hygiene survives: a read *fitted* from the data is a postdiction — unverified; if
   load-bearing, test on FRESH data.)
-- **Presentation — per figure/table, what it plots and what that requires.** For each headline figure or table the
-  experiment will produce: what it plots, and which columns/fields it needs at what granularity (per-arm? per-row?
-  aggregated?) — **never what it should show** (no pre-registered verdict here either; this is a data-organization
-  spec, same posture as the rest of `DESIGN.md`). Cover both halves: the headline-figure spec, and the dataset/column
-  organization (training + eval datasets, which columns are worth surfacing) — so both get cleared by the researcher
-  in this SAME design-clearance pass, with no separate gate. This is what `design-audit` (Step 2) checks the
-  data-collection plan actually persists. The figure captions, story wording, and the experiment's human-facing
+- **Presentation — per figure/table, what it plots and what that requires, concrete enough to render
+  unattended.** For each headline figure or table the experiment will produce: what it plots — the plot type, the
+  arms/series on it, the canonical metric and axes — and which columns/fields it needs at what granularity
+  (per-arm? per-row? aggregated?), down to the per-cell data source (e.g. one transcript log per {arm ×
+  condition}, and which field is the score). The bar: a stranger could render each declared figure from the
+  collected artifacts alone, without asking you — because at close, the executor will (the `run-experiment`
+  publish leg; when the instance profile carries a `[recipes.viewer]` pointer, the standard profile snapshot
+  into `START.md` carries it like any other recipe pointer, and the executor's publish leg reads only that
+  snapshot). Still **never what it should show** (no pre-registered verdict here either; this is a
+  data-organization spec, same posture as the rest of `DESIGN.md`). Cover both halves: the headline-figure spec,
+  and the dataset/column organization (training + eval datasets, which columns are worth surfacing) — so both get
+  cleared by the researcher in this SAME design-clearance pass, with no separate gate. This is what `design-audit`
+  (Step 2) checks the data-collection plan actually persists and can render. The figure captions, story wording, and the experiment's human-facing
   title follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an optional env var naming a path or
   URI) is set — unset, the plain-language requirement above stands on its own.
 - **Provenance gets verified or flagged, never asserted.** Before stating any lineage/provenance, sweep the archive for

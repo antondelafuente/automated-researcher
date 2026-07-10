@@ -53,6 +53,18 @@
 - ☐ [BLOCK] presentation_manifest.json written next to RESULTS.md — unconditional, config-free.
       Required {title, labels}; figures/datasets all-optional, populated per the DESIGN.md
       Presentation subsection (no unconfigured-viewer exception — write it regardless).           ev:
+- ☐ [BLOCK] Viewer publish leg resolved per the START.md profile snapshot (#347) — MECHANICAL bar only;
+      exactly ONE of three end-states, each with evidence (never silently skip):
+      (a) PUBLISHED — snapshot carries a `[recipes.viewer]` pointer: pinned figures rendered per the DESIGN.md
+          Presentation spec, per-experiment page SOURCE (build/assemble scripts + manifest) committed to the
+          viewer repo, page + gallery landed via the recipe's gated path (page prose is a first-pass draft —
+          its quality is NOT this gate's bar).       ev: landed PR/commit + committed source paths + page URL
+      (b) NO RECIPE — no `[recipes.viewer]` in the snapshot; manifest-only close.  ev: "no [recipes.viewer] in snapshot"
+      (c) RECIPE INCOMPLETE — pointer present but the recipe is missing required contents (repo+landing path,
+          page lib+prior page, commands, source destination): a load-bearing brief-gap flag, NOT a blocked
+          close — notify the designer-of-record, close manifest-only, record it in GAPS. This is a recorded
+          PASS end-state (the close proceeds), never recorded as (b).
+          ev: "recipe incomplete: missing <items>; flagged <where>; manifest-only"
 - ☐ [BLOCK] Ledger's folded/latest status is TERMINAL (`done`/`failed`/`killed`, or the instance's
       ledger recipe's terminal set) — not just that a launch event exists somewhere in its history. Never
       backfill a `running`/`launched`/`deploying` event after a terminal one: a last-non-null-field-wins
