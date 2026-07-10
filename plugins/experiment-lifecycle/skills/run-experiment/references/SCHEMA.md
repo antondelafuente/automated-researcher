@@ -53,6 +53,11 @@ The discovery lookup above is **for the designer/init/validate side only**. The 
   fields it needs, and **snapshots the resolved values plus the file's content-hash (`profile_sha256`) into
   `START.md`** before the reviewed-brief commit (#153 decision 4). `aar-profile-init` / `aar-profile-validate`
   are the only other live readers (they write/check the file).
+- **`visualize-results` (#365) also resolves the live profile — a second, narrowly-scoped live reader.** It
+  reads `[recipes.visualization_preview]` (and, only on an explicit publish instruction,
+  `[recipes.viewer]`) directly, for the same reason `design-experiment` does: it is live, repeatable,
+  researcher-steered work with no locked brief to snapshot into — not the reproducibility-from-a-frozen-record
+  contract `run-experiment` alone must uphold. It writes nothing to the profile.
 - **`run-experiment` (the zero-context executor) reads ONLY the frozen `START.md` snapshot.** It **never**
   re-reads the mutable live profile for any GitHub-lifecycle config — its world is the brief. The **one** narrow
   live step is minting a credential: it reads the env-var *name* the snapshot carries (`token_cmd_env`) and
@@ -128,7 +133,7 @@ value, or a kind/field mismatch is **fail closed** (validate rejects; discovery 
 | `[github.identity.codex].git_author_env` | env-var name (string) | R | — | Same, for the codex family. |
 | `[github.protection].require_pr_review` | bool | O | `false` | Tightening-only expectation the close-gate pre-checks; may only require MORE, never weaken a product invariant. |
 | `[github.protection].enforce_admins` | bool | O | `false` | Tightening-only expectation (no standing admin bypass). |
-| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`, `viewer`). |
+| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`, `viewer`, `visualization_preview`). |
 | `[recipes.<name>].kind` | enum | R *(within the table)* | — | **Closed set: `"repo"` \| `"uri"`.** Selects which other keys are required (below). |
 | `[recipes.<name>].repo` | `owner/repo` string | R **iff** `kind="repo"` | — | The OWNING repo (never assumed = `research_repo`). |
 | `[recipes.<name>].path` | string | R **iff** `kind="repo"` | — | Repo-relative path. |
@@ -163,6 +168,16 @@ Field semantics, normative (the parts not obvious from the table):
   where per-experiment page source lives — see `run-experiment`'s publish leg). Absent ⇒ closes are
   manifest-only. Same typed/pinned shape as every recipe; snapshotted into `START.md` like the rest — the
   executor never resolves it live.
+
+- **`[recipes.visualization_preview]`** — OPTIONAL (#365); the instance's **local-first visualization-preview
+  recipe**, consumed by the `visualize-results` skill: the doc a researcher-driven visualization pass follows
+  to enter local iteration (the preview claim lifecycle — status/use/release — the stable per-page local
+  worktree + URL, and the shared page-style pattern). Distinct from `[recipes.viewer]` above: different key,
+  different trigger (an explicit, repeatable researcher request vs. automatic at experiment close), different
+  lifecycle (live iteration vs. one-shot). The *publish* half of `visualize-results` reuses `[recipes.viewer]`
+  itself rather than duplicating a second landing-path pointer — see `visualize-results/references/SCHEMA.md`.
+  Absent ⇒ `visualize-results` fails closed rather than improvising. Same typed/pinned shape as every recipe;
+  resolved LIVE by `visualize-results` (see the role-split note above), never snapshotted into a `START.md`.
 
 ### Product invariant — cross-family review is NOT a profile field (#153 decision 3a)
 
