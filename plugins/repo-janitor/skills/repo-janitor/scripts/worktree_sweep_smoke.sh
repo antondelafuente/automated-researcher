@@ -187,6 +187,58 @@ J_FETCH=$(python3 "$SWEEP" --json --repo "$REPO" --fetch 2>/dev/null)
 if echo "$J_NOFETCH" | reason_has "d['tier3']" "$REPO" "behind"; then no "no --fetch unexpectedly reported behind-origin (stale cache treated as current)"; else ok "no --fetch: stale cached ref never reports drift it can't see"; fi
 if echo "$J_FETCH" | reason_has "d['tier3']" "$REPO" "behind"; then ok "--fetch: behind-origin drift correctly surfaced"; else no "--fetch: behind-origin drift NOT surfaced"; fi
 
+# 3b. round-3 code-review Finding 1: ignored content must never be silently reaped, and a repo config
+#     that tries to hide untracked files must not fool the safety-critical status check. Isolated fixture
+#     repo so a repo-wide `status.showUntrackedFiles=no` doesn't disturb the main fixture's assertions.
+IGN_REPO="$TMP/ign-repo"; IGN_ORIGIN="$TMP/ign-origin.git"
+git init -q --bare "$IGN_ORIGIN"
+git init -q -b main "$IGN_REPO"
+g "$IGN_REPO" config user.email t@example.com; g "$IGN_REPO" config user.name smoke
+echo hello > "$IGN_REPO/f.txt"; g "$IGN_REPO" add f.txt; g "$IGN_REPO" commit -q -m init
+g "$IGN_REPO" remote add origin "$IGN_ORIGIN"; g "$IGN_REPO" push -q origin main
+
+# merged+clean(tracked)+zero-untracked+old, but carries a real .gitignore'd file — verified empirically
+# that `git worktree remove` deletes ignored content right along with everything else, so this must NOT
+# reach tier1 (must be silent, since it's not otherwise dirty/untracked/stale-unmerged).
+g "$IGN_REPO" worktree add -q -b feat-ignored "$TMP/wt-ignored" main
+{ echo "*.local"; } > "$TMP/wt-ignored/.gitignore"
+git -C "$TMP/wt-ignored" add .gitignore
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-ignored" commit -q -m addignore --date="$OLD_DATE"
+echo "precious local data" > "$TMP/wt-ignored/keep.local"
+g "$IGN_REPO" merge -q --no-edit feat-ignored
+g "$IGN_REPO" push -q origin main
+
+# a SECOND worktree with a real untracked file, but the repo is configured to hide untracked files from
+# plain `git status` — the safety check must force --untracked-files=all and see it anyway.
+g "$IGN_REPO" worktree add -q -b feat-hidden-untracked "$TMP/wt-hidden-untracked" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-hidden-untracked" commit -q --allow-empty -m hiddenuntracked --date="$OLD_DATE"
+g "$IGN_REPO" merge -q --no-edit feat-hidden-untracked
+g "$IGN_REPO" push -q origin main
+echo "a real untracked file" > "$TMP/wt-hidden-untracked/stray.txt"
+g "$IGN_REPO" config status.showUntrackedFiles no
+
+J_IGN=$(python3 "$SWEEP" --json --repo "$IGN_REPO" 2>/dev/null)
+if echo "$J_IGN" | has_path_in "d['tier1']" "$TMP/wt-ignored"; then no "ignored-content worktree reached tier1 (would have destroyed the ignored file on reap)"; else ok "ignored-content worktree excluded from tier1"; fi
+ALL_IGN=$(echo "$J_IGN" | all_paths)
+if grep -qxF "$TMP/wt-ignored" <<<"$ALL_IGN"; then no "ignored-content worktree should be SILENT (not noisy tier2/3 nagging over build-cache-like content)"; else ok "ignored-content worktree is silent (not tier1, not noisy)"; fi
+if echo "$J_IGN" | has_path_in "d['tier1']" "$TMP/wt-hidden-untracked"; then no "status.showUntrackedFiles=no let a real untracked file hide from the safety check"; else ok "status.showUntrackedFiles=no cannot hide untracked content (forced --untracked-files=all)"; fi
+
+# 3c. round-3 code-review Finding 2: a linked worktree checked out ON the default branch name itself must
+#     never have that branch ref deleted, even though it trivially reads as "merged".
+DB_REPO="$TMP/db-repo"; DB_ORIGIN="$TMP/db-origin.git"
+git init -q --bare "$DB_ORIGIN"
+git init -q -b main "$DB_REPO"
+g "$DB_REPO" config user.email t@example.com; g "$DB_REPO" config user.name smoke
+echo hello > "$DB_REPO/f.txt"; g "$DB_REPO" add f.txt
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$DB_REPO" commit -q -m init --date="$OLD_DATE"   # main's tip must be OLD
+g "$DB_REPO" remote add origin "$DB_ORIGIN"; g "$DB_REPO" push -q origin main
+g "$DB_REPO" checkout -q -b trunk-work            # primary checkout now sits on a DIFFERENT branch
+g "$DB_REPO" worktree add -q "$TMP/wt-on-main" main   # a LINKED worktree checked out on "main" itself
+
+python3 "$SWEEP" --repo "$DB_REPO" --reap-tier1 >/dev/null 2>&1
+if [ -d "$TMP/wt-on-main" ]; then no "linked worktree on the default branch was not reaped (expected removal of the WORKTREE, just not the branch)"; else ok "linked worktree on the default branch was removed"; fi
+if git -C "$DB_REPO" rev-parse --verify -q refs/heads/main >/dev/null; then ok "default branch ref 'main' preserved after reap"; else no "default branch ref 'main' was WRONGLY deleted"; fi
+
 # 4. --reap-tier1 --dry-run touches nothing
 COUNT_BEFORE=$(git -C "$REPO" worktree list | wc -l)
 python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 --dry-run >/dev/null 2>&1

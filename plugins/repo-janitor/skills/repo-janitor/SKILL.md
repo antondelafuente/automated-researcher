@@ -40,14 +40,24 @@ origin — is **fail-closed tri-state**: a `git status`/`log`/`merge-base` call 
 leaves that fact `UNKNOWN`, which disqualifies the worktree from tier 1 and routes it to tier 2/3 tagged
 "inspection needed" — never silently treated as the safe value.
 
-1. **Deterministic ("safe to reap")** — merged into the default branch, clean, no untracked files, and
-   older than `--min-age-days`; or the worktree's own administrative record is plain **prunable** (its
-   working directory is already gone — someone `rm -rf`'d it instead of `git worktree remove`). No one is
-   asked. **Exception, load-bearing:** if `--worktree-root` derives an owner for this path and that owner
-   reads as *live* (see the seam below), it is **never** tier 1 even when every other condition holds — a
-   persistent per-agent worktree that simply hasn't diverged from a quiet default branch recently is not
-   proof of disuse. It demotes to tier 2 instead, with its own reason ("merged+clean+old, but you're live
-   — confirm this is really unused before it's reaped").
+1. **Deterministic ("safe to reap")** — merged into the default branch, clean of both tracked changes AND
+   untracked files, carries no ignored content either, and older than `--min-age-days`; or the worktree's
+   own administrative record is plain **prunable** (its working directory is already gone — someone
+   `rm -rf`'d it instead of `git worktree remove`). No one is asked. **No ignored content, verified
+   empirically:** `git worktree remove` deletes the entire directory tree once it judges the tree clean —
+   it does not spare `.gitignore`'d files (a local `.env`, unstaged secrets, anything a broad ignore
+   pattern happens to match), so any ignored file blocks tier 1 outright; a worktree that's otherwise
+   merged+clean+old but carries only ignored build-cache-like content (`node_modules`, `__pycache__`, a
+   venv) is simply **silent** rather than either reaped or nagged about weekly. The untracked/ignored scan
+   forces `--untracked-files=all --ignored`, so a repo's own `status.showUntrackedFiles=no` config can't
+   hide real content from this check. **Exception, load-bearing:** if `--worktree-root` derives an owner
+   for this path and that owner reads as *live* (see the seam below), it is **never** tier 1 even when
+   every other condition holds — a persistent per-agent worktree that simply hasn't diverged from a quiet
+   default branch recently is not proof of disuse. It demotes to tier 2 instead, with its own reason
+   ("merged+clean+old, but you're live — confirm this is really unused before it's reaped"). **The
+   configured default branch's own ref is never deleted**, even for a linked worktree checked out directly
+   on it (trivially "merged") — only its worktree directory is removed, never the branch, since other
+   worktrees/operations depend on that ref existing.
 2. **Owner-session investigates** — stray content (dirty/untracked), or a stale unmerged branch nobody is
    continuing, whose derived owner reads as *live*. The report asks that owner to investigate and
    disposition it (or escalate) — ownership assigns *investigation responsibility*, not a memory test: a
@@ -136,4 +146,7 @@ This plugin owns the classification + report format only. An instance wires:
 
 `scripts/worktree_sweep_smoke.sh` — builds real local git fixtures (no network) covering every tier, the
 live-owner tier-1 veto, fail-closed UNKNOWN handling, the silent cases, `--fetch` freshness, `--reap-tier1`
-with/without `--dry-run`, the `--json` shape, and CLI argument validation.
+with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored content never reaching tier
+1 (with a `status.showUntrackedFiles=no` config bypass attempt), the default branch's ref surviving a reap
+of a linked worktree checked out on it, and a locked (un-removable) tier-1 worktree failing without
+blocking other removals.

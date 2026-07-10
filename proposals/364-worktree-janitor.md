@@ -107,9 +107,17 @@ just-merged worktree still inside its grace window is not a problem; it will re-
 still around then, which is the whole "re-sweep is the retry" design (no state DB needed to know this — the
 same recompute lands the same verdict until the underlying git state changes). If `flaggable`:
 
-- `merged AND !dirty AND untracked==0 AND age_days >= min_age_days` **AND (no owner candidate, or the
-  candidate owner is not live)** → **tier 1** ("safe to reap" — no one is asked; see *The reap action* for
-  what "safe" authorizes).
+- `merged AND !dirty AND untracked==0 AND ignored==0 AND age_days >= min_age_days` **AND (no owner
+  candidate, or the candidate owner is not live)** → **tier 1** ("safe to reap" — no one is asked; see *The
+  reap action* for what "safe" authorizes). **Ignored content blocks tier 1 too** (code review, verified
+  empirically): `git worktree remove` deletes the whole directory tree once it judges it clean, sparing
+  nothing `.gitignore` matches — so a worktree that's otherwise merged+clean+old but carries only ignored
+  build-cache-like content is silent, not reaped (the `flaggable` condition above is unaffected by
+  `ignored`, so this case is simply never flaggable at all rather than being downgraded to a tier). The
+  untracked/ignored scan forces `--untracked-files=all --ignored`, closing a `status.showUntrackedFiles=no`
+  config bypass. The reap action also never deletes the branch ref matching the configured default branch
+  name, even for a linked worktree checked out directly on it (trivially "merged") — only its worktree
+  directory goes away.
 - `merged AND !dirty AND untracked==0 AND age_days >= min_age_days` **AND the candidate owner IS live** →
   **tier 2**, not tier 1. **A live owner is an unconditional tier-1 veto** (Finding 2): a worktree that
   reads as merged+clean+old can still be a persistent per-agent home that simply hasn't diverged from a

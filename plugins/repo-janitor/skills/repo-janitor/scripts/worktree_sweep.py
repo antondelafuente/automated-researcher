@@ -137,14 +137,25 @@ def parse_worktrees(repo):
 
 
 def status_facts(path):
-    """(dirty, untracked_count) — both None (UNKNOWN) on any status failure."""
-    rc, out, _ = run_git(["status", "--porcelain"], cwd=path)
+    """(dirty, untracked_count, ignored_count) — all None (UNKNOWN) on any status failure.
+
+    Forces `--untracked-files=all` (code-review Finding 1): a repo/global `status.showUntrackedFiles=no`
+    config would otherwise make `git status --porcelain` report ZERO untracked files even when real
+    untracked content is present, letting a genuinely non-clean worktree read as "clean" and reach tier 1.
+    Also forces `--ignored`: verified empirically that `git worktree remove` deletes the ENTIRE directory
+    tree once it judges the tree clean — it does NOT spare .gitignore'd content (git has no
+    "preserve ignored files" mode for worktree removal). Plain `git status --porcelain` never lists
+    ignored files at all, so without this an ignored-but-valuable file (a local `.env`, unstaged secrets,
+    anything a broad gitignore pattern happens to match) would be silently destroyed by a tier-1 reap.
+    """
+    rc, out, _ = run_git(["status", "--porcelain", "--untracked-files=all", "--ignored"], cwd=path)
     if rc != 0:
-        return None, None
+        return None, None, None
     lines = [l for l in out.splitlines() if l]
     untracked = sum(1 for l in lines if l.startswith("??"))
-    dirty = any(not l.startswith("??") for l in lines)
-    return dirty, untracked
+    ignored = sum(1 for l in lines if l.startswith("!!"))
+    dirty = any(not l.startswith("??") and not l.startswith("!!") for l in lines)
+    return dirty, untracked, ignored
 
 
 def age_days_fact(path, now_ts):
@@ -213,9 +224,14 @@ def inspect_action(path):
     return {"kind": "inspect", "commands": [gitcmd("-C", path, "status"), gitcmd("-C", path, "log", "-1")]}
 
 
-def remove_action(repo, path, branch):
+def remove_action(repo, path, branch, default_branch):
     cmds = [gitcmd("-C", repo, "worktree", "remove", path)]
-    if branch:
+    # NEVER suggest (or later execute) deleting the ref matching the configured default branch name
+    # (round-3 code-review Finding 2): a linked worktree can legitimately be checked out ON the default
+    # branch itself (git only forbids the SAME branch checked out twice, not a linked worktree on main
+    # while the primary checkout sits on something else) — deleting that ref would break every other
+    # worktree/operation that depends on the default branch existing, regardless of this one being "merged".
+    if branch and branch != default_branch:
         cmds.append(gitcmd("-C", repo, "branch", "-d", branch))
     return {"kind": "remove", "commands": cmds}
 
@@ -279,7 +295,7 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         reap_plan.append(dict(entry, kind="prune"))
         return
 
-    dirty, untracked = status_facts(path)
+    dirty, untracked, ignored = status_facts(path)
 
     if is_main:
         behind, ahead = (None, None)
@@ -314,7 +330,7 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # linked worktree, not prunable
     merged = merged_fact(repo, head, default_ref)
     age_days = age_days_fact(path, now_ts)
-    unknown = dirty is None or untracked is None or merged is None or age_days is None
+    unknown = dirty is None or untracked is None or ignored is None or merged is None or age_days is None
 
     if unknown:
         reason = "inspection needed: a status/log/merge-base check failed for this worktree"
@@ -327,18 +343,24 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         return
 
     is_old = age_days >= args.min_age_days
-    det_safe = merged and not dirty and untracked == 0 and is_old
+    # ignored == 0 is part of the tier-1 bar, NOT of stray_or_stale (code-review Finding 1): ignored
+    # build-artifact clutter (node_modules, __pycache__, a venv) is common and harmless to leave alone,
+    # so it doesn't need to nag a live tier2/3 report every week — but it DOES need to block automatic
+    # deletion, since `git worktree remove` deletes ignored content right along with everything else.
+    # merged+clean(tracked)+zero-untracked+old+has-ignored-content therefore falls through to SILENT
+    # (nothing unsafe happens, nothing noisy is reported) rather than either tier.
+    det_safe = merged and not dirty and untracked == 0 and ignored == 0 and is_old
     stray_or_stale = dirty or untracked > 0 or (not merged and is_old)
 
     if not (det_safe or stray_or_stale):
-        return  # in-progress (unmerged+fresh) or just-merged-and-fresh — silent, re-sweeps next week
+        return  # in-progress (unmerged+fresh), just-merged-and-fresh, or merged+clean+old-but-ignored-content
 
     if det_safe and liveness == "not_live":
         entry = dict(base, tier=1, reason=f"merged, clean, {age_days}d old — safe to reap",
-                     action=remove_action(repo, path, branch))
+                     action=remove_action(repo, path, branch, args.default_branch))
         results["tier1"].append(entry)
         reap_plan.append(dict(entry, kind="remove", owner=owner, merged=merged, dirty=dirty,
-                               untracked=untracked, age_days=age_days, head=head))
+                               untracked=untracked, ignored=ignored, age_days=age_days, head=head))
         return
 
     if det_safe:
@@ -365,53 +387,64 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
 
 
-def do_reap(reap_plan, dry_run):
-    """Returns the count of ACTUAL failures (a prune/remove git command that errored) — a defensive skip
-    (state changed, owner now live) is the safety net working as intended, not a failure, and is not
+def do_reap(reap_plan, dry_run, default_branch):
+    """Returns the count of ACTUAL failures (a prune/remove that genuinely didn't happen) — a defensive
+    skip (state changed, owner now live) is the safety net working as intended, not a failure, and is not
     counted (code-review Finding 5: callers need to distinguish "nothing needed doing" from "a requested
-    reap didn't happen because git said no")."""
-    # Re-poll liveness fresh, once, right before deleting anything (code-review Finding 3): the sweep's
-    # classification snapshot could be minutes old by the time --reap-tier1 actually runs; re-checking
-    # closes the (narrow but real) window where an owner started a live session in between.
+    reap didn't happen")."""
+    # Re-poll liveness fresh, once, right before deleting anything (code-review Finding 3, round 1): the
+    # sweep's classification snapshot could be minutes old by the time --reap-tier1 actually runs.
     fresh_live, fresh_seam_failed = load_live_sessions()
-
-    pruned_repos = set()
     fails = 0
+
+    # Prune items are handled per-REPO, not per-item: `git worktree prune` prunes every stale record for
+    # that repo in one call, and (round-3 code-review Finding 4) a per-record failure inside that single
+    # call can still leave the command's own exit code 0 — so verify each PLANNED prunable path is
+    # actually gone afterward rather than trusting the exit code alone.
+    prune_items_by_repo = {}
     for item in reap_plan:
         if item["kind"] == "prune":
-            if item["repo"] in pruned_repos:
-                continue
-            pruned_repos.add(item["repo"])
-            if dry_run:
-                log(f"DRY-RUN would prune: {item['repo']}")
-                continue
-            rc, _, err = run_git(["worktree", "prune"], cwd=item["repo"])
-            if rc == 0:
-                log(f"pruned {item['repo']}")
-            else:
-                log(f"prune FAILED for {item['repo']}: {err.strip()}")
-                fails += 1
+            prune_items_by_repo.setdefault(item["repo"], []).append(item)
+    for repo, items in prune_items_by_repo.items():
+        if dry_run:
+            for it in items:
+                log(f"DRY-RUN would prune: {it['path']}")
             continue
+        rc, _, err = run_git(["worktree", "prune"], cwd=repo)
+        if rc != 0:
+            log(f"prune command FAILED for {repo}: {err.strip()}")
+            fails += len(items)
+            continue
+        still_listed = {e["path"] for e in (parse_worktrees(repo) or [])}
+        for it in items:
+            if it["path"] in still_listed:
+                log(f"PRUNE FAILED (still listed after prune): {it['path']}")
+                fails += 1
+            else:
+                log(f"pruned {it['path']}")
 
-        # kind == "remove": re-verify EVERYTHING immediately before deleting — liveness first (an owner
-        # who's now live, or whose liveness we can no longer confirm, vetoes the reap same as at
-        # classification time), then the git-state facts (defense against the state changing mid-sweep;
-        # no lock is needed for a single-process weekly sweep, but the recheck is cheap).
+    for item in reap_plan:
+        if item["kind"] != "remove":
+            continue
+        # re-verify EVERYTHING immediately before deleting — liveness first (an owner who's now live, or
+        # whose liveness we can no longer confirm, vetoes the reap same as at classification time), then
+        # the git-state facts (defense against the state changing mid-sweep; no lock is needed for a
+        # single-process weekly sweep, but the recheck is cheap).
         repo, path, branch, owner = item["repo"], item["path"], item["branch"], item.get("owner")
         liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
             continue
-        # HEAD-pin the recheck (round-2 code-review Finding 2) rather than independently recomputing
-        # merged/age against a freshly-read HEAD: merged-ness and age are pure functions of a commit SHA,
-        # so if HEAD is PROVEN unchanged since classification (and the tree is still clean), the
-        # already-verified tier-1 facts are still valid by construction — no need to re-derive them, and
-        # no way for a new commit (however "fresh" or coincidentally already-merged) to slip through. Any
-        # HEAD drift at all — a new commit, however small — means something touched this worktree since
-        # classification, which alone disqualifies it from this reap.
-        dirty, untracked = status_facts(path)
+        dirty, untracked, ignored = status_facts(path)
         head_now = run_git(["rev-parse", "HEAD"], cwd=path)[1].strip()
-        still_safe = (dirty is False and untracked == 0 and head_now and head_now == item.get("head"))
+        head_unchanged = bool(head_now) and head_now == item.get("head")
+        # Re-resolve the default ref and re-check ancestry too (round-3 code-review Finding 3): mergedness
+        # depends on the MUTABLE default ref, not on the worktree's HEAD alone — a HEAD-pin alone catches
+        # "the worktree changed" but not "the default branch was reset/force-updated out from under it"
+        # between classification and this reap. Re-verify both, independently.
+        default_ref_now = resolve_default_ref(repo, default_branch)
+        merged_now = merged_fact(repo, head_now, default_ref_now) if head_now else None
+        still_safe = (dirty is False and untracked == 0 and ignored == 0 and head_unchanged and merged_now is True)
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
             continue
@@ -424,10 +457,15 @@ def do_reap(reap_plan, dry_run):
             fails += 1
             continue
         log(f"REMOVED: path={path} branch={branch} head={item.get('head')}")
-        if branch:
+        # NEVER delete the ref matching the configured default branch name (round-3 code-review Finding
+        # 2): a linked worktree can legitimately be checked out ON the default branch itself, and deleting
+        # that ref would break every other worktree/operation depending on it existing.
+        if branch and branch != default_branch:
             rc2, _, err2 = run_git(["branch", "-d", branch], cwd=repo)
             if rc2 != 0:
                 log(f"branch delete failed (non-fatal): {branch}: {err2.strip()}")
+        elif branch:
+            log(f"NOT deleting branch ref '{branch}' — matches the configured default branch name")
     return fails
 
 
@@ -500,7 +538,7 @@ def main(argv=None):
         render_text(results)
 
     if args.reap_tier1:
-        fails = do_reap(reap_plan, args.dry_run)
+        fails = do_reap(reap_plan, args.dry_run, args.default_branch)
         if fails:
             log(f"{fails} reap action(s) FAILED — exiting non-zero (see FAILED lines above)")
             sys.exit(1)
