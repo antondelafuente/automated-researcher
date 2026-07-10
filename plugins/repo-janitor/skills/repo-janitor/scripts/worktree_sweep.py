@@ -392,15 +392,14 @@ def do_reap(reap_plan, dry_run, default_branch):
     skip (state changed, owner now live) is the safety net working as intended, not a failure, and is not
     counted (code-review Finding 5: callers need to distinguish "nothing needed doing" from "a requested
     reap didn't happen")."""
-    # Re-poll liveness fresh, once, right before deleting anything (code-review Finding 3, round 1): the
-    # sweep's classification snapshot could be minutes old by the time --reap-tier1 actually runs.
-    fresh_live, fresh_seam_failed = load_live_sessions()
     fails = 0
 
     # Prune items are handled per-REPO, not per-item: `git worktree prune` prunes every stale record for
     # that repo in one call, and (round-3 code-review Finding 4) a per-record failure inside that single
     # call can still leave the command's own exit code 0 — so verify each PLANNED prunable path is
-    # actually gone afterward rather than trusting the exit code alone.
+    # actually gone afterward rather than trusting the exit code alone. A FAILED post-prune listing
+    # (merge-gate Finding 4) is NOT the same as "nothing left" — `parse_worktrees` returning None must
+    # count every planned item for that repo as unverified/failed, never silently as "successfully pruned".
     prune_items_by_repo = {}
     for item in reap_plan:
         if item["kind"] == "prune":
@@ -415,7 +414,12 @@ def do_reap(reap_plan, dry_run, default_branch):
             log(f"prune command FAILED for {repo}: {err.strip()}")
             fails += len(items)
             continue
-        still_listed = {e["path"] for e in (parse_worktrees(repo) or [])}
+        post_entries = parse_worktrees(repo)
+        if post_entries is None:
+            log(f"prune ran but could not re-list {repo} to verify — treating all {len(items)} planned prune(s) as unverified")
+            fails += len(items)
+            continue
+        still_listed = {e["path"] for e in post_entries}
         for it in items:
             if it["path"] in still_listed:
                 log(f"PRUNE FAILED (still listed after prune): {it['path']}")
@@ -429,8 +433,12 @@ def do_reap(reap_plan, dry_run, default_branch):
         # re-verify EVERYTHING immediately before deleting — liveness first (an owner who's now live, or
         # whose liveness we can no longer confirm, vetoes the reap same as at classification time), then
         # the git-state facts (defense against the state changing mid-sweep; no lock is needed for a
-        # single-process weekly sweep, but the recheck is cheap).
+        # single-process weekly sweep, but the recheck is cheap). Liveness is reloaded FRESH for EVERY
+        # item, not once for the whole batch (merge-gate Finding 2): an owner could go live in the gap
+        # between this item's removal and an earlier item's in the same run, and a once-per-batch poll
+        # would never see it.
         repo, path, branch, owner = item["repo"], item["path"], item["branch"], item.get("owner")
+        fresh_live, fresh_seam_failed = load_live_sessions()
         liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
@@ -517,12 +525,27 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if not args.repo:
         die("at least one --repo is required")
+    # An empty/whitespace-only --repo would otherwise silently normalize to the CURRENT WORKING DIRECTORY
+    # via os.path.abspath('') (merge-gate code-review Finding 3) — a blank/unset shell variable
+    # interpolated into `--repo "$VAR"` must be a hard failure, never a silent "operate on cwd instead",
+    # especially with --reap-tier1 in play.
+    if any(not r.strip() for r in args.repo):
+        die("--repo value(s) must not be empty/whitespace-only")
     if args.dry_run and not args.reap_tier1:
         die("--dry-run only makes sense together with --reap-tier1")
     if args.owner_depth < 1:
         die("--owner-depth must be >= 1")
     if args.min_age_days < 0:
         die("--min-age-days must be >= 0")
+    # Normalize --default-branch to a short local-branch name (merge-gate code-review Finding 1): a caller
+    # passing the fully-qualified `refs/heads/main` would otherwise compare unequal against the short
+    # `branch_name()` values the classifier/reaper use, silently defeating the never-delete-the-default-
+    # branch-ref guard (remove_action/do_reap compare by simple string equality).
+    args.default_branch = args.default_branch.strip()
+    if args.default_branch.startswith("refs/heads/"):
+        args.default_branch = args.default_branch[len("refs/heads/"):]
+    if not args.default_branch:
+        die("--default-branch must not be empty")
 
     live, seam_failed = load_live_sessions()
     now_ts = int(time.time())

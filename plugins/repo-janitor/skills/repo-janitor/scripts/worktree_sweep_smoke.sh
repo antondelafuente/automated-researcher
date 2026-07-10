@@ -13,7 +13,12 @@
 #   - silent cases: unmerged-but-fresh, merged-clean-but-fresh — appear in neither tier
 #   - --reap-tier1 --dry-run deletes nothing; --reap-tier1 deletes ONLY tier-1 entries
 #   - --json shape, and CLI argument validation (missing --repo, --dry-run without --reap-tier1, bad depth)
-set -uo pipefail
+# -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
+# `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
+# vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
+# invocation below is already wrapped in `if`/`&&`/`||` (exempt from errexit) except one (the real
+# --reap-tier1 run with a locked worktree), which explicitly captures its exit code via `&&/||` too.
+set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SWEEP="$HERE/worktree_sweep.py"
@@ -29,7 +34,11 @@ no(){ echo "FAIL $1"; fails=1; }
 OLD_DATE=$(date -u -d '-40 days' +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "2026-01-01T00:00:00")
 FRESH_DATE=$(date -u -d '-1 days' +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "2026-07-09T00:00:00")
 
-g(){ git -C "$1" "${@:2}" >/dev/null 2>&1; }
+# Fixture-setup helper — FAILS FAST (merge-gate code-review Finding 5): every `g` call below is fixture
+# construction that must succeed, never a deliberately-expected-failure path (those are tested via direct
+# python3/git invocations with their exit code checked explicitly). A silently swallowed setup failure
+# would let a negative assertion ("X is not tier1") pass vacuously because X was never actually created.
+g(){ git -C "$1" "${@:2}" >/dev/null 2>&1 || { echo "FIXTURE SETUP FAILED: git -C $1 ${*:2}" >&2; exit 1; }; }
 
 # has_path_in <tier-python-expr-over-d> <path>: reads the JSON report on STDIN (never embedded as a
 # shell/python string literal — a path or reason containing a quote would otherwise corrupt the check).
@@ -250,8 +259,10 @@ COUNT_AFTER=$(git -C "$REPO" worktree list | wc -l)
 #    wt-merged-locked is ALSO tier1 (merged+clean+old) but LOCKED — its removal must FAIL, must be
 #    counted, and must NOT block the other legitimate removals in the same invocation (code-review
 #    Finding 5).
-python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 >/dev/null 2>&1
-REAP_RC=$?
+# This ONE invocation is EXPECTED to exit non-zero (the locked worktree's removal genuinely fails) — under
+# `set -e`, capturing that via a bare `cmd; rc=$?` would abort the script before the assignment ever runs;
+# `&&/||` is the pattern that both survives errexit and captures the deliberately-expected failure.
+python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 >/dev/null 2>&1 && REAP_RC=0 || REAP_RC=$?
 # Assert on the list BEFORE any independent prune (code-review round-2 Finding 4): pruning here first
 # would clean up a prunable record the SCRIPT's own do_reap failed (or forgot) to prune, silently masking
 # a broken prune action behind this smoke's own cleanup.
@@ -269,6 +280,17 @@ if grep -q "wt-merged-locked" <<<"$REMAINING"; then ok "reap: LOCKED tier-1 work
 python3 "$SWEEP" >/dev/null 2>&1 && no "missing --repo should fail" || ok "missing --repo fails closed"
 python3 "$SWEEP" --repo "$REPO" --dry-run >/dev/null 2>&1 && no "--dry-run without --reap-tier1 should fail" || ok "--dry-run without --reap-tier1 fails closed"
 python3 "$SWEEP" --repo "$REPO" --owner-depth 0 >/dev/null 2>&1 && no "--owner-depth 0 should fail" || ok "--owner-depth 0 fails closed"
+# merge-gate Finding 3: an empty/blank --repo must never silently normalize to cwd
+python3 "$SWEEP" --repo "" >/dev/null 2>&1 && no "empty --repo should fail" || ok "empty --repo fails closed"
+python3 "$SWEEP" --repo "   " >/dev/null 2>&1 && no "whitespace-only --repo should fail" || ok "whitespace-only --repo fails closed"
+python3 "$SWEEP" --repo "$REPO" --default-branch "" >/dev/null 2>&1 && no "empty --default-branch should fail" || ok "empty --default-branch fails closed"
+# merge-gate Finding 1: a fully-qualified refs/heads/<name> --default-branch must normalize to the short
+# name, so the never-delete-the-default-branch guard still matches (not silently bypassed by a comparison
+# of "main" != "refs/heads/main"). $DB_REPO's "main" was freed up again when wt-on-main was reaped above.
+g "$DB_REPO" worktree add -q "$TMP/wt-on-main-2" main
+python3 "$SWEEP" --repo "$DB_REPO" --default-branch "refs/heads/main" --reap-tier1 >/dev/null 2>&1
+if [ -d "$TMP/wt-on-main-2" ]; then no "fully-qualified --default-branch: worktree not reaped as expected"; else ok "fully-qualified --default-branch: worktree still reaped correctly"; fi
+if git -C "$DB_REPO" rev-parse --verify -q refs/heads/main >/dev/null; then ok "fully-qualified --default-branch: default branch ref still preserved (normalization closed the bypass)"; else no "fully-qualified --default-branch: default branch ref was WRONGLY deleted"; fi
 
 # 7. --json is valid JSON with the documented shape
 echo "$J1" | python3 -c "
