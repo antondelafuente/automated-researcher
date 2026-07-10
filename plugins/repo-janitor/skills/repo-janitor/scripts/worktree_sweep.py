@@ -178,11 +178,12 @@ def behind_ahead_facts(repo, default_ref):
 def owner_of(path, root, depth):
     if not root:
         return None
-    # abspath (not just normpath — code-review Finding 2): git worktree paths are always absolute, so a
-    # RELATIVE --worktree-root would never prefix-match them, silently disabling ownership (and the
-    # live-owner tier-1 veto that depends on it) for every worktree.
-    root = os.path.abspath(os.path.expanduser(root))
-    p = os.path.abspath(path)
+    # realpath (not just abspath — round-2 code-review Finding 1, on top of round-1 Finding 2): a
+    # RELATIVE root would never prefix-match git's absolute worktree paths (disabling ownership and the
+    # live-owner tier-1 veto for every worktree), and a SYMLINKED root would still fail a lexical
+    # comparison against the resolved paths git reports — realpath resolves both symlinks and relativity.
+    root = os.path.realpath(os.path.expanduser(root))
+    p = os.path.realpath(path)
     try:
         common = os.path.commonpath([root, p])
     except ValueError:
@@ -226,17 +227,6 @@ def prune_action(repo):
 def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
     repo = os.path.abspath(os.path.expanduser(repo))
 
-    # Fetch BEFORE resolving the default ref (code-review Finding 6): on a repo that has never fetched,
-    # `origin/<default-branch>` doesn't exist yet until the fetch creates it — resolving first would lock
-    # in the local-branch fallback and silently defeat --fetch's entire point on a fresh checkout.
-    fetch_ok = None
-    if args.fetch:
-        rc, _, _ = run_git(["fetch", "origin", "--quiet"], cwd=repo, timeout=90)
-        fetch_ok = (rc == 0)
-        if not fetch_ok:
-            log(f"--fetch requested but failed for {repo} — origin drift for its main worktree is UNKNOWN this sweep")
-    default_ref = resolve_default_ref(repo, args.default_branch)
-
     entries = parse_worktrees(repo)
     if entries is None:
         results["tier3"].append({
@@ -246,10 +236,30 @@ def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
         })
         return
 
+    # Canonicalize every subsequent git invocation to the TRUE primary checkout, never the raw --repo
+    # argument (round-2 code-review Finding 3): `git worktree list`'s first entry is ALWAYS the repo's own
+    # primary working tree (parse_worktrees marks it is_main). If --repo were ever pointed at a LINKED
+    # worktree instead, using the raw argument as the cwd for every `git -C` call risks that cwd being
+    # invalidated mid-reap-loop if that same linked worktree were itself a reap target. The primary
+    # checkout is never a reap target (main/shared worktrees are never tier 1), so anchoring here is
+    # stable for the whole sweep.
+    main_repo = entries[0]["path"]
+
+    # Fetch BEFORE resolving the default ref (code-review Finding 6): on a repo that has never fetched,
+    # `origin/<default-branch>` doesn't exist yet until the fetch creates it — resolving first would lock
+    # in the local-branch fallback and silently defeat --fetch's entire point on a fresh checkout.
+    fetch_ok = None
+    if args.fetch:
+        rc, _, _ = run_git(["fetch", "origin", "--quiet"], cwd=main_repo, timeout=90)
+        fetch_ok = (rc == 0)
+        if not fetch_ok:
+            log(f"--fetch requested but failed for {main_repo} — origin drift for its main worktree is UNKNOWN this sweep")
+    default_ref = resolve_default_ref(main_repo, args.default_branch)
+
     for e in entries:
         if e.get("bare"):
             continue  # a bare mirror has no working tree to sweep
-        process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_ok, results, reap_plan)
+        process_entry(main_repo, e, default_ref, args, live, seam_failed, now_ts, fetch_ok, results, reap_plan)
 
 
 def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_ok, results, reap_plan):
@@ -355,7 +365,7 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
 
 
-def do_reap(reap_plan, dry_run, default_branch):
+def do_reap(reap_plan, dry_run):
     """Returns the count of ACTUAL failures (a prune/remove git command that errored) — a defensive skip
     (state changed, owner now live) is the safety net working as intended, not a failure, and is not
     counted (code-review Finding 5: callers need to distinguish "nothing needed doing" from "a requested
@@ -392,11 +402,16 @@ def do_reap(reap_plan, dry_run, default_branch):
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
             continue
+        # HEAD-pin the recheck (round-2 code-review Finding 2) rather than independently recomputing
+        # merged/age against a freshly-read HEAD: merged-ness and age are pure functions of a commit SHA,
+        # so if HEAD is PROVEN unchanged since classification (and the tree is still clean), the
+        # already-verified tier-1 facts are still valid by construction — no need to re-derive them, and
+        # no way for a new commit (however "fresh" or coincidentally already-merged) to slip through. Any
+        # HEAD drift at all — a new commit, however small — means something touched this worktree since
+        # classification, which alone disqualifies it from this reap.
         dirty, untracked = status_facts(path)
         head_now = run_git(["rev-parse", "HEAD"], cwd=path)[1].strip()
-        default_ref = resolve_default_ref(repo, default_branch)
-        merged_now = merged_fact(repo, head_now, default_ref) if head_now else None
-        still_safe = (dirty is False and untracked == 0 and merged_now is True)
+        still_safe = (dirty is False and untracked == 0 and head_now and head_now == item.get("head"))
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
             continue
@@ -485,7 +500,7 @@ def main(argv=None):
         render_text(results)
 
     if args.reap_tier1:
-        fails = do_reap(reap_plan, args.dry_run, args.default_branch)
+        fails = do_reap(reap_plan, args.dry_run)
         if fails:
             log(f"{fails} reap action(s) FAILED — exiting non-zero (see FAILED lines above)")
             sys.exit(1)

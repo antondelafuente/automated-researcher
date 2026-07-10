@@ -200,7 +200,9 @@ COUNT_AFTER=$(git -C "$REPO" worktree list | wc -l)
 #    Finding 5).
 python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 >/dev/null 2>&1
 REAP_RC=$?
-git -C "$REPO" worktree prune >/dev/null 2>&1 || true
+# Assert on the list BEFORE any independent prune (code-review round-2 Finding 4): pruning here first
+# would clean up a prunable record the SCRIPT's own do_reap failed (or forgot) to prune, silently masking
+# a broken prune action behind this smoke's own cleanup.
 REMAINING=$(git -C "$REPO" worktree list)
 if ! grep -q "$TMP/wt-merged$" <<<"$REMAINING"; then ok "reap: tier-1 merged worktree removed"; else no "reap: tier-1 merged worktree still present"; fi
 if ! grep -q "wt-prunable" <<<"$REMAINING"; then ok "reap: prunable record pruned"; else no "reap: prunable record still listed"; fi
