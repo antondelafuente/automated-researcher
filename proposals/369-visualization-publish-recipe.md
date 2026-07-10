@@ -91,9 +91,8 @@ that hasn't configured it simply gets a BLOCK on `--publish` (same as today, jus
 
 Additive schema change (new optional recipe key), no MAJOR bump. No migration needed for instances that
 haven't wired `visualize-results --publish` yet (none have — the issue states instance #1's rollout is
-paused on this landing, so a plain revert is safe **today**, before any instance has adopted the new key).
-An instance that wants editorial publish now configures `[recipes.visualization_publish]` pointing at its
-own site's recipe doc, distinct from `[recipes.viewer]`.
+paused on this landing). An instance that wants editorial publish now configures
+`[recipes.visualization_publish]` pointing at its own site's recipe doc, distinct from `[recipes.viewer]`.
 
 **Rollback is NOT a plain code revert, ever — a bare revert of this diff is mechanically unsafe on its own**
 (design-review finding, strengthened after a second pass: instance-profile hygiene at revert time is not a
