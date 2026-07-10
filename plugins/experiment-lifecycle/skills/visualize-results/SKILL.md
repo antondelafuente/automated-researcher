@@ -22,11 +22,14 @@ the exact arms `DESIGN.md`'s Presentation spec named, as part of closing out a l
 whenever the researcher asks, as many times as they ask, and defaults to **local iteration** — nothing ships
 anywhere until they explicitly say so.
 
-> **The one seam this skill reads:** the instance's **visualization-preview recipe** (`[recipes.visualization_preview]`
-> in the instance's aar-profile) plus, only on explicit publish, its existing **viewer** recipe
-> (`[recipes.viewer]` — the same pointer `run-experiment`'s publish leg already reads). See
-> `references/SCHEMA.md`. This skill never hardcodes a viewer repo, worktree, or any instance networking/tunnel
-> detail — those live only in the instance's own profile + the recipe docs it points at.
+> **The two seams this skill reads:** the instance's **visualization-preview recipe**
+> (`[recipes.visualization_preview]` in the instance's aar-profile), read always, plus, only on explicit
+> publish, its own **visualization-publish recipe** (`[recipes.visualization_publish]`) — a typed pointer
+> distinct from `[recipes.viewer]`, which `run-experiment`'s close-time publish leg reads instead, for the
+> operational dashboard (a different destination on instances where the two diverge). See
+> `references/SCHEMA.md`. This skill never reads or requires `[recipes.viewer]`, and never hardcodes a
+> publish-destination repo, worktree, or any instance networking/tunnel detail — those live only in the
+> instance's own profile + the recipe docs it points at.
 
 ## Disposition — live-resolving, not a locked-brief executor
 
@@ -61,7 +64,7 @@ instance that hasn't wired visualization yet (out of scope for this skill — th
 instance's own config + recipe-doc work).
 
 The resolved fields point at a recipe **document** (repo + path + pinned commit, or a pinned URI) that is
-entirely instance/viewer-owned narrative. Read it; it names, at minimum:
+entirely instance-owned narrative. Read it; it names, at minimum:
 - the preview **claim lifecycle** — status / use / release commands, and how to tell if another agent
   already owns the preview;
 - the **stable local worktree** convention for this preview and the **stable local URL** it serves at;
@@ -88,12 +91,13 @@ Follow the recipe doc's own claim/build/check mechanics (this skill does not rei
 Only when the researcher explicitly says **"publish"** or **"ship"** this page (never inferred from "looks
 good" or silence):
 1. Re-run the resolver with `--publish`: `scripts/resolve_visualization_recipe.sh --publish`. This
-   *additionally* resolves `[recipes.viewer]` — the **same** publish-destination pointer `run-experiment`'s
-   close-time leg already reads (the viewer repo, its gated landing path, the assemble/render/bundle/gallery
-   commands). If that recipe isn't configured, this BLOCKs even though preview-mode already worked — report
-   it; do not fall back to guessing a landing path.
-2. Follow the viewer recipe's gated landing path to land the change (reusing the instance's existing
-   engineer-identity seams — no new credential surface this skill invents).
+   *additionally* resolves `[recipes.visualization_publish]` — this skill's **own** editorial
+   publish-destination pointer (the editorial site's repo, its gated landing path, the
+   assemble/render/bundle/gallery commands), distinct from `[recipes.viewer]`. If that recipe isn't
+   configured, this BLOCKs even though preview-mode already worked — report it; do not fall back to
+   guessing a landing path, and never fall back to `[recipes.viewer]` either.
+2. Follow the visualization-publish recipe's gated landing path to land the change (reusing the instance's
+   existing engineer-identity seams — no new credential surface this skill invents).
 3. **Release the preview claim** once landed, so the next agent isn't blocked on a stale claim.
 
 If another agent's claim is still active when publish is requested, resolve that the same way Step 3 does —
@@ -101,9 +105,9 @@ report it, don't clobber it — before proceeding.
 
 ## Reference
 
-- **`references/SCHEMA.md`** — the two recipe pointers this skill reads (`visualization_preview`, reused
-  `viewer`), their required fields, and how the explicit-publish boundary is enforced mechanically at the
-  resolver, not just in prose.
+- **`references/SCHEMA.md`** — the two recipe pointers this skill reads (`visualization_preview`,
+  `visualization_publish`), their required fields, and how the explicit-publish boundary is enforced
+  mechanically at the resolver, not just in prose.
 - **`scripts/resolve_visualization_recipe.sh`** — the recipe resolver (preview mode default; `--publish` for
   the explicit publish leg).
 - **`run-experiment`**'s publish leg — the sibling, automatic, close-time leg this skill is deliberately

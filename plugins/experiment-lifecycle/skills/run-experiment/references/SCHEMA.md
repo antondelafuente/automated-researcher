@@ -55,9 +55,10 @@ The discovery lookup above is **for the designer/init/validate side only**. The 
   are the only other live readers (they write/check the file).
 - **`visualize-results` (#365) also resolves the live profile — a second, narrowly-scoped live reader.** It
   reads `[recipes.visualization_preview]` (and, only on an explicit publish instruction,
-  `[recipes.viewer]`) directly, for the same reason `design-experiment` does: it is live, repeatable,
-  researcher-steered work with no locked brief to snapshot into — not the reproducibility-from-a-frozen-record
-  contract `run-experiment` alone must uphold. It writes nothing to the profile.
+  `[recipes.visualization_publish]` — #369; it never reads `[recipes.viewer]`, in either mode) directly, for
+  the same reason `design-experiment` does: it is live, repeatable, researcher-steered work with no locked
+  brief to snapshot into — not the reproducibility-from-a-frozen-record contract `run-experiment` alone must
+  uphold. It writes nothing to the profile.
 - **`run-experiment` (the zero-context executor) reads ONLY the frozen `START.md` snapshot.** It **never**
   re-reads the mutable live profile for any GitHub-lifecycle config — its world is the brief. The **one** narrow
   live step is minting a credential: it reads the env-var *name* the snapshot carries (`token_cmd_env`) and
@@ -111,7 +112,8 @@ git_ref  = "<git-sha>"                    # iff kind=repo — pins the exact com
 kind     = "uri"
 uri      = "r2://<bucket>/recipes/artifact-store.md"  # scheme MUST be in the supported set (below)
 sha256   = "<hex digest>"                 # iff kind=uri — pins the exact bytes
-# [recipes.ledger] / .teardown / .cost_policy / .viewer follow the same typed shape.
+# [recipes.ledger] / .teardown / .cost_policy / .viewer / .visualization_preview / .visualization_publish
+# follow the same typed shape.
 ```
 
 ### Normative field table
@@ -133,7 +135,7 @@ value, or a kind/field mismatch is **fail closed** (validate rejects; discovery 
 | `[github.identity.codex].git_author_env` | env-var name (string) | R | — | Same, for the codex family. |
 | `[github.protection].require_pr_review` | bool | O | `false` | Tightening-only expectation the close-gate pre-checks; may only require MORE, never weaken a product invariant. |
 | `[github.protection].enforce_admins` | bool | O | `false` | Tightening-only expectation (no standing admin bypass). |
-| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`, `viewer`, `visualization_preview`). |
+| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`, `viewer`, `visualization_preview`, `visualization_publish`). |
 | `[recipes.<name>].kind` | enum | R *(within the table)* | — | **Closed set: `"repo"` \| `"uri"`.** Selects which other keys are required (below). |
 | `[recipes.<name>].repo` | `owner/repo` string | R **iff** `kind="repo"` | — | The OWNING repo (never assumed = `research_repo`). |
 | `[recipes.<name>].path` | string | R **iff** `kind="repo"` | — | Repo-relative path. |
@@ -174,10 +176,19 @@ Field semantics, normative (the parts not obvious from the table):
   to enter local iteration (the preview claim lifecycle — status/use/release — the stable per-page local
   worktree + URL, and the shared page-style pattern). Distinct from `[recipes.viewer]` above: different key,
   different trigger (an explicit, repeatable researcher request vs. automatic at experiment close), different
-  lifecycle (live iteration vs. one-shot). The *publish* half of `visualize-results` reuses `[recipes.viewer]`
-  itself rather than duplicating a second landing-path pointer — see `visualize-results/references/SCHEMA.md`.
-  Absent ⇒ `visualize-results` fails closed rather than improvising. Same typed/pinned shape as every recipe;
-  resolved LIVE by `visualize-results` (see the role-split note above), never snapshotted into a `START.md`.
+  lifecycle (live iteration vs. one-shot). Absent ⇒ `visualize-results` fails closed rather than improvising.
+  Same typed/pinned shape as every recipe; resolved LIVE by `visualize-results` (see the role-split note
+  above), never snapshotted into a `START.md`.
+
+- **`[recipes.visualization_publish]`** — OPTIONAL (#369); `visualize-results`'s **own** editorial
+  publish-destination recipe, read only on an explicit publish/ship instruction: the editorial site's repo,
+  its gated landing path, and the assemble/render/bundle/gallery commands (see
+  `visualize-results/references/SCHEMA.md`). Deliberately a **separate, independently-typed key from
+  `[recipes.viewer]`** above — a real instance found the two destinations genuinely distinct (the operational
+  dashboard `[recipes.viewer]` points at vs. the editorial site this key points at), so
+  `visualize-results --publish` resolves only this key and never `[recipes.viewer]`, in either mode. Absent ⇒
+  `visualize-results --publish` fails closed. Same typed/pinned shape as every recipe; resolved LIVE by
+  `visualize-results`, never snapshotted into a `START.md`.
 
 ### Product invariant — cross-family review is NOT a profile field (#153 decision 3a)
 

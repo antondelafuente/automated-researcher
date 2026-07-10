@@ -11,7 +11,8 @@
 `visualize-results` reads **two independently-configured** typed pointers from the instance's aar-profile,
 both using the aar-profile schema's existing generic `[recipes.<name>]` shape (`kind = "repo" | "uri"` + the
 kind-appropriate fields — see the aar-profile `SCHEMA.md` normative field table). Neither is a new pointer
-*grammar*; only the *names* below are new to this skill.
+*grammar*; only the *names* below are new to this skill. **Neither key is `[recipes.viewer]`** — this skill
+never reads or requires that pointer at all, in either mode (#369; see "Why not `[recipes.viewer]`" below).
 
 ### `[recipes.visualization_preview]` — OPTIONAL, new (#365)
 
@@ -24,25 +25,41 @@ anything. Its pointed-to document is entirely instance-owned narrative; it must 
 Absent, or present but missing a required field for its declared `kind`, is a hard **BLOCK** — this skill
 never improvises a preview mechanism.
 
-### `[recipes.viewer]` — OPTIONAL, already exists (see `run-experiment`'s publish leg, #347)
+### `[recipes.visualization_publish]` — OPTIONAL, new (#369)
 
-The **publish destination** recipe — reused as-is, same shape, same semantics `run-experiment`'s close-time
-publish leg already reads: the viewer repo, its gated landing path, and the assemble/render/bundle/gallery
-commands. `visualize-results` does **not** define a second publish-destination pointer; both the automatic
-close-time leg and this skill's explicit publish leg land in the same place, so they read the same config
-fact. This skill only resolves `[recipes.viewer]` when the researcher gives an **explicit** publish/ship
-instruction — never as part of ordinary preview iteration.
+The **editorial publish destination** recipe — read only on explicit `--publish`: the editorial site's repo,
+its gated landing path, and the assemble/render/bundle/gallery commands for the researcher-driven page this
+skill builds. This is `visualize-results`'s **own** publish-destination pointer, independent of
+`[recipes.viewer]` — the instance's operational-dashboard publish recipe that `run-experiment`'s close-time
+leg reads (#347). The two destinations coincide on some instances and diverge on others (the mismatch #369
+was filed to fix); this skill resolves only its own key, never the other one, so the two lifecycles can
+never cross-resolve regardless of how a given instance happens to be wired.
+
+Absent, or present but missing a required field for its declared `kind`, is a hard **BLOCK** on `--publish` —
+this skill never falls back to guessing a landing path, and never falls back to `[recipes.viewer]`.
+
+## Why not `[recipes.viewer]`
+
+An earlier version of this skill (#365/#366) reused `[recipes.viewer]` for its explicit-publish leg, on the
+assumption that the automatic close-time experiment viewer and this skill's researcher-driven editorial
+visualization always land in the same place. A real instance disproved that: the two are genuinely distinct
+destinations there. `[recipes.visualization_publish]` exists specifically so this skill never depends on
+that assumption — it is a separate, independently-typed profile entry, not a filtered view over
+`[recipes.viewer]`'s document.
 
 ## The explicit-publish boundary is mechanical, not just prose
 
 `scripts/resolve_visualization_recipe.sh` (default call, no flags) resolves and validates ONLY
-`[recipes.visualization_preview]` — it does not parse, require, or ever look at `[recipes.viewer]`. Only an
-explicit `--publish` flag makes it additionally resolve `[recipes.viewer]`. Because the two are genuinely
-separate profile entries (not a filtered view over one document), the gated-landing-path fields are
-**structurally unreachable** without asking for them by name — the fake-HOME smoke
-(`scripts/visualize_results_smoke.sh`) exercises exactly this boundary, plus the fail-closed paths (no
-profile, no recipe table, an incomplete table) and a static check that this skill's own shipped files carry
-no hardcoded instance value.
+`[recipes.visualization_preview]` — it does not parse, require, or ever look at `[recipes.visualization_publish]`
+or `[recipes.viewer]`. Only an explicit `--publish` flag makes it additionally resolve
+`[recipes.visualization_publish]`; it still never reads `[recipes.viewer]`, in either mode. Because the
+preview and publish keys are genuinely separate profile entries (not a filtered view over one document), the
+gated-landing-path fields are **structurally unreachable** without asking for them by name — the fake-HOME
+smoke (`scripts/visualize_results_smoke.sh`) exercises exactly this boundary, plus the fail-closed paths (no
+profile, no recipe table, an incomplete table), a distinct-destinations regression case proving
+`visualization_publish` and `viewer` never cross-resolve even when both are configured and point at
+different repos/paths, and a static check that this skill's own shipped files carry no hardcoded instance
+value.
 
 ## Who resolves this live (the role-split note)
 
@@ -56,5 +73,7 @@ from a frozen record.
 
 - The aar-profile schema itself (`schema_version`, `[github]`, identity seams, the generic
   `[recipes.<name>]` pointer shape) — owned by `design-experiment`/`run-experiment`'s shared `SCHEMA.md`.
+- `[recipes.viewer]` itself — owned by `run-experiment`'s publish leg (#347); this skill only names it here
+  to explain why it is deliberately NOT the pointer this skill reads.
 - The content of either recipe document (claim commands, page-style pattern, gated landing-path mechanics) —
-  entirely instance/viewer-owned, out of scope for this product.
+  entirely instance-owned, out of scope for this product.

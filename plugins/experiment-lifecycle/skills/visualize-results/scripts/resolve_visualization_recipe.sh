@@ -11,11 +11,14 @@
 #
 # Default (preview) mode resolves ONLY [recipes.visualization_preview] — the local iteration recipe
 # (preview claim commands, stable local worktree/URL, page-style pattern). It never reads
-# [recipes.viewer] at all.
+# [recipes.visualization_publish] or [recipes.viewer] at all.
 #
-# --publish ALSO resolves [recipes.viewer] — the existing publish-destination recipe already read by
-# run-experiment's close-time publish leg (#347): the viewer repo, its gated landing path, and the
-# assemble/render/bundle/gallery commands. This is the mechanical enforcement of the explicit-publish
+# --publish ALSO resolves [recipes.visualization_publish] — this skill's OWN editorial publish-destination
+# recipe (#369): the editorial site's repo, its gated landing path, and the assemble/render/bundle/gallery
+# commands. This is deliberately a SEPARATE, independently-typed profile entry from [recipes.viewer] —
+# run-experiment's close-time publish leg (#347) reads [recipes.viewer] for the operational dashboard, a
+# different destination on instances where the two diverge; this resolver never reads or requires
+# [recipes.viewer] at all, in either mode. This is the mechanical enforcement of the explicit-publish
 # boundary: the publish fields are a SEPARATE, independently-typed profile entry, resolved only when
 # explicitly asked for — not a filtered view over one document.
 #
@@ -135,13 +138,13 @@ def resolve_recipe(name, required):
     return out
 
 # Resolve + validate everything BEFORE printing anything, so a failed --publish request (e.g. an
-# incomplete [recipes.viewer]) never leaks partial preview fields to stdout on a non-zero exit.
+# incomplete [recipes.visualization_publish]) never leaks partial preview fields to stdout on a non-zero exit.
 preview = resolve_recipe("visualization_preview", required=True)
-viewer = resolve_recipe("viewer", required=True) if os.environ.get("PUBLISH") == "1" else None
+publish = resolve_recipe("visualization_publish", required=True) if os.environ.get("PUBLISH") == "1" else None
 
 for k, v in preview.items():
     print(f"VISUALIZATION_PREVIEW_{k}={v}")
-if viewer is not None:
-    for k, v in viewer.items():
-        print(f"VIEWER_{k}={v}")
+if publish is not None:
+    for k, v in publish.items():
+        print(f"VISUALIZATION_PUBLISH_{k}={v}")
 PY
