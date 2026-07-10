@@ -546,6 +546,16 @@ def main(argv=None):
         args.default_branch = args.default_branch[len("refs/heads/"):]
     if not args.default_branch:
         die("--default-branch must not be empty")
+    # Reject anything still containing '/' (merge-gate round-2 Finding 1): a remote shorthand
+    # ("origin/main"), a fully-qualified remote ref ("refs/remotes/origin/main"), or a nested branch name
+    # all resolve as valid git revisions for the merge-base comparison, but none of them is the LOCAL short
+    # branch name `branch_name()` produces — comparing against one of these would silently defeat the
+    # never-delete-the-default-branch guard (the string "main" would never equal "origin/main"). The
+    # default branch is always a plain top-level name in practice; anything with a '/' is rejected outright
+    # rather than guessed at.
+    if "/" in args.default_branch:
+        die("--default-branch must be a short local branch name (no '/') — "
+            "not a remote shorthand, qualified ref, or nested branch name")
 
     live, seam_failed = load_live_sessions()
     now_ts = int(time.time())

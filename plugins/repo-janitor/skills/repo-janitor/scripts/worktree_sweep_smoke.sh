@@ -77,7 +77,7 @@ print('\n'.join(paths))
 
 # --- build the fixture: one repo + origin remote + several worktrees in every state we classify ---
 REPO="$TMP/repo"; ORIGIN="$TMP/origin.git"
-git init -q --bare "$ORIGIN"
+git init -q --bare -b main "$ORIGIN"
 git init -q -b main "$REPO"
 g "$REPO" config user.email t@example.com
 g "$REPO" config user.name "smoke"
@@ -200,7 +200,7 @@ if echo "$J_FETCH" | reason_has "d['tier3']" "$REPO" "behind"; then ok "--fetch:
 #     that tries to hide untracked files must not fool the safety-critical status check. Isolated fixture
 #     repo so a repo-wide `status.showUntrackedFiles=no` doesn't disturb the main fixture's assertions.
 IGN_REPO="$TMP/ign-repo"; IGN_ORIGIN="$TMP/ign-origin.git"
-git init -q --bare "$IGN_ORIGIN"
+git init -q --bare -b main "$IGN_ORIGIN"
 git init -q -b main "$IGN_REPO"
 g "$IGN_REPO" config user.email t@example.com; g "$IGN_REPO" config user.name smoke
 echo hello > "$IGN_REPO/f.txt"; g "$IGN_REPO" add f.txt; g "$IGN_REPO" commit -q -m init
@@ -235,7 +235,7 @@ if echo "$J_IGN" | has_path_in "d['tier1']" "$TMP/wt-hidden-untracked"; then no 
 # 3c. round-3 code-review Finding 2: a linked worktree checked out ON the default branch name itself must
 #     never have that branch ref deleted, even though it trivially reads as "merged".
 DB_REPO="$TMP/db-repo"; DB_ORIGIN="$TMP/db-origin.git"
-git init -q --bare "$DB_ORIGIN"
+git init -q --bare -b main "$DB_ORIGIN"
 git init -q -b main "$DB_REPO"
 g "$DB_REPO" config user.email t@example.com; g "$DB_REPO" config user.name smoke
 echo hello > "$DB_REPO/f.txt"; g "$DB_REPO" add f.txt
@@ -284,6 +284,10 @@ python3 "$SWEEP" --repo "$REPO" --owner-depth 0 >/dev/null 2>&1 && no "--owner-d
 python3 "$SWEEP" --repo "" >/dev/null 2>&1 && no "empty --repo should fail" || ok "empty --repo fails closed"
 python3 "$SWEEP" --repo "   " >/dev/null 2>&1 && no "whitespace-only --repo should fail" || ok "whitespace-only --repo fails closed"
 python3 "$SWEEP" --repo "$REPO" --default-branch "" >/dev/null 2>&1 && no "empty --default-branch should fail" || ok "empty --default-branch fails closed"
+# merge-gate round-2 Finding 1: a remote shorthand / qualified ref resolves fine as a git revision but
+# differs from the local short branch name the protection guard compares against — must be rejected.
+python3 "$SWEEP" --repo "$REPO" --default-branch "origin/main" >/dev/null 2>&1 && no "--default-branch 'origin/main' should fail" || ok "--default-branch 'origin/main' (remote shorthand) fails closed"
+python3 "$SWEEP" --repo "$REPO" --default-branch "refs/remotes/origin/main" >/dev/null 2>&1 && no "--default-branch qualified remote ref should fail" || ok "--default-branch qualified remote ref fails closed"
 # merge-gate Finding 1: a fully-qualified refs/heads/<name> --default-branch must normalize to the short
 # name, so the never-delete-the-default-branch guard still matches (not silently bypassed by a comparison
 # of "main" != "refs/heads/main"). $DB_REPO's "main" was freed up again when wt-on-main was reaped above.
