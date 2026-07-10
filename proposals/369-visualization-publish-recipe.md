@@ -95,15 +95,29 @@ paused on this landing, so a plain revert is safe **today**, before any instance
 An instance that wants editorial publish now configures `[recipes.visualization_publish]` pointing at its
 own site's recipe doc, distinct from `[recipes.viewer]`.
 
-**Rollback is NOT unconditionally a plain code revert once an instance has adopted the new key**
-(design-review finding): after an instance configures `[recipes.visualization_publish]`, a bare revert of
-this change would make `resolve_visualization_recipe.sh --publish` fall back to resolving `[recipes.viewer]`
-again — silently reintroducing the exact wrong-destination bug this issue exists to fix, rather than
-blocking. So the rollback procedure is: (1) confirm no instance profile has configured
-`[recipes.visualization_publish]` yet, in which case a plain revert is safe (the pre-change and post-revert
-behavior are identical); otherwise (2) coordinate the code revert with removing/disabling that instance's
-`[recipes.visualization_publish]` entry and pausing its `visualize-results --publish` usage in the same
-change, so the resolver never lands in the ambiguous state of no code path reading a still-configured
-editorial-publish recipe. This is the same category of coordinated-rollback discipline other additive recipe
-keys (`viewer` itself, #347) would need once an instance depends on them — an additive schema key becomes
-load-bearing the moment an instance configures it.
+**Rollback is NOT a plain code revert, ever — a bare revert of this diff is mechanically unsafe on its own**
+(design-review finding, strengthened after a second pass: instance-profile hygiene at revert time is not a
+guarantee). A bare revert of `resolve_visualization_recipe.sh` restores its prior behavior of resolving
+`[recipes.viewer]` on `--publish`. That is unsafe regardless of whether the reverting instance's profile
+still carries a `[recipes.visualization_publish]` entry at the moment of revert: profiles drift, and any
+instance that later enables `visualize-results --publish` (including a future instance onboarding after the
+revert, with no memory of this history) would silently hit the reintroduced wrong-destination bug with zero
+warning. Removing/disabling a profile key is a config-side mitigation for the CURRENT set of instances, not a
+mechanical guarantee against reintroducing the bug in code that no instance's config choice can offset.
+
+The fail-closed rollback procedure is therefore a **coordinated revert of the whole `visualize-results`
+publish surface**, not the resolver diff in isolation:
+1. Revert this change's resolver/schema/skill-doc edits **together with** disabling or reverting
+   `visualize-results`'s publish capability itself (the skill's Step 4 / `--publish` entry point, landed in
+   #366) in the *same* rollback change — so that once the rollback lands, no live code path can invoke
+   `--publish` against the reverted (viewer-reading) resolver at all. This removes the dangerous capability
+   at the code level, which no instance profile edit can substitute for.
+2. Reverting the resolver's diff while leaving the skill's `--publish` entry point live is **not** an
+   acceptable rollback under this proposal — that combination is exactly the reintroduced bug.
+3. Re-enabling `visualize-results --publish` after such a rollback means re-landing this change (or its
+   equivalent), not re-editing an instance profile — the capability and the correct resolver key are a single
+   unit that ships or is withdrawn together.
+
+This is a stronger rollback bar than a typical additive-schema-key change would need, specifically because
+the OLD code path (`--publish` reading `[recipes.viewer]`) is itself the bug being fixed — reverting must not
+resurrect it as a reachable code path, not just avoid it being exercised by today's instance configs.

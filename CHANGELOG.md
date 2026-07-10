@@ -1,3 +1,17 @@
+- experiment-lifecycle 0.3.29 (2026-07-10): give `visualize-results` its own editorial publish-destination
+  recipe, `[recipes.visualization_publish]`, instead of reusing `[recipes.viewer]` (#369). Instance mismatch
+  found before rollout: `run-experiment`'s close-time publish leg (#347) lands operational experiment pages
+  under the configured dashboard viewer, while `visualize-results` (#365/#366) lands researcher-driven
+  editorial pages under a genuinely separate site on instance #1 — reusing `[recipes.viewer]` for the latter
+  would have silently routed editorial publish to the wrong destination. `visualize-results --publish` now
+  resolves `[recipes.visualization_publish]` (a new, independently-typed, optional recipe key, same shape as
+  every other recipe); preview mode is unchanged, still resolving only `[recipes.visualization_preview]`;
+  neither mode reads `[recipes.viewer]` anymore. `run-experiment` and `[recipes.viewer]` are untouched. Both
+  canonical aar-profile `SCHEMA.md` copies, the skill's own recipe reference, and the fake-HOME smoke are
+  updated; the smoke gains a distinct-destinations regression proving `visualization_publish` and `viewer`
+  never cross-resolve even when both are configured. Rollback of this change is NOT a bare code revert (it
+  would resurrect the reintroduced-bug code path); it requires a coordinated revert of `visualize-results`'s
+  publish capability alongside the resolver.
 - experiment-lifecycle 0.3.27 / verify-claims 0.7.15 (2026-07-10): the executor builds + publishes the
   experiment's viewer page at close, from committed iterable source (#347, extends #313). Field experience:
   "experiment closed" never meant "page live" — every close waited on a manual designer pass, hand-built page

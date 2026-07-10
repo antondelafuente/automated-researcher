@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# visualize_results_smoke.sh — behavior smoke for the visualize-results skill (#365).
-# Deterministic, fully offline: exercises resolve_visualization_recipe.sh's fail-closed resolution
-# and the explicit-publish boundary, plus a static instance-leak check on the skill's own shipped
-# files. Skill DISCOVERY itself (install into a virgin HOME, frontmatter present) is already covered
-# by the generic .aar-ci/fake_home_smoke.sh for any plugin/skill change; this smoke covers what that
-# one can't: the recipe-resolution + publish-boundary BEHAVIOR. Exit non-zero on any failure.
+# visualize_results_smoke.sh — behavior smoke for the visualize-results skill (#365, #369).
+# Deterministic, fully offline: exercises resolve_visualization_recipe.sh's fail-closed resolution,
+# the explicit-publish boundary, and the distinct-destinations no-cross-resolution guarantee between
+# [recipes.visualization_publish] and [recipes.viewer], plus a static instance-leak check on the
+# skill's own shipped files. Skill DISCOVERY itself (install into a virgin HOME, frontmatter present)
+# is already covered by the generic .aar-ci/fake_home_smoke.sh for any plugin/skill change; this smoke
+# covers what that one can't: the recipe-resolution + publish-boundary BEHAVIOR. Exit non-zero on any
+# failure.
 set -uo pipefail
 ROOT=${1:?repo root}
 SKILL_DIR="$ROOT/plugins/experiment-lifecycle/skills/visualize-results"
@@ -22,19 +24,27 @@ trap cleanup EXIT
 # Isolate from any REAL instance profile on this box — both lookup legs must miss.
 export XDG_CONFIG_HOME="$T/xdg-empty"
 
+# All three recipes point at DISTINCT repos/paths/git_refs on purpose (an instance where the
+# dashboard viewer and the editorial visualization-publish destination genuinely diverge, #369) so a
+# cross-resolution (publish leaking viewer's values, or vice versa) is mechanically detectable.
 complete_profile() {
   cat > "$1" <<'EOF'
 schema_version = 1
 [recipes.visualization_preview]
 kind = "repo"
-repo = "owner/viewer-repo"
+repo = "owner/preview-repo"
 path = "recipes/visualization-preview.md"
-git_ref = "abc1234"
+git_ref = "aaaa111"
+[recipes.visualization_publish]
+kind = "repo"
+repo = "owner/editorial-repo"
+path = "recipes/visualization-publish.md"
+git_ref = "bbbb222"
 [recipes.viewer]
 kind = "repo"
-repo = "owner/viewer-repo"
+repo = "owner/dashboard-repo"
 path = "recipes/viewer.md"
-git_ref = "def56789"
+git_ref = "cccc333"
 EOF
 }
 
@@ -42,16 +52,16 @@ EOF
 complete_profile "$T/complete.toml"
 out=$(AAR_PROFILE="$T/complete.toml" bash "$RESOLVE" 2>"$T/err1")
 rc=$?
-if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^VISUALIZATION_PREVIEW_GIT_REF=abc1234$'; then
+if [ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -q '^VISUALIZATION_PREVIEW_GIT_REF=aaaa111$'; then
   ok "complete-recipe resolution succeeds and prints preview fields"
 else
   err "complete-recipe resolution failed (rc=$rc): $(cat "$T/err1")"
 fi
-# and must NOT leak viewer fields in default (non-publish) mode
-if printf '%s\n' "$out" | grep -q '^VIEWER_'; then
-  err "default (preview) mode leaked VIEWER_* fields — publish boundary is not being enforced"
+# and must NOT leak either publish-side recipe's fields in default (non-publish) mode
+if printf '%s\n' "$out" | grep -qE '^(VIEWER_|VISUALIZATION_PUBLISH_)'; then
+  err "default (preview) mode leaked VIEWER_*/VISUALIZATION_PUBLISH_* fields — publish boundary is not being enforced"
 else
-  ok "default (preview) mode never resolves/emits [recipes.viewer] fields"
+  ok "default (preview) mode never resolves/emits [recipes.viewer] or [recipes.visualization_publish] fields"
 fi
 
 # 2. Missing profile entirely: BLOCKs.
@@ -62,14 +72,15 @@ else
     || err "missing profile failed but without the expected message: $(cat "$T/err2")"
 fi
 
-# 3. Profile present, but recipes.visualization_preview table absent: BLOCKs.
+# 3. Profile present, but recipes.visualization_preview table absent: BLOCKs (even though [recipes.viewer]
+#    is configured — proves preview resolution never falls back to reading an unrelated recipe key).
 cat > "$T/no-recipe.toml" <<'EOF'
 schema_version = 1
 [recipes.viewer]
 kind = "repo"
-repo = "owner/viewer-repo"
+repo = "owner/dashboard-repo"
 path = "recipes/viewer.md"
-git_ref = "def56789"
+git_ref = "cccc333"
 EOF
 if AAR_PROFILE="$T/no-recipe.toml" bash "$RESOLVE" >/dev/null 2>"$T/err3"; then
   err "resolver succeeded with no recipes.visualization_preview table"
@@ -83,7 +94,7 @@ cat > "$T/incomplete.toml" <<'EOF'
 schema_version = 1
 [recipes.visualization_preview]
 kind = "repo"
-repo = "owner/viewer-repo"
+repo = "owner/preview-repo"
 path = "recipes/visualization-preview.md"
 EOF
 if AAR_PROFILE="$T/incomplete.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4"; then
@@ -125,37 +136,58 @@ else
   ok "a URI containing shell metacharacters is rejected by the safe charset"
 fi
 
-# 5. Explicit publish boundary: --publish on the complete profile ALSO resolves [recipes.viewer].
+# 5. Explicit publish boundary: --publish on the complete profile resolves [recipes.visualization_publish]
+#    — its OWN publish-destination recipe — and never [recipes.viewer].
 out5=$(AAR_PROFILE="$T/complete.toml" bash "$RESOLVE" --publish 2>"$T/err5")
 rc5=$?
-if [ "$rc5" -eq 0 ] && printf '%s\n' "$out5" | grep -q '^VIEWER_GIT_REF=def56789$'; then
-  ok "--publish resolves [recipes.viewer] (the explicit boundary, opt-in)"
+if [ "$rc5" -eq 0 ] && printf '%s\n' "$out5" | grep -q '^VISUALIZATION_PUBLISH_GIT_REF=bbbb222$'; then
+  ok "--publish resolves [recipes.visualization_publish] (the explicit boundary, opt-in)"
 else
-  err "--publish did not resolve viewer fields (rc=$rc5): $(cat "$T/err5")"
+  err "--publish did not resolve visualization_publish fields (rc=$rc5): $(cat "$T/err5")"
 fi
 
-# 6. --publish fails closed (with ZERO stdout leakage) if [recipes.viewer] is absent, even though
-#    [recipes.visualization_preview] alone is complete — proves the boundary can't be worked around
-#    by a preview-only profile.
+# 5a. Distinct-destinations regression (#369): on a profile where [recipes.viewer] and
+#     [recipes.visualization_publish] point at genuinely different repos/paths/git_refs, --publish's
+#     output must carry ONLY the visualization_publish recipe's values and must NEVER contain a VIEWER_
+#     line — proving the two destinations cannot cross-resolve even when both are configured.
+if printf '%s\n' "$out5" | grep -q '^VISUALIZATION_PUBLISH_REPO=owner/editorial-repo$' \
+  && printf '%s\n' "$out5" | grep -q '^VISUALIZATION_PUBLISH_PATH=recipes/visualization-publish.md$' \
+  && ! printf '%s\n' "$out5" | grep -q '^VIEWER_'; then
+  ok "--publish emits ONLY visualization_publish's own repo/path/git_ref, never [recipes.viewer] — distinct destinations do not cross-resolve"
+else
+  err "--publish output crossed destinations or leaked viewer fields: $out5"
+fi
+
+# 6. --publish fails closed (with ZERO stdout leakage) if [recipes.visualization_preview] is missing
+#    entirely (even though [recipes.viewer] is configured) — preview resolution blocks first.
 if out6=$(AAR_PROFILE="$T/no-recipe.toml" bash "$RESOLVE" --publish 2>"$T/err6"); then
   err "--publish succeeded with no recipes.visualization_preview table at all"
 else
   : # expected: no visualization_preview means preview resolution itself already blocks first
 fi
-cat > "$T/preview-only.toml" <<'EOF'
+
+# 6a. --publish fails closed (with ZERO stdout leakage) if [recipes.visualization_publish] is absent,
+#    even though [recipes.visualization_preview] alone is complete AND [recipes.viewer] IS configured —
+#    proves the boundary can't be worked around by falling back to [recipes.viewer].
+cat > "$T/preview-and-viewer-only.toml" <<'EOF'
 schema_version = 1
 [recipes.visualization_preview]
 kind = "repo"
-repo = "owner/viewer-repo"
+repo = "owner/preview-repo"
 path = "recipes/visualization-preview.md"
-git_ref = "abc1234"
+git_ref = "aaaa111"
+[recipes.viewer]
+kind = "repo"
+repo = "owner/dashboard-repo"
+path = "recipes/viewer.md"
+git_ref = "cccc333"
 EOF
-if out7=$(AAR_PROFILE="$T/preview-only.toml" bash "$RESOLVE" --publish 2>"$T/err7"); then
-  err "--publish succeeded with no recipes.viewer configured (preview-only profile)"
+if out7=$(AAR_PROFILE="$T/preview-and-viewer-only.toml" bash "$RESOLVE" --publish 2>"$T/err7"); then
+  err "--publish succeeded with no recipes.visualization_publish configured (viewer-only-for-publish profile)"
 else
-  [ -z "$out7" ] && grep -qi 'recipes.viewer.*not configured' "$T/err7" \
-    && ok "--publish BLOCKs (no stdout leak) when [recipes.viewer] is unconfigured" \
-    || err "--publish-without-viewer failure lacked the expected message or leaked stdout: out=[$out7] err=[$(cat "$T/err7")]"
+  [ -z "$out7" ] && grep -qi 'recipes.visualization_publish.*not configured' "$T/err7" \
+    && ok "--publish BLOCKs (no stdout leak) when [recipes.visualization_publish] is unconfigured, even with [recipes.viewer] present" \
+    || err "--publish-without-visualization_publish failure lacked the expected message or leaked stdout: out=[$out7] err=[$(cat "$T/err7")]"
 fi
 
 # 7. Hardcoded-instance-path absence: static grep over this skill's own shipped files (excluding this
@@ -170,4 +202,4 @@ else
   ok "no hardcoded research-lab/home-anton/hostname-port/cloudflare values in visualize-results"
 fi
 
-[ "$fail" = 0 ] && { echo "  smoke ok: visualize-results recipe resolution + publish boundary + no instance leak" >&2; exit 0; } || exit 1
+[ "$fail" = 0 ] && { echo "  smoke ok: visualize-results recipe resolution + publish boundary + distinct-destinations + no instance leak" >&2; exit 0; } || exit 1

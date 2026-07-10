@@ -277,11 +277,14 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
-# 10d. visualize-results recipe-resolution smoke (#365): the fail-closed resolution of
+# 10d. visualize-results recipe-resolution smoke (#365, #369): the fail-closed resolution of
 #     [recipes.visualization_preview] (missing profile / missing recipe table / incomplete recipe all BLOCK),
-#     the explicit-publish boundary (default mode never resolves/emits [recipes.viewer]; --publish does, and
-#     fails closed with zero stdout leakage if [recipes.viewer] itself is unconfigured), and a static grep for
-#     hardcoded instance values in the skill's own shipped files — behavior the JSON/syntax checks can't cover.
+#     the explicit-publish boundary (default mode never resolves/emits [recipes.visualization_publish] or
+#     [recipes.viewer]; --publish resolves [recipes.visualization_publish] and fails closed with zero stdout
+#     leakage if it's unconfigured, and never resolves [recipes.viewer] in either mode), a distinct-
+#     destinations regression proving visualization_publish and viewer never cross-resolve, and a static grep
+#     for hardcoded instance values in the skill's own shipped files — behavior the JSON/syntax checks can't
+#     cover.
 #     Runs on ANY change under the skill dir (not just the scripts), since the instance-leak grep scans
 #     SKILL.md/references/ too — a leak added there alone must not bypass the guard (code-review F4).
 if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/visualize-results/'; then
