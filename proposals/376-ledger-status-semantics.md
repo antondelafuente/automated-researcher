@@ -80,7 +80,7 @@ No code changes — this is executor-facing guidance; the ledger schema/recipe s
 it already is (`SCHEMA.md` "Recipes stay narrative, reached by typed pointer").
 
 **The consuming-instance side (named, not implemented here).** This box's research-lab already has the
-concrete incident this Issue describes: `research-lab#211` corrects the two mislabeled Helena entries
+concrete incident this Issue describes: `antondelafuente/research-lab#211` corrects the two mislabeled Helena entries
 (`helena-lie-direction-1/2`, ledger `failed` → `done`) as **append-only** corrections, preserving the
 calibration/parse-coverage caveats in reader-facing prose, and states this instance's `done`/`failed`/`killed`
 → (completed-as-designed / technical-failure / deliberate-abandon) mapping explicitly. That is the
@@ -113,7 +113,7 @@ Product-level definition confined to `automated-researcher`'s `experiment-lifecy
 docs: `run-experiment/SKILL.md` and `design-experiment/templates/CHECKLIST_TEMPLATE.md` (consumed by both
 skills at design-time and run-time), plus `CHANGELOG.md` + `plugin.json`. No script/schema change — the ledger
 recipe stays narrative prose; this proposal only requires that prose state a mapping it may already imply.
-**Named downstream dependent:** `research-lab#211` is the coordinated consuming-instance compatibility pass —
+**Named downstream dependent:** `antondelafuente/research-lab#211` is the coordinated consuming-instance compatibility pass —
 it corrects the two already-mislabeled entries (append-only) and states this instance's concrete mapping. That
 work is scoped and merged independently in `research-lab`, not part of this PR.
 
@@ -121,7 +121,7 @@ work is scoped and merged independently in `research-lab`, not part of this PR.
 
 Low-risk doc change; ships directly via the standard cross-family review + checks. **Rollback is NOT a claim
 that persisted ledger events revert** — a doc revert only changes *future* guidance; any ledger row already
-corrected under the new definition (e.g. `research-lab#211`'s two rows) stays corrected, because ledger
+corrected under the new definition (e.g. `antondelafuente/research-lab#211`'s two rows) stays corrected, because ledger
 writes are themselves append-only (never edit-in-place, per the existing `#338` invariant already in
 `SKILL.md`). If this definition ever needs walking back, the correction is the same shape as the fix itself:
 a **fresh append-only event** stating the corrected status, never a silent rewrite of history. No migration

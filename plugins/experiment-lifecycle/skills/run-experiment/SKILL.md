@@ -210,38 +210,18 @@ driver instead.
   comparability is verifiable from the artifacts alone, not only re-derivable from driver source. The data-audit
   gate checks the config is present and consistent across co-measured arms.
 - **Log the run in your ledger** (per the profile). Every GPU run goes in. **Ledger terminal status is
-  OPERATIONAL RUN HEALTH, never a scientific verdict (#376).** Three abstract outcomes, the product-owned
-  vocabulary regardless of which concrete strings your instance's ledger recipe uses:
-  - **completed-as-designed** — the intended procedure executed and reached its planned close, *whatever that
-    close shows*: an unsupported hypothesis, a small/absent effect, an unfavorable interpretation, **or a
-    correctly executed planned no-go / stop at an instrument, data, or validity gate** all land here. The gate
-    result is a scientific/measurement outcome, not an operational one — never let it flip this to a failure
-    status. Preserve the limitation where it belongs: the `CHECKLIST.md` gate stays `FAIL` (see below), and
-    `RESULTS.md` + your ledger note say plainly what the gate caught and what it means for the data.
-  - **technical-failure** — a technical execution failure or experiment bug (a crash, an OOM, a save/load
-    corruption, a driver bug, an unhandled provider error) prevented the intended procedure from reaching a
-    valid planned close. It never encodes whether a hypothesis was supported, an effect was large, an
-    interpretation was favorable, or a measurement/validity gate passed — those are scientific outcomes, not
-    operational ones.
-  - **deliberate-abandon** — a deliberate stop not driven by a technical break (a `/quit`, an explicit
-    abandon) — today's `killed`.
-
-  **Your instance's ledger recipe maps these to its concrete terminal strings** (the common default is
-  `done`/`failed`/`killed`, but the recipe's own words govern) — recipes stay narrative prose reached by
-  typed pointer, no schema change here. Write the concrete value matching which outcome *actually occurred*,
-  never one that merely sounds right. **If the recipe's terminal set, or its mapping onto these three
-  outcomes, isn't discoverable or is internally contradictory: fail closed** — flag it, don't guess (same
-  discipline as the close self-audit's "don't guess an undiscoverable terminal set," below — this extends it
-  to the *meaning* of each terminal value, not just its existence).
-
-  **`[BLOCK] FAIL` in `CHECKLIST.md` is a distinct, validity-trail term — never conflate it with ledger
-  `technical-failure`.** A checklist FAIL can legitimately co-occur with ledger `completed-as-designed` (the
-  gate correctly stopped a valid, complete execution — the Helena incident this note fixes, #376) or with
-  ledger `technical-failure` (the gate caught a symptom of a genuine technical break). A checklist FAIL still
-  blocks continuation exactly as always (load-bearing flag, fix-or-clear before proceeding); this is only
-  about what you write to the *ledger* once the run reaches its close. No numerical threshold is introduced
-  anywhere by this — the data-vs-verdict philosophy is unchanged, this only disambiguates the operational
-  ledger axis from the scientific one, which was always meant to be orthogonal to it.
+  OPERATIONAL run health, never a scientific verdict (#376):** three product-owned abstract outcomes —
+  **completed-as-designed** (the procedure reached its planned close, *whatever that shows* — including a
+  correctly executed no-go / stop at an instrument/data/validity gate; preserve that limitation in
+  `RESULTS.md` + the ledger note, and keep the `CHECKLIST.md` gate itself `FAIL`), **technical-failure** (a
+  technical execution failure or experiment bug prevented a valid planned close — never a hypothesis/effect/
+  interpretation/gate outcome), **deliberate-abandon** (a deliberate stop, e.g. `/quit` — today's `killed`).
+  Your instance's ledger recipe (narrative prose, no schema change) maps these onto its concrete terminal
+  strings (commonly `done`/`failed`/`killed`) — write the value matching which outcome *actually occurred*;
+  fail closed (flag, don't guess) if the recipe's terminal set or mapping isn't discoverable or is
+  contradictory. **A checklist `[BLOCK] FAIL` is a distinct validity-trail term, never ledger
+  `technical-failure` by itself** — it can legitimately co-occur with either ledger outcome and still blocks
+  continuation as always. No numerical threshold is introduced; the data-vs-verdict philosophy is unchanged.
 - Pull the headline numbers back and report them.
 - **Start `RESULTS.md` now** (from your instance's record template) — fill what you have; it must be complete before close.
 - **Keep the standing successor handoff current** (the resume contract, below): refresh `TEMP.md` and the
@@ -252,13 +232,12 @@ driver instead.
 Idle compute burns money. **Teardown is the default the moment a run completes.**
 
 - **Tear-down-on-block:** a BLOCKED / errored run, OR a run stopped by an instrument/data/validity gate,
-  tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it (per
-  the operational-outcome definition above: a genuine technical break is `technical-failure`; a gate that
-  correctly stopped a valid, complete execution is `completed-as-designed` — teardown urgency never depends
-  on which) → **tear down (stop billing)** → notify the human → *then* discuss redesign. Do NOT leave blocked
-  compute billing while you wait (a real incident billed ~8.7h / $76 because the AAR asked what to do first).
-  The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set for a concrete,
-  named debugging reason.
+  tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it per
+  the ledger-status definition above (a gate stop is not automatically `technical-failure`; teardown urgency
+  never depends on which) → **tear down (stop billing)** → notify the human → *then* discuss redesign. Do NOT
+  leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the AAR asked what
+  to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
+  for a concrete, named debugging reason.
 - **The completion boundary (the safety gate):** tear down only once the upload is **verified** — *every artifact unique
   to this run*, not just the summary. Before that, teardown loses data — this gate is the whole ballgame. **Teardown
   follows your profile's policy** (deploying-account key; delete-don't-stop for ephemeral/region-free units; the
@@ -358,11 +337,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   all already done (`automated-researcher#338`). If launch metadata turns out to be missing at this point, attach
   it as a non-status note, or re-emit it on a fresh event that itself carries a terminal status — never as a
   non-terminal status event. If the ledger recipe's terminal set isn't discoverable at all, don't guess: fail
-  closed and flag it rather than write a non-terminal status to find out. **Re-check the value is the RIGHT
-  terminal value, not just A terminal one** — per the operational-outcome definition above (#376): a
-  completed-as-designed run (including one stopped by a correctly executed validity/instrument gate) must not
-  read as `technical-failure` merely because a `CHECKLIST.md` gate is `FAIL` — that checklist term is a
-  validity-trail marker, distinct from ledger run health.
+  closed and flag it rather than write a non-terminal status to find out. **Re-check it's the RIGHT terminal
+  value, not just A terminal one** — per the ledger-status definition above (#376): a `CHECKLIST.md` `FAIL`
+  alone never justifies `technical-failure`.
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:

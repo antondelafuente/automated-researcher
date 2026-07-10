@@ -24,9 +24,7 @@
 #   Evidence is a number / output / path, NEVER a bare ✓. Tick in place. Commit at close; the cross-family
 #   close audit verifies the checklist against the artifacts (which is what stops cargo-cult ticking).
 #   A checklist FAIL is a VALIDITY-TRAIL term, distinct from ledger `technical-failure` (run-experiment
-#   SKILL.md Step 4, #376): a correctly executed planned no-go / validity-gate stop can legitimately be a
-#   checklist FAIL alongside ledger `completed-as-designed` — the checklist FAIL never by itself implies the
-#   ledger status is a failure.
+#   SKILL.md Step 4, #376) — it never by itself implies the ledger status is a failure.
 
 ## UNIVERSAL  (every GPU experiment)
 - ☐ [BLOCK] Read DESIGN.md + START.md; design is locked (no redesign).                          ev:
@@ -74,12 +72,9 @@
       backfill a `running`/`launched`/`deploying` event after a terminal one: a last-non-null-field-wins
       fold reopens a finished run for every consumer (dashboards included) even though the run is actually
       done (`automated-researcher#338`). Missing launch metadata at this point is a non-status note or a
-      fresh terminal-status event — never a non-terminal one. **The value recorded reflects OPERATIONAL run
-      health, not a scientific verdict (#376):** a completed-as-designed run — including one correctly
-      stopped by an instrument/data/validity gate — maps to the recipe's completed-as-designed terminal
-      value (e.g. `done`) even if some other gate on this very checklist is `FAIL`; only a genuine technical
-      execution failure/bug maps to the recipe's technical-failure value (e.g. `failed`). If the recipe's
-      terminal set or its mapping onto these outcomes isn't discoverable, fail closed rather than guess.  ev:
+      fresh terminal-status event — never a non-terminal one. **The value reflects OPERATIONAL run health,
+      not a verdict** (run-experiment SKILL.md Step 4, #376) — a `FAIL` elsewhere on this checklist never by
+      itself justifies the recipe's technical-failure value.                                      ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake cleared.                         ev:

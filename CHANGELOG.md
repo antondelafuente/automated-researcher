@@ -12,7 +12,7 @@
   `CHECKLIST_TEMPLATE.md` legend + ledger `[BLOCK]` gate gain matching cross-references. No numerical
   hypothesis threshold introduced; the data-vs-verdict philosophy is unchanged. The consuming-instance
   compatibility/backfill (correcting this box's two mislabeled Helena ledger rows, append-only) is tracked
-  separately at `research-lab#211`.
+  separately at `antondelafuente/research-lab#211`.
 - experiment-lifecycle 0.3.29 (2026-07-10): give `visualize-results` its own editorial publish-destination
   recipe, `[recipes.visualization_publish]`, instead of reusing `[recipes.viewer]` (#369). Instance mismatch
   found before rollout: `run-experiment`'s close-time publish leg (#347) lands operational experiment pages
