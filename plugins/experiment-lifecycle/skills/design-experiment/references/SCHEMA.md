@@ -106,7 +106,7 @@ git_ref  = "<git-sha>"                    # iff kind=repo — pins the exact com
 kind     = "uri"
 uri      = "r2://<bucket>/recipes/artifact-store.md"  # scheme MUST be in the supported set (below)
 sha256   = "<hex digest>"                 # iff kind=uri — pins the exact bytes
-# [recipes.ledger] / .teardown / .cost_policy follow the same typed shape.
+# [recipes.ledger] / .teardown / .cost_policy / .viewer follow the same typed shape.
 ```
 
 ### Normative field table
@@ -128,7 +128,7 @@ value, or a kind/field mismatch is **fail closed** (validate rejects; discovery 
 | `[github.identity.codex].git_author_env` | env-var name (string) | R | — | Same, for the codex family. |
 | `[github.protection].require_pr_review` | bool | O | `false` | Tightening-only expectation the close-gate pre-checks; may only require MORE, never weaken a product invariant. |
 | `[github.protection].enforce_admins` | bool | O | `false` | Tightening-only expectation (no standing admin bypass). |
-| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`). |
+| `[recipes.<name>]` table | table | O | — | Each is a typed pointer; absent ⇒ that recipe is not anchored in the profile. `<name>` is the recipe key (e.g. `provisioning`, `artifact_store`, `ledger`, `teardown`, `cost_policy`, `viewer`). |
 | `[recipes.<name>].kind` | enum | R *(within the table)* | — | **Closed set: `"repo"` \| `"uri"`.** Selects which other keys are required (below). |
 | `[recipes.<name>].repo` | `owner/repo` string | R **iff** `kind="repo"` | — | The OWNING repo (never assumed = `research_repo`). |
 | `[recipes.<name>].path` | string | R **iff** `kind="repo"` | — | Repo-relative path. |
@@ -156,6 +156,13 @@ Field semantics, normative (the parts not obvious from the table):
   expectation**, not a configuration of GitHub (the actual protection is set out-of-band — see the
   ship-change RUNBOOK). It may only *tighten*; a mismatch (the remote requires fewer reviews than declared) is
   the close-gate's fail-closed signal.
+
+- **`[recipes.viewer]`** — OPTIONAL; the instance's **viewer publish recipe** (#347): the doc a closing
+  executor follows to build + publish the experiment's overview page (it must name the viewer repo + gated
+  landing path, the shared page lib + a prior-page pattern, the assemble/render/bundle/gallery commands, and
+  where per-experiment page source lives — see `run-experiment`'s publish leg). Absent ⇒ closes are
+  manifest-only. Same typed/pinned shape as every recipe; snapshotted into `START.md` like the rest — the
+  executor never resolves it live.
 
 ### Product invariant — cross-family review is NOT a profile field (#153 decision 3a)
 

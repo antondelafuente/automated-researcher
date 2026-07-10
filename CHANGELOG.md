@@ -1,3 +1,21 @@
+- experiment-lifecycle 0.3.27 / verify-claims 0.7.15 (2026-07-10): the executor builds + publishes the
+  experiment's viewer page at close, from committed iterable source (#347, extends #313). Field experience:
+  "experiment closed" never meant "page live" — every close waited on a manual designer pass, hand-built page
+  source accumulated untracked in a shared checkout (seven experiments backfilled by research-lab PRs
+  #184/#185; two have manifests but no page source anywhere). Three parts. (1) `design-experiment`'s
+  Presentation spec is pinned render-ready: per figure, plot type / arms / metric+axes / per-cell data source
+  — a stranger could render it unattended; no-verdict posture unchanged. (2) `verify-claims`
+  `audit_experiment --design` dimension 8 gains RENDER-READINESS alongside persistence — a figure spec the
+  executor couldn't render without asking the designer is an under-specification finding. (3)
+  `run-experiment`'s close publish leg flips from designer-at-publish-time to executor-at-close, behind the
+  existing profile seam: a typed, pinned `[recipes.viewer]` recipe pointer (schema example-key addition, no
+  MAJOR bump), snapshotted into `START.md` like every recipe — the executor never resolves live config. The
+  recipe doc has a required-contents contract (viewer repo + gated landing path, page lib + prior-page
+  pattern, assemble/render/bundle/gallery commands, source destination); missing contents = load-bearing flag
+  → manifest-only. `CHECKLIST_TEMPLATE.md` gains a matching UNIVERSAL gate with a deliberately MECHANICAL bar
+  (figures per spec, source committed, page landed via the gated path) — page prose stays a first-pass draft
+  the researcher polishes, and post-close framing tweaks stay one-script edits because the source is
+  committed. No `[recipes.viewer]` in the snapshot → manifest-only close, exactly the prior behavior.
 - experiment-lifecycle 0.3.26 (2026-07-05): designer-side supervision goes two-layer — event-driven monitor +
   long merged heartbeat instead of `/loop 20m` per executor (#342). The old dispatcher-watchdog contract ran
   a 20-min model loop inside the designer session; at ~500k tokens of accumulated designer context and a

@@ -175,11 +175,17 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    money is a false economy) or PER-WALLCLOCK (a rented pod, where concurrency needs more units, not
    zero-cost parallelism)? Flag (a) a step with no fan-out enumeration at all, (b) a serial default sitting
    below its own stated max with no cap named, or (c) a claimed cost saving under the wrong billing model.
-8. PRESENTATION-DATA PERSISTENCE — if the design has a Presentation subsection (per-figure/table plots +
-   the columns/fields each needs, at what granularity), does the data-collection spec actually PERSIST every
-   field the Presentation section requires, at the granularity it requires? A Presentation section that names
-   a column or a per-arm/per-row breakdown the collection plan never records is an execution-under-specification
-   gap that surfaces only after the run. No Presentation subsection → 'no material finding,' not incomplete.
+8. PRESENTATION-DATA PERSISTENCE + RENDER-READINESS — if the design has a Presentation subsection
+   (per-figure/table plots + the columns/fields each needs, at what granularity), does the data-collection
+   spec actually PERSIST every field the Presentation section requires, at the granularity it requires? A
+   Presentation section that names a column or a per-arm/per-row breakdown the collection plan never records
+   is an execution-under-specification gap that surfaces only after the run. And is each declared figure
+   RENDERABLE UNATTENDED from the planned artifacts alone — plot type, the arms/series on it, the canonical
+   metric and axes, and the per-cell data source (which artifact/field supplies each cell) all named? A
+   figure spec a stranger could not render without asking the designer is the same
+   execution-under-specification family — flag it (this is concreteness of the DATA-ORGANIZATION spec, not a
+   verdict: 'what it should show' still has no place here). No Presentation subsection → 'no material
+   finding,' not incomplete.
 
 Also emit, separate from the findings, a one-line QUALITATIVE EVIDENCE-QUALITY read — the good/bad signal the
 researcher wants — e.g. 'this will produce a clean comparable number' / 'this confound will muddy it' /
