@@ -25,6 +25,7 @@ Your human wants these skills available. Do this, in order:
      claude plugin install verify-claims@automated-researcher
      claude plugin install experiment-lifecycle@automated-researcher
      claude plugin install feedback-loop@automated-researcher
+     claude plugin install repo-janitor@automated-researcher
      ```
      Then tell your human to run `/reload-plugins` (or restart the session) to activate.
      (`experiment-lifecycle` also needs an **execution profile** — your instance's provisioning,
@@ -44,6 +45,7 @@ Your human wants these skills available. Do this, in order:
      ln -s ~/automated-researcher/plugins/experiment-lifecycle/skills/visualize-results ~/.codex/skills/visualize-results
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/file-feedback        ~/.codex/skills/file-feedback
      ln -s ~/automated-researcher/plugins/feedback-loop/skills/triage-feedback      ~/.codex/skills/triage-feedback
+     ln -s ~/automated-researcher/plugins/repo-janitor/skills/repo-janitor          ~/.codex/skills/repo-janitor
      ```
      If you are developing the scaffold itself, install `ship-change` from the `agentic-engineering` repo
      (the engineering team's tooling — it owns the SWE pipeline that builds this product):
@@ -86,6 +88,7 @@ Your human wants these skills available. Do this, in order:
 | **verify-claims** | adversarial fact / design / data / code review of load-bearing work, read by an independent model *family* — the cross-family validity gate | shipped |
 | **experiment-lifecycle** | run a GPU experiment like a researcher: `design-experiment` (pre-register a design, clear it with the human through the validity gates) → `log-experiment` (land the design-stage pre-registration, and later the finished result, to the research repo as a gated PR) → `run-experiment` (a zero-context executor acquires, provisions, drives, collects, closes) → `visualize-results` (the local-first, researcher-driven editorial visualization loop, distinct from `run-experiment`'s own close-time viewer publish leg) | shipped |
 | **feedback-loop** | report and triage scaffold friction: `file-feedback` captures product/user pain while fresh, `triage-feedback` maintains dispositions and routes fixes through the product workflow | shipped |
+| **repo-janitor** | deterministic weekly sweep of git worktrees + the shared checkout, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual) — the worktree analog of gpu-job's pod reaper | shipped |
 | *reproduce-paper* | point an agent at a paper, get a graded reproduction | planned |
 
 (The SWE pipeline that *builds* this product — `ship-change` / the `aar-engineering` plugin — lives in the
@@ -109,6 +112,7 @@ If *you* are setting these up by hand in the Claude Code UI (the agent path is t
 /plugin install verify-claims@automated-researcher
 /plugin install experiment-lifecycle@automated-researcher
 /plugin install feedback-loop@automated-researcher
+/plugin install repo-janitor@automated-researcher
 ```
 
 **Codex CLI / other Agent-Skills harnesses:** clone, then symlink each source skill dir into your harness's

@@ -24,6 +24,11 @@
       "name": "feedback-loop",
       "source": "./plugins/feedback-loop",
       "description": "Keep the scaffold improving while agents use it: file-feedback routes product friction to the configured product Issue tracker or drafts deployment-only notes through instance guidance, and triage-feedback maintains dispositions and routes product fixes through ship-change when configured."
+    },
+    {
+      "name": "repo-janitor",
+      "source": "./plugins/repo-janitor",
+      "description": "Deterministic weekly sweep of git worktrees + the shared checkout, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual) — the worktree analog of gpu-job's pod reaper. Report-only by default; no state, no auto-reap, no lease model."
     }
   ]
 }
