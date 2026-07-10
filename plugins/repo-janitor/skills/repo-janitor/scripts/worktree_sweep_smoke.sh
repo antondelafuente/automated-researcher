@@ -117,6 +117,14 @@ echo "not a gitdir" > "$TMP/wt-broken/.git"
 g "$REPO" worktree add -q -b prunable-branch "$TMP/wt-prunable" main
 rm -rf "$TMP/wt-prunable"
 
+# tier-1 candidate that will be LOCKED (code-review Finding 5: a genuine remove failure must be counted
+# and must exit non-zero, distinct from a defensive skip)
+g "$REPO" worktree add -q -b feat-merged-locked "$TMP/wt-merged-locked" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-merged-locked" commit -q --allow-empty -m lockedold --date="$OLD_DATE"
+g "$REPO" merge -q --no-edit feat-merged-locked
+g "$REPO" push -q origin main
+g "$REPO" worktree lock "$TMP/wt-merged-locked"
+
 # shared-checkout drift: dirty the main checkout
 echo dirty >> "$REPO/f.txt"
 
@@ -152,6 +160,22 @@ if echo "$J2" | reason_has "d['tier2']" "$WS/agent-b" "live"; then ok "tier2 rea
 if echo "$J2" | has_path_in "d['tier2']" "$WS/agent-a"; then no "agent-a should NOT read live (only agent-b is in the seam)"; else ok "agent-a correctly not-live (seam scoped to agent-b only)"; fi
 if echo "$J2" | has_path_in "d['tier3']" "$WS/agent-a"; then ok "agent-a (owner not live) -> tier3"; else no "agent-a should be tier3 when not live"; fi
 
+# 2b. code-review Finding 1: a CONFIGURED live-sessions seam that FAILS must be UNKNOWN liveness, never
+#     silently folded into "not live" — agent-b (merged+clean+old) must NOT reach tier1, and its tier3
+#     reason must say liveness couldn't be verified (not silently reaped as if no owner existed).
+J_SEAMFAIL=$(REPO_JANITOR_LIVE_SESSIONS_CMD="false" python3 "$SWEEP" --json --repo "$REPO" --worktree-root "$WS" 2>/dev/null)
+if echo "$J_SEAMFAIL" | has_path_in "d['tier1']" "$WS/agent-b"; then no "seam-failure: agent-b reached tier1 despite an unverifiable (failed) liveness seam"; else ok "seam-failure: agent-b excluded from tier1"; fi
+if echo "$J_SEAMFAIL" | has_path_in "d['tier2']" "$WS/agent-b"; then no "seam-failure: agent-b should NOT be routed to tier2 (we can't confirm they're reachable)"; else ok "seam-failure: agent-b not routed to tier2 either"; fi
+if echo "$J_SEAMFAIL" | reason_has "d['tier3']" "$WS/agent-b" "could not be verified"; then ok "seam-failure: tier3 reason explains liveness is unverifiable"; else no "seam-failure: tier3 reason missing the unverifiable-liveness note"; fi
+
+# 2c. code-review Finding 2: a RELATIVE --worktree-root must still derive ownership (git worktree paths
+#     are always absolute; a naive normpath-only prefix check would never match and silently disable
+#     ownership — and with it, the live-owner tier-1 veto).
+RELROOT=$(python3 -c "import os; print(os.path.relpath('$WS', '$TMP'))")
+J_RELROOT=$(cd "$TMP" && REPO_JANITOR_LIVE_SESSIONS_CMD="cat $LIVE_FILE" python3 "$SWEEP" --json --repo "$REPO" --worktree-root "$RELROOT" 2>/dev/null)
+if echo "$J_RELROOT" | has_path_in "d['tier1']" "$WS/agent-b"; then no "relative --worktree-root: live-owner veto bypassed (agent-b reached tier1)"; else ok "relative --worktree-root: ownership still derived (agent-b excluded from tier1)"; fi
+if echo "$J_RELROOT" | has_path_in "d['tier2']" "$WS/agent-b"; then ok "relative --worktree-root: agent-b correctly routed to tier2"; else no "relative --worktree-root: agent-b not routed to tier2 (ownership not derived)"; fi
+
 # 3. --fetch surfaces behind-origin drift that the default (cached) path does not
 CLONE="$TMP/other-clone"
 git clone -q "$ORIGIN" "$CLONE" >/dev/null 2>&1
@@ -170,8 +194,12 @@ COUNT_AFTER=$(git -C "$REPO" worktree list | wc -l)
 [ "$COUNT_BEFORE" = "$COUNT_AFTER" ] && ok "--dry-run deletes nothing" || no "--dry-run changed the worktree count"
 
 # 5. --reap-tier1 (real, no live-sessions seam -> agent-b has no liveness info, so it IS tier1 here and
-#    WILL be reaped; re-run the earlier veto scenario separately in step 2, already verified above)
+#    WILL be reaped; re-run the earlier veto scenario separately in step 2, already verified above).
+#    wt-merged-locked is ALSO tier1 (merged+clean+old) but LOCKED — its removal must FAIL, must be
+#    counted, and must NOT block the other legitimate removals in the same invocation (code-review
+#    Finding 5).
 python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 >/dev/null 2>&1
+REAP_RC=$?
 git -C "$REPO" worktree prune >/dev/null 2>&1 || true
 REMAINING=$(git -C "$REPO" worktree list)
 if ! grep -q "$TMP/wt-merged$" <<<"$REMAINING"; then ok "reap: tier-1 merged worktree removed"; else no "reap: tier-1 merged worktree still present"; fi
@@ -180,6 +208,8 @@ for keep in "wt-stale" "wt-wip" "wt-broken" "agent-a"; do
   if grep -q "$keep" <<<"$REMAINING"; then ok "reap: non-tier1 '$keep' preserved"; else no "reap: non-tier1 '$keep' was WRONGLY removed"; fi
 done
 if git -C "$REPO" branch --format='%(refname:short)' 2>/dev/null | grep -qx feat-merged; then no "reap: merged branch ref not deleted"; else ok "reap: merged branch ref cleaned up"; fi
+if grep -q "wt-merged-locked" <<<"$REMAINING"; then ok "reap: LOCKED tier-1 worktree's remove failure preserved it"; else no "reap: locked worktree was wrongly removed"; fi
+[ "$REAP_RC" -ne 0 ] && ok "reap: exit code is non-zero when a requested removal genuinely failed" || no "reap: exit code should be non-zero (a locked-worktree removal failed)"
 
 # 6. CLI argument validation
 python3 "$SWEEP" >/dev/null 2>&1 && no "missing --repo should fail" || ok "missing --repo fails closed"

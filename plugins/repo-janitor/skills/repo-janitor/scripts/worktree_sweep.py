@@ -63,19 +63,34 @@ def run_git(args, cwd, timeout=30):
 
 
 def load_live_sessions():
+    """Returns (live_set, seam_failed). seam_failed distinguishes "no seam configured" (empty set is the
+    deliberate fail-safe default) from "a configured seam errored" (liveness is UNKNOWN this sweep, not
+    "nobody's live" — code-review Finding 1: silently folding a provider failure into the empty set would
+    let a live owner's worktree read as ownerless and reach tier 1)."""
     cmd = os.environ.get("REPO_JANITOR_LIVE_SESSIONS_CMD", "").strip()
     if not cmd:
-        return set()
+        return set(), False
     try:
         parts = shlex.split(cmd)
         p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
         if p.returncode != 0:
-            log(f"REPO_JANITOR_LIVE_SESSIONS_CMD failed (rc={p.returncode}) — treating as no live sessions")
-            return set()
-        return {line.strip() for line in p.stdout.splitlines() if line.strip()}
-    except Exception as e:  # noqa: BLE001 - any seam failure is fail-safe empty, never fatal
-        log(f"REPO_JANITOR_LIVE_SESSIONS_CMD errored ({e}) — treating as no live sessions")
-        return set()
+            log(f"REPO_JANITOR_LIVE_SESSIONS_CMD failed (rc={p.returncode}) — liveness UNKNOWN this sweep")
+            return set(), True
+        return {line.strip() for line in p.stdout.splitlines() if line.strip()}, False
+    except Exception as e:  # noqa: BLE001 - any seam failure is UNKNOWN, never fatal
+        log(f"REPO_JANITOR_LIVE_SESSIONS_CMD errored ({e}) — liveness UNKNOWN this sweep")
+        return set(), True
+
+
+def owner_live_status(owner, live, seam_failed):
+    """"live" | "not_live" | "unknown" for a candidate owner id (None owner -> "not_live": no owner
+    question applies). "unknown" (seam configured but failed) is treated the same as "live" everywhere
+    that matters for safety (never tier 1, never silently reaped) but is reported distinctly."""
+    if owner is None:
+        return "not_live"
+    if seam_failed:
+        return "unknown"
+    return "live" if owner in live else "not_live"
 
 
 def resolve_default_ref(repo, default_branch):
@@ -163,13 +178,18 @@ def behind_ahead_facts(repo, default_ref):
 def owner_of(path, root, depth):
     if not root:
         return None
-    root = os.path.normpath(os.path.expanduser(root))
-    p = os.path.normpath(path)
-    if p != root and not p.startswith(root + os.sep):
+    # abspath (not just normpath — code-review Finding 2): git worktree paths are always absolute, so a
+    # RELATIVE --worktree-root would never prefix-match them, silently disabling ownership (and the
+    # live-owner tier-1 veto that depends on it) for every worktree.
+    root = os.path.abspath(os.path.expanduser(root))
+    p = os.path.abspath(path)
+    try:
+        common = os.path.commonpath([root, p])
+    except ValueError:
+        return None
+    if common != root or p == root:
         return None
     rel = os.path.relpath(p, root)
-    if rel == os.curdir:
-        return None
     parts = rel.split(os.sep)
     return "/".join(parts[:depth]) if parts and parts[0] else None
 
@@ -181,36 +201,46 @@ def branch_name(entry):
     return b[len("refs/heads/"):] if b.startswith("refs/heads/") else b
 
 
+def gitcmd(*args):
+    """A displayable/copy-pasteable `git ...` command, properly quoted (code-review Finding 4 — an
+    f-string interpolation of a path/branch containing a space or shell metacharacter would print a
+    malformed or dangerous command; shlex.join over the real argv is safe to copy-paste or exec)."""
+    return shlex.join(["git", *args])
+
+
 def inspect_action(path):
-    return {"kind": "inspect", "commands": [f"git -C {path} status", f"git -C {path} log -1"]}
+    return {"kind": "inspect", "commands": [gitcmd("-C", path, "status"), gitcmd("-C", path, "log", "-1")]}
 
 
 def remove_action(repo, path, branch):
-    cmds = [f"git -C {repo} worktree remove {path}"]
+    cmds = [gitcmd("-C", repo, "worktree", "remove", path)]
     if branch:
-        cmds.append(f"git -C {repo} branch -d {branch}")
+        cmds.append(gitcmd("-C", repo, "branch", "-d", branch))
     return {"kind": "remove", "commands": cmds}
 
 
 def prune_action(repo):
-    return {"kind": "prune", "commands": [f"git -C {repo} worktree prune"]}
+    return {"kind": "prune", "commands": [gitcmd("-C", repo, "worktree", "prune")]}
 
 
-def process_repo(repo, args, live, now_ts, results, reap_plan):
+def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
     repo = os.path.abspath(os.path.expanduser(repo))
-    default_ref = resolve_default_ref(repo, args.default_branch)
 
+    # Fetch BEFORE resolving the default ref (code-review Finding 6): on a repo that has never fetched,
+    # `origin/<default-branch>` doesn't exist yet until the fetch creates it — resolving first would lock
+    # in the local-branch fallback and silently defeat --fetch's entire point on a fresh checkout.
     fetch_ok = None
     if args.fetch:
         rc, _, _ = run_git(["fetch", "origin", "--quiet"], cwd=repo, timeout=90)
         fetch_ok = (rc == 0)
         if not fetch_ok:
             log(f"--fetch requested but failed for {repo} — origin drift for its main worktree is UNKNOWN this sweep")
+    default_ref = resolve_default_ref(repo, args.default_branch)
 
     entries = parse_worktrees(repo)
     if entries is None:
         results["tier3"].append({
-            "repo": repo, "path": repo, "branch": None, "tier": 3,
+            "repo": repo, "path": repo, "branch": None, "owner": None, "tier": 3,
             "reason": "inspection needed: `git worktree list` failed for this repo",
             "action": inspect_action(repo),
         })
@@ -219,16 +249,16 @@ def process_repo(repo, args, live, now_ts, results, reap_plan):
     for e in entries:
         if e.get("bare"):
             continue  # a bare mirror has no working tree to sweep
-        process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, reap_plan)
+        process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_ok, results, reap_plan)
 
 
-def process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, reap_plan):
+def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_ok, results, reap_plan):
     path = e["path"]
     head = e.get("head")
     branch = branch_name(e)
     is_main = e["is_main"]
     owner = owner_of(path, args.worktree_root, args.owner_depth)
-    owner_live = owner is not None and owner in live
+    liveness = owner_live_status(owner, live, seam_failed)  # "live" | "not_live" | "unknown"
 
     base = {"repo": repo, "path": path, "branch": branch, "owner": owner}
 
@@ -244,7 +274,11 @@ def process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, r
     if is_main:
         behind, ahead = (None, None)
         if not (args.fetch and not fetch_ok):
-            behind, ahead = behind_ahead_facts(repo, default_ref)
+            # cwd=path (this entry's own working dir), not the raw --repo argument (code-review Finding
+            # 7): if --repo were ever pointed at a linked worktree, `path` (proven by is_main to be the
+            # TRUE primary checkout) can differ from `repo`, and rev-list's `...HEAD` means "whatever's
+            # checked out at cwd" — using the wrong cwd would silently compute drift for the wrong tree.
+            behind, ahead = behind_ahead_facts(path, default_ref)
         unknown = dirty is None or untracked is None or behind is None or ahead is None
         flagged = unknown or dirty or (untracked or 0) > 0 or (behind or 0) > 0 or (ahead or 0) > 0
         if not flagged:
@@ -274,9 +308,11 @@ def process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, r
 
     if unknown:
         reason = "inspection needed: a status/log/merge-base check failed for this worktree"
-        if owner_live:
+        if liveness == "live":
             results["tier2"].setdefault(owner, []).append(dict(base, tier=2, reason=reason, action=inspect_action(path)))
         else:
+            if liveness == "unknown":
+                reason += f" (owner '{owner}' liveness also unverifiable this sweep)"
             results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
         return
 
@@ -287,15 +323,20 @@ def process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, r
     if not (det_safe or stray_or_stale):
         return  # in-progress (unmerged+fresh) or just-merged-and-fresh — silent, re-sweeps next week
 
-    if det_safe and not owner_live:
+    if det_safe and liveness == "not_live":
         entry = dict(base, tier=1, reason=f"merged, clean, {age_days}d old — safe to reap",
                      action=remove_action(repo, path, branch))
         results["tier1"].append(entry)
-        reap_plan.append(dict(entry, kind="remove", merged=merged, dirty=dirty, untracked=untracked, age_days=age_days, head=head))
+        reap_plan.append(dict(entry, kind="remove", owner=owner, merged=merged, dirty=dirty,
+                               untracked=untracked, age_days=age_days, head=head))
         return
 
-    if det_safe and owner_live:
-        reason = f"merged, clean, {age_days}d old, but {owner} is live — confirm this is really unused before it's reaped"
+    if det_safe:
+        if liveness == "live":
+            reason = f"merged, clean, {age_days}d old, but {owner} is live — confirm this is really unused before it's reaped"
+        else:  # "unknown" — treated the same as live for safety (never reaped), reported distinctly
+            reason = (f"merged, clean, {age_days}d old, but owner '{owner}' liveness could not be verified "
+                      "this sweep — treated conservatively, not reaped")
     else:
         bits = []
         if dirty:
@@ -305,15 +346,27 @@ def process_entry(repo, e, default_ref, args, live, now_ts, fetch_ok, results, r
         if not merged and is_old:
             bits.append(f"unmerged, {age_days}d old, no one continuing it")
         reason = "; ".join(bits)
+        if liveness == "unknown":
+            reason += f" (owner '{owner}' liveness could not be verified this sweep)"
 
-    if owner_live:
+    if liveness == "live":
         results["tier2"].setdefault(owner, []).append(dict(base, tier=2, reason=reason, action=inspect_action(path)))
     else:
         results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
 
 
 def do_reap(reap_plan, dry_run, default_branch):
+    """Returns the count of ACTUAL failures (a prune/remove git command that errored) — a defensive skip
+    (state changed, owner now live) is the safety net working as intended, not a failure, and is not
+    counted (code-review Finding 5: callers need to distinguish "nothing needed doing" from "a requested
+    reap didn't happen because git said no")."""
+    # Re-poll liveness fresh, once, right before deleting anything (code-review Finding 3): the sweep's
+    # classification snapshot could be minutes old by the time --reap-tier1 actually runs; re-checking
+    # closes the (narrow but real) window where an owner started a live session in between.
+    fresh_live, fresh_seam_failed = load_live_sessions()
+
     pruned_repos = set()
+    fails = 0
     for item in reap_plan:
         if item["kind"] == "prune":
             if item["repo"] in pruned_repos:
@@ -323,12 +376,22 @@ def do_reap(reap_plan, dry_run, default_branch):
                 log(f"DRY-RUN would prune: {item['repo']}")
                 continue
             rc, _, err = run_git(["worktree", "prune"], cwd=item["repo"])
-            log(f"pruned {item['repo']}" if rc == 0 else f"prune FAILED for {item['repo']}: {err.strip()}")
+            if rc == 0:
+                log(f"pruned {item['repo']}")
+            else:
+                log(f"prune FAILED for {item['repo']}: {err.strip()}")
+                fails += 1
             continue
 
-        # kind == "remove": re-verify immediately before deleting (defense against the state changing
-        # mid-sweep — no lock is needed for a single-process weekly sweep, but the recheck is cheap).
-        repo, path, branch = item["repo"], item["path"], item["branch"]
+        # kind == "remove": re-verify EVERYTHING immediately before deleting — liveness first (an owner
+        # who's now live, or whose liveness we can no longer confirm, vetoes the reap same as at
+        # classification time), then the git-state facts (defense against the state changing mid-sweep;
+        # no lock is needed for a single-process weekly sweep, but the recheck is cheap).
+        repo, path, branch, owner = item["repo"], item["path"], item["branch"], item.get("owner")
+        liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
+        if liveness_now != "not_live":
+            log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
+            continue
         dirty, untracked = status_facts(path)
         head_now = run_git(["rev-parse", "HEAD"], cwd=path)[1].strip()
         default_ref = resolve_default_ref(repo, default_branch)
@@ -343,12 +406,14 @@ def do_reap(reap_plan, dry_run, default_branch):
         rc, _, err = run_git(["worktree", "remove", path], cwd=repo)
         if rc != 0:
             log(f"REMOVE FAILED: path={path}: {err.strip()}")
+            fails += 1
             continue
         log(f"REMOVED: path={path} branch={branch} head={item.get('head')}")
         if branch:
             rc2, _, err2 = run_git(["branch", "-d", branch], cwd=repo)
             if rc2 != 0:
                 log(f"branch delete failed (non-fatal): {branch}: {err2.strip()}")
+    return fails
 
 
 def render_text(results):
@@ -406,13 +471,13 @@ def main(argv=None):
     if args.min_age_days < 0:
         die("--min-age-days must be >= 0")
 
-    live = load_live_sessions()
+    live, seam_failed = load_live_sessions()
     now_ts = int(time.time())
     results = {"tier1": [], "tier2": {}, "tier3": []}
     reap_plan = []
 
     for repo in args.repo:
-        process_repo(repo, args, live, now_ts, results, reap_plan)
+        process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan)
 
     if args.json:
         print(json.dumps(results, indent=2, sort_keys=True))
@@ -420,7 +485,10 @@ def main(argv=None):
         render_text(results)
 
     if args.reap_tier1:
-        do_reap(reap_plan, args.dry_run, args.default_branch)
+        fails = do_reap(reap_plan, args.dry_run, args.default_branch)
+        if fails:
+            log(f"{fails} reap action(s) FAILED — exiting non-zero (see FAILED lines above)")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
