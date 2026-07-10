@@ -282,8 +282,9 @@ fi
 #     the explicit-publish boundary (default mode never resolves/emits [recipes.viewer]; --publish does, and
 #     fails closed with zero stdout leakage if [recipes.viewer] itself is unconfigured), and a static grep for
 #     hardcoded instance values in the skill's own shipped files — behavior the JSON/syntax checks can't cover.
-#     Runs when the resolver or its smoke changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/visualize-results/scripts/(resolve_visualization_recipe|visualize_results_smoke)\.sh$'; then
+#     Runs on ANY change under the skill dir (not just the scripts), since the instance-leak grep scans
+#     SKILL.md/references/ too — a leak added there alone must not bypass the guard (code-review F4).
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/visualize-results/'; then
   VR_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/visualize-results/scripts/visualize_results_smoke.sh"
   if [ -f "$VR_SMOKE" ]; then
     echo "[checks] visualize-results recipe-resolution smoke" >&2

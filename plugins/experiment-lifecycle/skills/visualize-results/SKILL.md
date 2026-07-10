@@ -6,12 +6,11 @@ description: >-
   configured visualization-preview recipe, create or iterate on the page + gallery entry, run its
   prescribed build/browser checks, and return the stable preview URL. Keep iterating locally — no review,
   no production deploy — until the researcher gives an EXPLICIT "publish" or "ship" instruction, which
-  alone transitions to the configured gated landing path and releases the preview claim. Use when asked to
-  "visualize this," "make plots for these results," "add this to the visualizations," "iterate on this
-  page," or "publish/ship the visualization." Distinct from `run-experiment`'s own close-time dashboard
-  viewer leg (#347): that leg is automatic, one-shot, and runs from a locked brief at experiment close; this
-  skill is the later, repeatable, researcher-driven editorial pass, and it live-resolves the instance's
-  recipe rather than reading a frozen snapshot.
+  alone transitions to the gated landing path and releases the preview claim. Use when asked to "visualize
+  this," "make plots for these results," "add this to the visualizations," "iterate on this page," or
+  "publish/ship the visualization." Distinct from `run-experiment`'s own close-time viewer publish leg
+  (#347), which is automatic/one-shot from a locked brief; this is the later, repeatable, researcher-driven
+  pass, live-resolving the instance recipe rather than reading a frozen snapshot.
 ---
 
 # Visualizing results (the researcher-driven editorial loop)

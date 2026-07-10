@@ -93,6 +93,38 @@ else
     || err "incomplete recipe failed but without the expected message: $(cat "$T/err4")"
 fi
 
+# 4b. Field-format validation: a bare 'owner' repo (no slash) and an absolute path are both rejected —
+#     not just presence-checked (code-review F3).
+cat > "$T/malformed-fields.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner"
+path = "/etc/passwd"
+git_ref = "abc1234"
+EOF
+if AAR_PROFILE="$T/malformed-fields.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4b"; then
+  err "resolver accepted a repo without an owner/repo slash"
+else
+  ok "a non-owner/repo 'repo' value is rejected, not just presence-checked"
+fi
+
+# 4c. A kind=uri value containing shell metacharacters is rejected outright (code-review F2) —
+#     the safe charset, not caller-side quoting, is what prevents injection if this output is ever
+#     naively sourced.
+cat > "$T/uri-metachars.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "https://example.com/x;touch pwned"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+EOF
+if AAR_PROFILE="$T/uri-metachars.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4c"; then
+  err "resolver accepted a URI containing a shell metacharacter"
+else
+  ok "a URI containing shell metacharacters is rejected by the safe charset"
+fi
+
 # 5. Explicit publish boundary: --publish on the complete profile ALSO resolves [recipes.viewer].
 out5=$(AAR_PROFILE="$T/complete.toml" bash "$RESOLVE" --publish 2>"$T/err5")
 rc5=$?

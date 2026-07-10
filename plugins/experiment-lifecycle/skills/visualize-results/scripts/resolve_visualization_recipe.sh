@@ -4,7 +4,10 @@
 # Resolve the instance's typed visualization recipe pointer(s) from the aar-profile instance profile
 # (schema v1, [recipes.<name>] — see plugins/experiment-lifecycle/skills/*/references/SCHEMA.md).
 # Fails CLOSED with a clear BLOCK message on stderr and a non-zero exit — never guesses a repo, host,
-# port, or worktree. On success, prints resolved fields as shell-parseable KEY=VALUE lines on stdout.
+# port, or worktree. On success, prints resolved fields as KEY=VALUE lines on stdout, each value
+# restricted to a conservative safe charset (see the validators below) — READ these lines (e.g. one
+# `grep '^KEY='` / `cut` at a time), never `eval` or `source` this output: a value's charset is
+# restricted to prevent shell-metacharacter injection, but this script does not shell-quote for you.
 #
 # Default (preview) mode resolves ONLY [recipes.visualization_preview] — the local iteration recipe
 # (preview claim commands, stable local worktree/URL, page-style pattern). It never reads
@@ -74,6 +77,8 @@ if not path:
     block("no instance profile found (looked: " + ", ".join(looked) + ")")
 
 data = load_profile(path)
+if not isinstance(data, dict):
+    block(f"instance profile at {path} does not parse to a table at its root")
 
 sv = data.get("schema_version")
 if sv is None:
@@ -82,14 +87,24 @@ if sv != 1:
     block(f"instance profile at {path} declares schema_version={sv!r}; this product understands only 1 (refuse-unknown-MAJOR)")
 
 import re
-_SAFE_REF = re.compile(r"^[A-Za-z0-9._/-]+$")
+# Each restricted to a conservative charset that EXCLUDES every shell metacharacter (no eval/source
+# safety net is assumed downstream — see the header note). Segment-level checks (below) additionally
+# reject a bare ".." path-traversal segment, which the charset alone would not catch.
+_SEG = r"[A-Za-z0-9._-]+"
+_SAFE_OWNER_REPO = re.compile(rf"^{_SEG}/{_SEG}$")           # exactly one '/'; non-empty on both sides
+_SAFE_REL_PATH = re.compile(rf"^{_SEG}(?:/{_SEG})*$")         # no leading '/', no empty segments
 _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SAFE_HEXDIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
-_SAFE_URI = re.compile(r"^(r2|s3|https)://\S+$")
+_SAFE_URI = re.compile(rf"^(?:r2|s3|https)://{_SEG}(?:/{_SEG})*$")   # same safe charset, no query/fragment
+
+def _no_traversal(v):
+    return ".." not in v.split("/")
 
 def resolve_recipe(name, required):
-    recipes = data.get("recipes") or {}
-    table = recipes.get(name)
+    recipes = data.get("recipes")
+    if recipes is not None and not isinstance(recipes, dict):
+        block(f"recipes must be a table in the instance profile at {path}")
+    table = (recipes or {}).get(name)
     if not required and table is None:
         return None
     if table is None:
@@ -101,17 +116,17 @@ def resolve_recipe(name, required):
         block(f"recipes.{name}.kind must be 'repo' or 'uri' (got: {kind!r})")
     out = {"KIND": kind}
     if kind == "repo":
-        for field, rx, label in (("repo", _SAFE_REF, "repo"), ("path", _SAFE_REF, "path"), ("git_ref", _SAFE_SHA, "git_ref")):
+        for field, rx in (("repo", _SAFE_OWNER_REPO), ("path", _SAFE_REL_PATH), ("git_ref", _SAFE_SHA)):
             v = table.get(field)
             if not isinstance(v, str) or not v:
                 block(f"recipes.{name} is missing required field '{field}' for kind=repo")
-            if not rx.match(v) or ".." in v.split("/"):
+            if not rx.match(v) or not _no_traversal(v):
                 block(f"recipes.{name}.{field} has an invalid value")
             out[field.upper()] = v
     else:
         v = table.get("uri")
-        if not isinstance(v, str) or not _SAFE_URI.match(v):
-            block(f"recipes.{name}.uri is missing or has an unsupported scheme (must be r2://, s3://, or https://)")
+        if not isinstance(v, str) or not _SAFE_URI.match(v) or not _no_traversal(v):
+            block(f"recipes.{name}.uri is missing, has an unsupported scheme (must be r2://, s3://, or https://), or contains characters outside the safe charset")
         out["URI"] = v
         d = table.get("sha256")
         if not isinstance(d, str) or not _SAFE_HEXDIGEST.match(d):
