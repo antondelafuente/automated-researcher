@@ -68,6 +68,11 @@ evidence** ladder — each rung read by a foreign model family you're too invest
   Run BOTH layers on all three data surfaces — training data, eval inputs, and the model-generated
   eval rollouts. (Motivated by a generated-replay
   truncation bug — 1160/6457 rows truncated mid-CoT — that a 2-sample self-smoke missed.)
+  **Always pass `audit_data.py --label-field`** when the surface being audited has an added/edited
+  subset within a much larger unchanged base (ablations, add-back waves, targeted edits) — without it,
+  the default stratified sample can end up almost entirely base rows and miss the minority subset the
+  gate is meant to check (it prints a runtime WARN when `--label-field` is omitted, but don't rely on
+  catching that after the fact).
 - **`audit_experiment.sh <exp>`** → `AUDIT.md` — the finished result's **EVIDENCE**, AT CLOSE:
   reproducibility, claim-vs-evidence, confounds/validity, data sanity, conclusions-vs-postdictions,
   records self-sufficiency, honest bounds.

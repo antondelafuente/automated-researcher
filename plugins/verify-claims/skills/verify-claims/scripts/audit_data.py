@@ -17,6 +17,14 @@ Usage:
       [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — auditing an added/edited subset within a larger unchanged base (ablations, add-back
+waves, targeted edits): ALWAYS pass --label-field pointing at whatever column distinguishes the
+subset (e.g. an arm/added-vs-base flag). Without it, the per-source/per-label strata and the evenly-
+spaced random pass are the only things pulling non-extreme rows into the sample, and on a small
+minority inside a much larger majority they can miss the minority entirely — you can end up auditing
+a "clean" sample that is 100% base rows and 0% added rows. --label-field guarantees per-label
+coverage regardless of how small the minority is.
 """
 import argparse, hashlib, json, statistics, sys
 
@@ -57,7 +65,9 @@ def main():
     ap.add_argument("--cot", action="store_true", help="CoT invariants: finish_reason==stop when present, closed </think>, non-empty answer")
     ap.add_argument("--require-finish-reason", action="store_true", help="In --cot mode, hard-fail rows missing finish_reason")
     ap.add_argument("--source-field", default="source")
-    ap.add_argument("--label-field", default=None, help="arm/label field for balance + per-arm sampling")
+    ap.add_argument("--label-field", default=None, help="arm/label field for balance + per-arm sampling — "
+                     "always pass this when auditing an added/edited subset within a larger unchanged base, "
+                     "or the default sample can oversample the unchanged majority and miss the subset entirely")
     ap.add_argument("--text-field", default=None)
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
@@ -104,6 +114,12 @@ def main():
     rep["source_balance"] = balance(a.source_field)
     if a.label_field:
         rep["label_balance"] = balance(a.label_field)
+    else:
+        rep["warnings"].append(
+            "no --label-field set: if this file has an added/edited minority subset inside a larger "
+            "unchanged base (ablation, add-back wave, targeted edit), the default sample can miss it "
+            "entirely — pass --label-field pointing at whatever column distinguishes the subset"
+        )
 
     open_think = []
     if a.cot:
