@@ -48,4 +48,15 @@ jobs:
             exit 0
           fi
           mapfile -t changed_paths <<< "$diff_output"
-          bash .aar-ci/checks.sh "${changed_paths[@]}"
+
+          # Run the TRUSTED base-ref copy of checks.sh, not the PR head's own copy: otherwise a PR could
+          # weaken checks.sh in the same diff and trivially pass its own required check. The script still
+          # evaluates the actual PR-head working tree (we don't check out anything else) -- only the
+          # validation LOGIC comes from the base commit, mirroring the same base-ref-materialization
+          # pattern already used for the Codex review guidance in review-on-pr.yml.
+          if ! git show "$BASE_SHA:.aar-ci/checks.sh" > /tmp/trusted_checks.sh 2>/dev/null; then
+            echo "::error::could not materialize trusted .aar-ci/checks.sh from base $BASE_SHA"
+            exit 1
+          fi
+          chmod +x /tmp/trusted_checks.sh
+          bash /tmp/trusted_checks.sh "${changed_paths[@]}"
