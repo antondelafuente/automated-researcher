@@ -84,8 +84,17 @@ jobs:
             local n="$1" head="$2"
             local short="${head:0:8}"
 
+            # This function runs inside `if ! handle_conflicted ...; then` below, which disables
+            # errexit for its duration -- an unchecked read failure here would fall through to the
+            # empty-string branch below and be indistinguishable from "no marker exists", triggering
+            # a duplicate resolution dispatch. Check the read's exit status explicitly and skip this
+            # PR for this tick on failure; the reconciler re-runs in ~10 minutes, so doing nothing is
+            # the safe direction. Only a successful-but-empty read means "no marker".
             local last
-            last=$(last_marker_comment "$n" "$CONFLICT_MARKER")
+            if ! last=$(last_marker_comment "$n" "$CONFLICT_MARKER"); then
+              echo "::warning::PR #$n: reading conflict-marker history failed; skipping this tick"
+              return 1
+            fi
 
             local round=1
             if [ "$last" != "null" ] && [ -n "$last" ]; then
@@ -118,18 +127,28 @@ jobs:
             local n="$1" head="$2"
             local short="${head:0:8}"
 
+            # Same errexit-disabled-by-`if !`-caller hazard as handle_conflicted above: an unchecked
+            # read failure here would look like "not reviewed" or "no marker" and trigger a duplicate
+            # review-actuator dispatch. Check each read's exit status explicitly and skip this PR for
+            # this tick on failure rather than treating it as absence.
             local reviewed
-            reviewed=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
+            if ! reviewed=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
               add // [] | any(.commit_id == $head and ((.user.login | canon_login) == "codex-engineer[bot]"))
-            ')
+            '); then
+              echo "::warning::PR #$n: reading review history failed; skipping this tick"
+              return 1
+            fi
             if [ "$reviewed" = "true" ]; then
               echo "PR #$n: head $short already has a completed codex review; nothing to do"
               return
             fi
 
             local last
-            last=$(last_marker_comment "$n" "$REVIEW_MARKER")
+            if ! last=$(last_marker_comment "$n" "$REVIEW_MARKER"); then
+              echo "::warning::PR #$n: reading review-marker history failed; skipping this tick"
+              return 1
+            fi
             if [ "$last" != "null" ] && [ -n "$last" ]; then
               local prev_sha prev_ts elapsed
               prev_sha=$(jq -r '.body' <<<"$last" | grep -oE 'head [0-9a-f]{8}' | head -1 | awk '{print $2}')
