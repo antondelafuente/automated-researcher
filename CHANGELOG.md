@@ -1,3 +1,16 @@
+- experiment-lifecycle 0.3.42 (2026-07-11): document an explicit canonical checklist for multi-wave eval
+  fan-out in `run-experiment` SKILL.md's Step 3 (Drive it) section (#337). Incident: an 18-checkpoint (9 arms
+  x 2 seeds) training fan-out finished at staggered times across two locations (box + a relaunched-on-pod
+  subset after an OOM); eval waves were batched reactively ("whichever checkpoints are ready now, queue
+  them") across 2 eval pods over several waves — waves 2/3/4 covered 17 of the 18 new checkpoints, but 5
+  specific (arm, seed) pairs were never queued into ANY wave, an artifact of tracking "what just finished"
+  rather than "what's left of the full list"; caught only when a pooled per-arm number came up with one
+  seed's data missing (fixed before close, no method impact). Fix: a new bullet next to the existing
+  SUCCESS-aware done-check guidance (#357) says to maintain an explicit canonical list of every expected
+  (arm, seed) — or (unit, replicate) — combination up front for any fan-out spread across multiple
+  waves/pods, and before believing an eval is done, diff what's checked off against the FULL expected set,
+  not just confirm the last wave's queue is empty — generalizing the existing per-row/per-arm completeness
+  gotcha to across-the-whole-fan-out completeness.
 - experiment-lifecycle 0.3.41 (2026-07-11): add a kill-or-verify step to `run-experiment` SKILL.md's Execution
   discipline section for mid-run pod reassignment (#334). Incident: a pod that finished its original `--arms`
   queue auto-continued to the next item in that baked-in list while the same item had just been reassigned to
