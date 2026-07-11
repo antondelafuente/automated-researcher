@@ -24,7 +24,7 @@ boundary). It remains **agentic at both levels**: agents *do* the research (this
 **The agents ARE the engineers.** Every Claude Code / Codex instance is an engineer on the team (with its own
 GitHub identity): they author changes, **cross-family-review** each other's PRs (a foreign family is the
 safeguard — "AARs are peers" realized in the build), **approve**, and **merge**. The human is the
-**staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`needs-shaping → ready`), oversees
+**staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`needs-design → ready`), oversees
 and can intervene — but is **not a per-PR gate**. This **mirrors the research pipeline** at the direction level:
 design *with the human* on what to build, execution *by the agents*. (The full engineer model + the
 merge-safety properties live with the pipeline in agentic-engineering.)
@@ -102,6 +102,26 @@ agentic-engineering#43).
   product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
   the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
   `address-review.yml` runs use the same escalation convention on the PR it's already working.
+- **Dispatcher playbook** — the operations a human/dispatcher uses to drive this pipeline day to day (each
+  mechanic is defined above; this is the consolidated at-a-glance list):
+  - Dispatch/re-dispatch an Issue: add `ready` (or remove it and re-add after ~5s so the label event
+    re-fires), or `workflow_dispatch` with the issue number.
+  - Trigger an addressing round on a PR carrying review findings: comment `@claude-code-engineer` plus
+    guidance on the PR (allowlisted authors only — see "Re-entry / retry" above).
+  - Re-run checks/review after a base-branch fix lands (e.g. main moved past a flake or a shared-file bug):
+    `gh pr update-branch <n>` to bring the PR branch current, which fires `synchronize` and re-runs both
+    `checks.yml` and `review-on-pr.yml`.
+  - Unblock a `needs-dispatcher` Issue or PR: answer the blocking question in a comment, remove
+    `needs-dispatcher`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
+- **Gate configuration** (state it here so it doesn't drift or get "fixed" back by someone who doesn't know
+  it's deliberate — all three verified live 2026-07-11): `checks` (from `checks.yml`) is a required status
+  check on `main`; `allow_auto_merge` is enabled repo-wide (what lets `implement-on-ready.yml`'s auto-merge
+  step succeed); branch protection requires one approving review, satisfied by the codex engineer bot's
+  native `APPROVE` from `review-on-pr.yml` — a human review is never the gate in this flow.
+- **Reviewer pin rationale:** the Codex reviewer in `review-on-pr.yml` is pinned to `model: gpt-5.6-sol`,
+  `effort: medium` — a deliberate choice, not a default left untouched. Bump the model or effort only in
+  `review-on-pr.yml` itself, as its own conscious change (automated-researcher#394), never as a side effect
+  of an unrelated edit.
 - **Secrets this flow needs** (instance-provisioned, never checked in): `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `CLAUDE_APP_ID`, `CLAUDE_APP_PRIVATE_KEY`, `CODEX_APP_ID`, `CODEX_APP_PRIVATE_KEY`.
   Until all six are set, `ready` events fail loudly in the Actions tab (a missing-secret error at
@@ -205,22 +225,25 @@ guidance. AGENTS.md holds the issue contract, not local workflow paths.
   dispatcher session naming it); the precise boundary of which `ready` Issues get acted on with less
   oversight (especially by blast radius) is undecided, and will be revisited if/when a standing
   auto-handler is actually proposed.
-- **`needs-design`** — default resting state for a newly filed feedback Issue; awaiting a researcher
-  triage pass before it can be flipped to `ready`.
-- **`needs-shaping`** — a direction, too vague to start; needs scoping into `ready` first, through a
-  conversation with the researcher (which may produce a few `ready` tickets).
+- **`needs-design`** — default resting state for every newly filed Issue: awaiting a researcher triage/shaping
+  pass before it can be flipped to `ready`. This covers both a plain untriaged item and a direction too vague
+  to start, scoped into `ready` (possibly a few `ready` tickets) through a conversation with the researcher —
+  one resting label, not two. (The former `needs-shaping` label is retired, folded in here: same disposition,
+  one name. Backlog swept 2026-07-11 — no open Issue should carry the old label.)
 - **`blocked`** — decided but gated on a prerequisite; carries a `blocked-by: #N` body line. (When the
   blocker closes, triage clears the label so it's re-dispositioned, usually to `ready`.)
 - **`parked`** — real but deliberately not-now; revisit later. (Distinct from `wontfix` = never.)
 - **`other`** — doesn't fit the others; a recurring `other` is the signal to evolve the vocabulary.
 
-**`needs-shaping → ready` is the researcher's transition, in every lane.** An agent records the flip only on
+**`needs-design → ready` is the researcher's transition, in every lane.** An agent records the flip only on
 the back of an actual researcher conversation, and the flip must **cite it** — a comment on the issue
 summarizing/linking the shaping discussion. An agent asked to *implement* an issue never flips its disposition
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
-close) is that lane's own concern to build out.
+close) is that lane's own concern to build out. Agents filing Issues (including via `file-feedback`, see
+#405) never self-apply `ready` — an Issue an agent files always lands at `needs-design`, the same resting
+state as a human-filed one; only the researcher's explicit flip moves it to `ready`.
 
 **Invariant:** every open Issue is EITHER unlabeled (= untriaged, awaiting triage — distinct from
-`needs-shaping`) OR carries **exactly one** disposition. Enforcement flags only an Issue with two-or-more.
+`needs-design`) OR carries **exactly one** disposition. Enforcement flags only an Issue with two-or-more.
 <!-- DISPOSITIONS:END -->
