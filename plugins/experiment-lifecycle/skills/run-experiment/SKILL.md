@@ -442,6 +442,17 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
   autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
   human before launching.)
+- **Pre-flight the judge key's balance before it runs dry, not after (#354).** A metered-API driver (an LLM judge,
+  batch scoring) discovers depletion only via a runtime error burst if nobody checks first — a key that starts a
+  judging pass at ~$0 balance, or one that gets topped up but at the run's real burn rate only buys 1-2 hours, both
+  fail the same way: a wall of `Insufficient credits` errors mid-run, a killed process, pruning the handful of
+  null-valued rows written during the failure window, and a designer round-trip to resume. Before **every**
+  (re)launch of such a driver — the initial launch AND every resume after a kill/top-up/key-swap, since the incident
+  hit both — fetch the provider's current balance (however your cost_policy recipe says to) and compare it against
+  the estimated remaining spend (rows-left * this run's own observed $/row) once that estimate is worth checking
+  (e.g. >$5). `judge_balance_check.sh` in this skill's `scripts/` does the threshold/comparison arithmetic so it
+  doesn't get re-derived per run — it takes the balance and rate numbers you already have and tells you OK or
+  BLOCKED; it has no opinion on the provider or how you fetched the balance.
 
 ## Gotchas
 
