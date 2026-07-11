@@ -12,10 +12,22 @@ trap cleanup EXIT
 fail=0; err(){ echo "  SMOKE-FAIL: $*" >&2; fail=1; }
 
 mkdir -p "$V/.claude" "$V/proj" || { echo "  SMOKE-FAIL: mkdir failed in $V" >&2; exit 1; }
-# seed the minimum to run `claude plugin` headlessly (creds only; everything else virgin)
-cp "$HOME/.claude/.credentials.json" "$V/.claude/.credentials.json" 2>/dev/null || err "no credentials to seed"
-cp "$HOME/.git-credentials" "$V/.git-credentials" 2>/dev/null || true
-python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude.json')));json.dump({k:s[k] for k in ('oauthAccount','userID','hasCompletedOnboarding','firstStartTime') if k in s},open('$V/.claude.json','w'))" 2>/dev/null || err "could not seed .claude.json"
+# seed the minimum to run `claude plugin` headlessly (creds only; everything else virgin).
+# Prefer the box's local OAuth creds (box runs keep working unchanged); when absent, fall back to
+# ANTHROPIC_API_KEY (GitHub runners have no OAuth creds but do have this repo secret) -- it's already
+# in this process's environment, so it carries through the `HOME="$V" claude plugin ...` invocations
+# below unchanged (they only override HOME, not the rest of the env). Fail closed when NEITHER is
+# available: this smoke must never silently no-op.
+if [ -f "$HOME/.claude/.credentials.json" ]; then
+  cp "$HOME/.claude/.credentials.json" "$V/.claude/.credentials.json" || err "could not seed credentials.json"
+  cp "$HOME/.git-credentials" "$V/.git-credentials" 2>/dev/null || true
+  python3 -c "import json,os;s=json.load(open(os.path.expanduser('~/.claude.json')));json.dump({k:s[k] for k in ('oauthAccount','userID','hasCompletedOnboarding','firstStartTime') if k in s},open('$V/.claude.json','w'))" 2>/dev/null || err "could not seed .claude.json"
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  # API-key auth needs no credentials.json on disk; just enough .claude.json to skip onboarding.
+  python3 -c "import json;json.dump({'hasCompletedOnboarding': True}, open('$V/.claude.json','w'))" 2>/dev/null || err "could not seed .claude.json"
+else
+  err "no credentials to seed"
+fi
 
 cd "$V/proj" || { echo "  SMOKE-FAIL: cd into fake HOME failed" >&2; exit 1; }
 # marketplace NAME comes from the manifest, not the dir basename (a worktree/checkout may not match it)

@@ -4,8 +4,11 @@ name: checks
 # Actions CI at all before #378, so nothing ran .aar-ci/checks.sh as a trusted gate — the implement-on-ready
 # workflow's auto-merge could otherwise merge a PR that never ran the deterministic check suite. This
 # workflow only CALLS checks.sh (unmodified); it does not change what the checks do. Runs for every PR,
-# human or agent authored — the same deterministic gate every PR should pass. No secrets, no App token, no
-# write permissions: ambient read-only GITHUB_TOKEN only.
+# human or agent authored — the same deterministic gate every PR should pass. No App token, no write
+# permissions: ambient read-only GITHUB_TOKEN only. It does pass the existing ANTHROPIC_API_KEY repo
+# secret (already used by implement-on-ready) through to .aar-ci/checks.sh, so fake_home_smoke.sh can run
+# `claude plugin` headlessly on a GitHub runner, which has no local OAuth creds to seed (#396) — same
+# accepted residual risk as the implementor run (AGENTS.md).
 
 on:
   pull_request:
@@ -33,6 +36,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           # A plain `mapfile -t arr < <(cmd)` does NOT propagate cmd's exit status through `set -e` (process
