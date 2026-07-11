@@ -46,12 +46,11 @@ gh issue list -R "$FEEDBACK_PRODUCT_REPO" --state open --limit 100 --search "<te
 
 If an Issue exists, add a recurrence comment instead of duplicating it (check it's still live first — see
 Etiquette). If not, file a new Issue with a type label
-(`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly one disposition label. The default
-disposition for a newly filed Issue is `needs-design` — it enters the same triage funnel as everything
-else and awaits a researcher triage pass. Self-assign a different disposition (`needs-shaping`, `blocked`,
-`parked`, or `other`) only when it is unambiguous; never self-assign `ready` — that disposition is applied
-by the researcher (or on their explicit instruction) after triage, never by the filing agent. Read
-`references/DISPOSITIONS.md` for the label contract.
+(`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly `needs-design` as the disposition
+label — nothing else. Never self-assign `ready`, `blocked`, `parked`, or `other`: those are
+researcher/triage-applied statuses, not filing-time choices. If you believe the filing is blocked on a
+prerequisite or better parked than actioned, say so in the issue body (e.g. a `blocked-by: #N` line or a
+one-line note) and let the triage pass act on it. Read `references/DISPOSITIONS.md` for the label contract.
 
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
 
@@ -113,4 +112,4 @@ researcher's clearance.
   triage queue, not a notebook: the researcher (never the filing agent) applies `ready` after triage, and on
   a deployment with fast auto-implementation a `ready` issue can close within the hour. If it is closed or
   in flight, file a new small ticket linking the old one instead: a comment there is a dead letter the
-  implementor never sees. Shaping comments on an open `needs-shaping` issue remain the intended flow.
+  implementor never sees. Shaping comments on an open `needs-design` issue remain the intended flow.

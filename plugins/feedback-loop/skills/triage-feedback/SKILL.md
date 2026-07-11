@@ -42,7 +42,7 @@ more disposition labels to one.
 Classify feedback:
 
 - `ready`: actionable now, no unresolved design.
-- `needs-shaping`: too vague to start.
+- `needs-design`: default resting state — untriaged, or too vague to start.
 - `blocked`: gated on a prerequisite; include `blocked-by: #N`.
 - `parked`: real but not now.
 - `other`: taxonomy gap.
