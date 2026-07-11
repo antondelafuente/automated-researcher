@@ -87,10 +87,11 @@ above, gated on **that same progress principle, not raw compute activity** — a
 producing, and gating on "busy" alone would refresh it forever, defeating the expiry backstop (#428 review). For
 every pod id in the run-supervision record's `lease_pod_ids` (`run_supervision_record.sh status <run-id>`),
 first resolve the pod id to its lease nonce — leases are addressed by nonce, never by pod id directly —
-`bash pod_lease.sh find-by-pod <pod-id>` (empty output means no matching non-terminal lease; skip it, don't guess
-a nonce), then:
+the `gpu-job` plugin's `scripts/pod_lease.sh find-by-pod <pod-id>` (empty output means no matching non-terminal
+lease; skip it, don't guess a nonce), then:
 - **positive-progress evidence this tick** (the stage-advancing / bytes-growing / log-heartbeat signal above,
-  actually observed — not merely busy) → `bash pod_lease.sh refresh <nonce> --expiry-min <N>`; if the lease is
+  actually observed — not merely busy) → the `gpu-job` plugin's `scripts/pod_lease.sh refresh <nonce>
+  --expiry-min <N>`; if the lease is
   still `provisional` (never enriched — e.g. a recovered/adopted orphan) and you've confirmed SSH reachability,
   `enrich` it instead (`--ssh <host:port> --expiry-min <N>`) so it stops carrying its short intent-window
   deadline.
