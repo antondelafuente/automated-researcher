@@ -101,8 +101,10 @@ then:
   (`reason` + a bounded `quiet_until` horizon, same shape as `LOOK_AGAIN.md` below) written only because the
   brief or a human explicitly told you to expect an extended silent stretch (e.g. a known long non-logging
   compile/index stage); never self-declare one just because a tick came up empty, that's the over-strict-gating
-  failure re-created through the back door. A marker whose `quiet_until` has passed counts as absent → falls
-  through to the **neither** case below: do NOT refresh, surface loudly on the next wake.
+  failure re-created through the back door. While `quiet_until` is still in the future, refresh/enrich the
+  lease the same way as the positive-progress case above, citing the marker in place of a progress
+  observation. A marker whose `quiet_until` has passed counts as absent → falls through to the **neither**
+  case below: do NOT refresh, surface loudly on the next wake.
 - **neither** (busy-but-not-progressing, hung, BLOCKED, or simply quiet with no active marker) → do **NOT**
   refresh. Don't let this pass silently: treat it like a look-again-deadline miss — surface it loudly on the
   next wake (diagnose, notify the human) instead of quietly trusting the lease's existing expiry to eventually
