@@ -194,6 +194,7 @@ jobs:
           output-schema: |
             {
               "type": "object",
+              "additionalProperties": false,
               "required": ["verdict", "findings"],
               "properties": {
                 "verdict": { "enum": ["approve", "changes_requested"] },
@@ -201,11 +202,12 @@ jobs:
                   "type": "array",
                   "items": {
                     "type": "object",
-                    "required": ["severity", "summary"],
+                    "additionalProperties": false,
+                    "required": ["severity", "summary", "evidence"],
                     "properties": {
                       "severity": { "enum": ["P0", "P1"] },
                       "summary": { "type": "string" },
-                      "evidence": { "type": "string" }
+                      "evidence": { "type": ["string", "null"] }
                     }
                   }
                 }
