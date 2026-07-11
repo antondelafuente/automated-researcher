@@ -24,7 +24,9 @@ ask RUNPOD_API_KEY "RunPod API key (runpod.io -> Settings -> API Keys)"
 SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY:-$(cat ~/.ssh/id_ed25519.pub 2>/dev/null || true)}
 ask SSH_PUBLIC_KEY "SSH public key to inject into pods"
 ask SSH_KEY_FILE "Matching private key path" "$HOME/.ssh/id_ed25519"
-ask GPU_TYPE "Default GPU type" "NVIDIA H200"
+# No GPU_TYPE/GPU_TYPES default written here (#351): leaving both unset lets deploy_pod.py's own
+# ample, non-premium fallback list govern, instead of a fresh install silently pinning to one
+# scarce premium SKU. Set GPU_TYPES/GPU_TYPE yourself (env or config) to state an actual need.
 ask DISK_GB "Default container disk GB (big models need big disks)" "220"
 
 # Optional: artifact store = any rclone remote ("r2:mybucket", "s3:bucket", "gdrive:dir").
