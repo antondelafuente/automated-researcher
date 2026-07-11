@@ -6,6 +6,10 @@
 #   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
 #   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present + secret scan.
 #   - note         (anything else):            deterministic secret scan only.
+# Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
+# staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
+# BLOCK regardless of KIND — a committed symlink's target is only ever meaningful on the machine, or worse the
+# specific session, that created it.
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
 #
@@ -206,6 +210,31 @@ secret_scan() {
   [ -z "$hits" ] || { echo "secret-value pattern found in staged content (values redacted):" >&2
     printf '%s\n' "$hits" | sed "s#^$WT/#  #" >&2; die "$KIND contains secret-value patterns"; }
 }
+symlink_scan() {
+  # Deterministic check for staged git symlinks (mode 120000) in the EXACT set git has STAGED in the commit
+  # worktree $WT (same `git diff --cached` staged set secret_scan walks) — dies (fail-closed) on ANY hit.
+  # MUST be called AFTER stage_worktree. Runs for EVERY kind (unlike secret_scan, which skips 'experiment'):
+  # a registry record has no legitimate use for a symlink, whichever gate it's under — the intent is always
+  # to copy the referenced file's real bytes, not a path.
+  #
+  # A committed symlink's target is only ever meaningful on the machine (absolute host path) or, worse, the
+  # SPECIFIC SESSION (a path into that session's ephemeral /tmp scratchpad) that created it — it breaks the
+  # registry's "reproduce from this dir alone" durability the moment that machine/session goes away, and it's
+  # invisible to a normal file-content review (only `git ls-files -s` / `find -type l` surface the mode bit).
+  # Rather than resolve each target and judge whether it happens to currently resolve inside the repo (fragile:
+  # relative vs absolute, dangling, or a target that today lives in-repo by accident), reject ALL staged
+  # symlinks wholesale — simpler, and a real copy is never the wrong choice for a registry record.
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: symlink_scan called before stage_worktree (no staged worktree)"
+  local hits="" meta mode path
+  # --no-renames + raw mode line keeps the parse to one <meta>\0<path>\0 pair per entry (a rename/copy status
+  # would otherwise emit a second path and desync the read loop). New-mode is the raw line's 2nd field.
+  while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
+    mode="${meta#* }"; mode="${mode%% *}"
+    [ "$mode" = "120000" ] && hits="${hits}${hits:+$'\n'}$path"
+  done < <(git -C "$WT" diff --cached --raw -z --no-renames --)
+  [ -z "$hits" ] || { echo "staged symlink(s) found (a registry record must contain real file content, not a symlink):" >&2
+    printf '%s\n' "$hits" | sed 's/^/  /' >&2; die "$KIND contains staged symlink(s)"; }
+}
 # Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved).
 scan_if_needed() { case "$KIND" in note|design-stage) secret_scan ;; esac; }
 gate_note() {
@@ -308,11 +337,13 @@ stage_worktree() {
 }
 
 if [ "$DRY_RUN" = 1 ]; then
-  # Stage off the LOCAL origin/$BASE_BRANCH (no fetch, no tokens) and run the SAME staged secret scan a real
-  # run would — so --dry-run validates the ACTUAL gate, not an approximation. Worktree is trap-cleaned on exit.
+  # Stage off the LOCAL origin/$BASE_BRANCH (no fetch, no tokens) and run the SAME staged secret + symlink
+  # scans a real run would — so --dry-run validates the ACTUAL gate, not an approximation. Worktree is
+  # trap-cleaned on exit.
   stage_worktree
+  symlink_scan
   scan_if_needed
-  note "--dry-run: classified=$KIND, gate PASSED (staged secret scan clean); stopping before any push."
+  note "--dry-run: classified=$KIND, gate PASSED (staged secret/symlink scan clean); stopping before any push."
   exit 0
 fi
 
@@ -357,12 +388,13 @@ GIT_AUTHOR="${!gitauthor_var:-}"
 [[ "$GIT_AUTHOR" =~ ^.+\ \<[^@[:space:]]+@[^@[:space:]]+\>$ ]] || die "$gitauthor_var is malformed (expected 'Name <email>'): $GIT_AUTHOR"
 GA_NAME="${GIT_AUTHOR% <*}"; GA_EMAIL="${GIT_AUTHOR#*<}"; GA_EMAIL="${GA_EMAIL%>}"
 
-# ---- stage in the DEDICATED worktree off the FRESH base, then secret-scan the EXACT staged set ----
-# (never disturbs the shared tree). Fetch first so the PR is based on latest origin/$BASE_BRANCH AND the scan
-# runs against that same fetched base (the scanned set can't diverge from the committed set).
+# ---- stage in the DEDICATED worktree off the FRESH base, then scan the EXACT staged set for symlinks + secrets ----
+# (never disturbs the shared tree). Fetch first so the PR is based on latest origin/$BASE_BRANCH AND the scans
+# run against that same fetched base (the scanned set can't diverge from the committed set).
 cd "$REPO_ROOT"
 git fetch origin --quiet
 stage_worktree
+symlink_scan
 scan_if_needed
 # Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
 GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \

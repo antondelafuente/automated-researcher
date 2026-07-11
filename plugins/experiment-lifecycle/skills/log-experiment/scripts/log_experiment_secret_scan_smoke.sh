@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306) and
-# check_excluded_files (#331).
+# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306),
+# symlink_scan (#416), and check_excluded_files (#331).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
-# runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
-# fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
+# runs the secret + symlink scans on the STAGED set, then stops BEFORE any push/token/network), against
+# throwaway git fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
 #   - staged-set scoping: a pre-existing merged file (even one that trips a pattern) does NOT block a log that
 #     leaves it unchanged (it stages nothing); a NEWLY added / MODIFIED file carrying a real key DOES block.
 #   - sk- boundary guard: a long hyphenated identifier merely CONTAINING `sk-` is not a false-positive, while
 #     a genuine `sk-…` key (after a non-word char) still blocks.
 # Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
 # no scan bypass), and an empty delta fails on "nothing to commit".
+#
+# #416: also asserts symlink_scan blocks ANY staged symlink — one pointing outside the repo (the original
+# incident: a design-stage PR committing a git symlink into another session's /tmp scratchpad) AND one whose
+# relative target happens to resolve inside the repo (wholesale rejection, not a resolve-and-judge heuristic)
+# — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
 #
 # Also asserts the #331 excluded-files gate: a file present in the staged dir but dropped by an ignore rule
 # is always PRINTED, logging still PASSES when that drop is not falsely claimed committed, and logging BLOCKS
@@ -118,7 +123,25 @@ if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NO
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 8: a new gitignored file with no committed-claim -> PASS, but PRINTED as excluded (#331)"
+echo "[smoke] case 8: NEW staged symlink pointing OUTSIDE the repo -> BLOCK (the #416 incident)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note8.md"
+ln -s /etc/passwd "$T/reg/note/bad_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink pointing outside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "symlink outside the repo blocked";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 9: NEW staged symlink whose RELATIVE target resolves INSIDE the repo -> still BLOCK (wholesale reject, not resolve-and-judge)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note9.md"
+ln -s note9.md "$T/reg/note/rel_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink resolving inside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "in-repo-resolving symlink still blocked (wholesale reject)";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 10: a new gitignored file with no committed-claim -> PASS, but PRINTED as excluded (#331)"
 T=$(mktemp -d); make_repo_ignored "$T"
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'a fresh note, no artifact claims\n' > "$T/reg/note/RESULTS.md"
@@ -128,7 +151,7 @@ if run_dry "$T/reg/note"; then
 else fail "clean case BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 9: RESULTS.md verbatim-claims the dropped file is committed -> BLOCK (the #331 bug)"
+echo "[smoke] case 11: RESULTS.md verbatim-claims the dropped file is committed -> BLOCK (the #331 bug)"
 T=$(mktemp -d); make_repo_ignored "$T"
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
@@ -137,7 +160,7 @@ if run_dry "$T/reg/note"; then fail "false 'committed' claim on a dropped file w
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 10: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed -> BLOCK"
+echo "[smoke] case 12: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed -> BLOCK"
 T=$(mktemp -d); make_repo_ignored "$T"
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'no artifact claims here\n' > "$T/reg/note/RESULTS.md"
@@ -147,7 +170,7 @@ if run_dry "$T/reg/note"; then fail "false 'committed' claim in ARTIFACT_MANIFES
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 11: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording -> PASS (no false-positive)"
+echo "[smoke] case 13: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording -> PASS (no false-positive)"
 T=$(mktemp -d); make_repo_ignored "$T"
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\n' > "$T/reg/note/RESULTS.md"
@@ -155,9 +178,9 @@ if run_dry "$T/reg/note"; then pass "filename mention without 'committed' wordin
   fail "blocked despite no committed-claim wording: $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 12: an unchanged pre-existing tracked file -> PASS, NOT reported as excluded (no false-positive)"
+echo "[smoke] case 14: an unchanged pre-existing tracked file -> PASS, NOT reported as excluded (no false-positive)"
 T=$(mktemp -d); make_repo "$T"
-printf 'a fresh note\n' > "$T/reg/note/note12.md"
+printf 'a fresh note\n' > "$T/reg/note/note14.md"
 if run_dry "$T/reg/note"; then
   case "$LAST_ERR" in *"excluded from staging"*) fail "spurious excluded-files warning on an unchanged pre-existing file: $LAST_ERR";;
     *) pass "pre-existing unchanged file (page.html) not misreported as excluded";; esac
