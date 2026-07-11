@@ -256,7 +256,28 @@ path>)` samples straight from Tinker's hosted model state and never touches the 
 default to direct sampling rather than reaching for it only once congestion is already observed. Before trusting
 either serving stack (a mid-run switch or a from-the-start default), run an anchor-reproduction guard: re-generate
 a known-reference subject with byte-identical decoding config on the stack you're about to use, and confirm its
-rollouts CI-overlap historical values before trusting it for the real run.
+rollouts CI-overlap historical values before trusting it for the real run. A local adapter file is still genuinely
+needed for two remaining cases — vLLM serving of models too large for direct Tinker-side sampling, and offline
+artifact archival — see the archive-download guidance immediately below (#330) for those.
+
+**Tinker checkpoint-archive downloads, for the remaining cases above where a local adapter file is genuinely
+required (#330): timeout AND concurrency guidance differ by code path.** Archive creation server-side can take up
+to ~1hr even for a modest rank-32 LoRA adapter (observed 29-55min for a 3B-base adapter) — a plain
+`tinker.ServiceClient()` in a custom `download_adapter.py`-style script uses the SDK's shorter default HTTP
+timeout and raises `tinker.APITimeoutError` well before archive creation finishes, despite the SDK's own poll-loop
+heartbeat implying long waits are expected. Fix: pass a generous explicit timeout —
+`tinker.ServiceClient(timeout=3600)`. Once that fix is in place, multiple adapter downloads *within the same run*
+don't add self-inflicted blocking beyond what the export queue already imposes (confirmed 4/4 succeeding
+concurrently after the fix, and separately 20/20 small-corpus adapters in ~5-10min total run concurrently — real
+variance, not evidence the long wait is gone in general) — but this is orthogonal to the cross-session
+account-level queue congestion described above: if another session is exporting concurrently on the same
+`TINKER_API_KEY`, you can still hit the 20-40+ min stall regardless of how many downloads your own run launches at
+once, which is itself a reason to keep archive-download usage to the remaining cases above rather than the
+default generation path. The `tinker` CLI's own `checkpoint download` command is a DIFFERENT code path with no
+equivalent override available (no flag/env var): its internal retry loop has a hardcoded 300s cumulative wait
+budget, and launching several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4
+timed out, twice in a row) while the identical downloads run ONE AT A TIME each succeeded well within it. For the
+CLI path specifically: prefer serial, not concurrent, when fetching more than one adapter.
 
 **On-compute agent delegate (RARE):** drive a named agent in the compute's tmux via the send-keys protocol (clear input
 first, send text, separate Enter; long msgs via a literal heredoc). If it loses auth, finish auth-free with a shell
@@ -471,6 +492,17 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
   autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
   human before launching.)
+- **Pre-flight the judge key's balance before it runs dry, not after (#354).** A metered-API driver (an LLM judge,
+  batch scoring) discovers depletion only via a runtime error burst if nobody checks first — a key that starts a
+  judging pass at ~$0 balance, or one that gets topped up but at the run's real burn rate only buys 1-2 hours, both
+  fail the same way: a wall of `Insufficient credits` errors mid-run, a killed process, pruning the handful of
+  null-valued rows written during the failure window, and a designer round-trip to resume. Before **every**
+  (re)launch of such a driver — the initial launch AND every resume after a kill/top-up/key-swap, since the incident
+  hit both — fetch the provider's current balance (however your cost_policy recipe says to) and compare it against
+  the estimated remaining spend (rows-left * this run's own observed $/row) once that estimate is worth checking
+  (e.g. >$5). `judge_balance_check.sh` in this skill's `scripts/` does the threshold/comparison arithmetic so it
+  doesn't get re-derived per run — it takes the balance and rate numbers you already have and tells you OK or
+  BLOCKED; it has no opinion on the provider or how you fetched the balance.
 
 ## Gotchas
 

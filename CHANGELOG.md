@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.36 (2026-07-11) / gpu-job 0.2.10 (2026-07-11): make the `gpu-job` pod-lease refresh an
+- experiment-lifecycle 0.3.38 (2026-07-11) / gpu-job 0.2.10 (2026-07-11): make the `gpu-job` pod-lease refresh an
   automatic self-wake heartbeat instead of an operator-remembered step (#293). Incident: a ~15h experiment lost
   two GPU pods mid-work to their own set-once deadlines — a recovered-orphan pod whose lease still held its
   short, never-enriched acquire-window expiry (reaped ~1.5h in), and the eval pod's watchdog-era keepalive,
@@ -15,6 +15,37 @@
   `gpu-job` SKILL.md's lease section now points at `run-experiment`'s tick as the concrete owner of that refresh,
   and `design-experiment`'s `CHECKLIST_TEMPLATE.md` self-wake / resume-contract gates name the heartbeat as part
   of their evidence bar.
+- experiment-lifecycle 0.3.37 (2026-07-11): document the Tinker checkpoint-archive-download timeout/concurrency
+  footgun in `run-experiment` SKILL.md's Step 3, scoped as guidance for the remaining cases where a local
+  adapter file is genuinely needed (vLLM serving of large models, or offline artifact archival) now that #353
+  makes direct Tinker-side sampling the default for small-model generation (#330). Archive creation can take up
+  to ~1hr server-side even for a modest rank-32 LoRA adapter (29-55min observed on a 3B base) — a custom
+  `download_adapter.py`-style script using a plain `tinker.ServiceClient()` hits the SDK's shorter default HTTP
+  timeout and raises `tinker.APITimeoutError` before archive creation finishes. Fix: an explicit generous client
+  timeout (`tinker.ServiceClient(timeout=3600)`), confirmed working across multiple downloads. With that fix in
+  place, multiple adapter downloads within the same run don't add self-inflicted blocking beyond what the export
+  queue already imposes (4/4 succeeded concurrently after the fix, and separately 20/20 small-corpus adapters
+  completed in ~5-10min total run concurrently — real variance, not evidence the long wait is gone generally) —
+  but that's orthogonal to the cross-session account-level queue congestion #353 documents: a concurrent session
+  exporting on the same `TINKER_API_KEY` can still cause the 20-40+ min stall regardless of your own run's
+  concurrency. The `tinker` CLI's own `checkpoint download` command is a distinct code path with no equivalent
+  timeout override (no flag/env var): its retry loop has a hardcoded 300s cumulative wait budget, and launching
+  several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4 timed out, twice in
+  a row) while the identical downloads run one at a time each succeeded well within it — for that CLI path
+  specifically, prefer serial over concurrent when fetching more than one adapter.
+- experiment-lifecycle 0.3.36 (2026-07-11): add a pre-flight balance-vs-estimated-spend check for long
+  LLM-judge/metered-API drivers (#354). Incident: a dedicated OpenRouter judge key ran out of credits
+  mid-judging-run TWICE in the same experiment close — once from ~$0 balance (no check before launch), and
+  again after a top-up that lasted only 1-2 hours at the run's real burn rate. Each depletion was caught only
+  via a burst of runtime `JUDGE_CALL_FAILED ... Insufficient credits` errors, requiring a killed process, a
+  prune of the null-valued rows written during the failure window, and a designer round-trip to resume, twice.
+  `run-experiment` SKILL.md's Execution discipline section gains a bullet directing executors to check the
+  provider's balance against the estimated remaining spend (rows-left * the run's own observed $/row) before
+  EVERY (re)launch of such a driver, not just the first — the second depletion happened on a resume. A new
+  `judge_balance_check.sh` (+ smoke) in `run-experiment`'s `scripts/` does the threshold/comparison arithmetic
+  (skip below a cost floor, default $5; OK if balance covers the estimate; BLOCKED otherwise) so it doesn't get
+  re-derived per run — it takes numbers the executor already has and has no opinion on the provider or how the
+  balance was fetched (that stays instance-owned, via the cost_policy recipe).
 - experiment-lifecycle 0.3.35 (2026-07-11): block `log-experiment.sh` on a silently gitignored pinned file
   (#340). Incident: `log-experiment.sh` staged a registry dir with a plain `git add`, which silently honors
   the research repo's `.gitignore`; a small pinned file (e.g. an instrument the DESIGN.md declares
