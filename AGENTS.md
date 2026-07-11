@@ -85,7 +85,10 @@ agentic-engineering#43).
   <!-- CODEX-REVIEW-GUIDANCE:END -->
 - **Accepted residual risk:** the implementor agent executes repo-controlled code (tests, hooks) while
   holding its API key and a short-lived write-scoped GitHub token. Acceptable on this private,
-  single-author repo; revisit before adding outside collaborators.
+  single-author repo; revisit before adding outside collaborators. `checks.yml`'s required-status job
+  carries the same residual risk on the same basis: it passes the `ANTHROPIC_API_KEY` repo secret to
+  `.aar-ci/checks.sh` (read-only `GITHUB_TOKEN`, no write permissions) so `fake_home_smoke.sh` can run
+  `claude plugin` headlessly on a GitHub runner (#396).
 - **Re-entry / retry:** re-dispatch an issue by removing and re-adding `ready`, or via
   `workflow_dispatch`. Post-review fixes ride `address-review.yml`'s mention flow instead: an allowlisted
   `@claude-code-engineer` comment on the PR re-dispatches the pinned CLI onto the same PR branch
