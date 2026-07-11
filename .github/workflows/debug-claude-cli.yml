@@ -1,0 +1,47 @@
+# TEMPORARY DIAGNOSTIC — never merges. Probes whether the raw Claude Code CLI works on a GitHub
+# runner, to discriminate "runner environment breaks claude" vs "claude-code-action's SDK wrapper
+# breaks claude" (implement-on-ready crashes at SDK launch; all local repros pass — see
+# automated-researcher#384 and the runs cited there). Delete branch + PR after reading results.
+name: debug-claude-cli
+on:
+  pull_request:
+    paths: [".github/workflows/debug-claude-cli.yml"]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+      - name: Install pinned Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          command -v claude && claude --version
+      - name: "Probe 1: plain -p"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          out=$(claude -p "Say ok and nothing else." --model claude-sonnet-5 2>&1); rc=$?
+          echo "PROBE1_EXIT=$rc"
+          echo "$out" | tail -20
+          exit 0
+      - name: "Probe 2: SDK-style stream-json + json-schema (the implement-on-ready invocation)"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          out=$(echo '{"type":"user","message":{"role":"user","content":"Say ok."}}' | claude -p --input-format stream-json --output-format stream-json --verbose --model claude-sonnet-5 --allowedTools Bash,Edit,Write,Read,Grep,Glob --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}}}' 2>&1); rc=$?
+          echo "PROBE2_EXIT=$rc"
+          echo "$out" | tail -25
+          exit 0
+      - name: "Probe 3: debug-logged plain run (stderr verbatim)"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_LOG: debug
+        run: |
+          set +e
+          claude -p "Say ok." --model claude-sonnet-5 --debug 2>&1 | tail -40
+          echo "PROBE3_EXIT=$?"
+          exit 0
