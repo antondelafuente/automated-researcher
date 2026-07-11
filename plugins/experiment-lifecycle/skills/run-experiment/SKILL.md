@@ -217,6 +217,20 @@ per PID or over the array) instead of `wait` — never `wait`, bare or by PID, o
 store in seconds), run eval cells on a SECOND unit *during* training — eval does the base-anchor cells first, then waits
 for the adapter and poll-resumes into arm cells.
 
+**Small-model LoRA generation: default to direct Tinker-side sampling over download-to-vLLM, not only as a
+congestion fallback (#353).** Tinker's checkpoint-archive-export step (pulling a trained LoRA adapter local for
+vLLM serving) shares one account-level export queue across every session on the same `TINKER_API_KEY` — two
+concurrent sessions exporting around the same time can each stall 20-40+ min on a step that normally finishes in
+minutes, with neither script at fault (confirmed independently by two sessions hitting the identical symptom on
+their own unrelated adapters). `tinker.ServiceClient().create_sampling_client(model_path=<tinker:// sampler
+path>)` samples straight from Tinker's hosted model state and never touches the export queue at all — for a
+3600-rollout subject on Llama-3.2-3B, direct sampling took ~5-10 min total versus the export step alone costing
+20-40+ min before generation could even start. For single-digit-B-parameter LoRA fine-tunes trained via Tinker,
+default to direct sampling rather than reaching for it only once congestion is already observed. Before trusting
+either serving stack (a mid-run switch or a from-the-start default), run an anchor-reproduction guard: re-generate
+a known-reference subject with byte-identical decoding config on the stack you're about to use, and confirm its
+rollouts CI-overlap historical values before trusting it for the real run.
+
 **On-compute agent delegate (RARE):** drive a named agent in the compute's tmux via the send-keys protocol (clear input
 first, send text, separate Enter; long msgs via a literal heredoc). If it loses auth, finish auth-free with a shell
 driver instead.

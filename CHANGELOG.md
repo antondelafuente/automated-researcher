@@ -1,3 +1,17 @@
+- experiment-lifecycle 0.3.34 (2026-07-11): default small-model LoRA generation to direct Tinker-side sampling
+  over download-to-vLLM, not only as a congestion fallback (#353). Incident: two concurrent AAR sessions
+  sharing one `TINKER_API_KEY` both requested a checkpoint-archive-export (pulling a trained LoRA adapter
+  local for vLLM serving) around the same time; Tinker's archive-creation queue is congested at the account
+  level across all sessions on that key, so exports that normally finish in minutes each sat unresolved for
+  20-40+ min, independently confirmed by both sessions on their own unrelated adapters (~1.5-2h of stalled
+  generation total). Switching to `tinker.ServiceClient().create_sampling_client(model_path=<tinker://
+  sampler path>)`, which samples directly from Tinker's hosted model state and never needs a local adapter
+  file, dropped a 3600-rollout Llama-3.2-3B generation to ~5-10 min total versus the export step alone
+  costing 20-40+ min before generation could even start. `run-experiment` SKILL.md's Step 3 now recommends
+  direct sampling as the DEFAULT generation path for single-digit-B-parameter Tinker LoRA fine-tunes (not
+  only a fallback once congestion is observed), gated on an anchor-reproduction guard: re-generate a
+  known-reference subject with byte-identical decoding config on the serving stack in use and confirm
+  CI-overlap against historical values before trusting it.
 - experiment-lifecycle 0.3.33 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
   in `run-experiment` SKILL.md, alongside the two existing kill-rule footguns in the same Step 3 section
   (#415). Incident: a sample-fanout driver launched each sampling job with `nohup ... & disown`, then closed
