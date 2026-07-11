@@ -48,7 +48,7 @@ If an Issue exists, add a recurrence comment instead of duplicating it (check it
 Etiquette). If not, file a new Issue with a type label
 (`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly one disposition label. The default
 disposition for a newly filed Issue is `needs-design` — it enters the same triage funnel as everything
-else and awaits a researcher triage pass. Self-assign a different disposition (`needs-shaping`, `blocked`,
+else and awaits a researcher triage pass. Self-assign a different disposition (`blocked`,
 `parked`, or `other`) only when it is unambiguous; never self-assign `ready` — that disposition is applied
 by the researcher (or on their explicit instruction) after triage, never by the filing agent. Read
 `references/DISPOSITIONS.md` for the label contract.
@@ -113,4 +113,4 @@ researcher's clearance.
   triage queue, not a notebook: the researcher (never the filing agent) applies `ready` after triage, and on
   a deployment with fast auto-implementation a `ready` issue can close within the hour. If it is closed or
   in flight, file a new small ticket linking the old one instead: a comment there is a dead letter the
-  implementor never sees. Shaping comments on an open `needs-shaping` issue remain the intended flow.
+  implementor never sees. Shaping comments on an open `needs-design` issue remain the intended flow.
