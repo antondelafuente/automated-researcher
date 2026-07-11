@@ -63,6 +63,12 @@ jobs:
       - name: Checkout base branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
+          # Explicit ref, not the default: without it, a `pull_request` trigger checks out the PR's
+          # untrusted MERGE ref (actions/checkout's default for that event), not the base branch this
+          # comment claims -- and the resolve step below sources canonical-login.sh from this checkout,
+          # in this same job whose later "Run codex-action" step receives OPENAI_API_KEY. base.ref on
+          # `pull_request`; this workflow's own ref (its default-branch invocation) on workflow_dispatch.
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
           persist-credentials: false
 
       # Resolves PR_NUMBER/HEAD_SHA/BASE_SHA/BASE_REF for BOTH trigger paths. For `pull_request`, these

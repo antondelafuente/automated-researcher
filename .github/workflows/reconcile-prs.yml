@@ -144,7 +144,13 @@ jobs:
             fi
 
             echo "PR #$n: mergeable with no completed review at head $short; re-firing review-on-pr.yml via workflow_dispatch"
-            gh workflow run review-on-pr.yml --repo "$REPO" -f "pr_number=$n"
+            # `handle_mergeable` runs inside `if ! handle_mergeable ...; then` below, which disables
+            # errexit for the duration of this function call -- a failing `gh workflow run` would NOT
+            # abort the function on its own. Check its exit status explicitly and bail out BEFORE
+            # posting the marker comment, so the marker is only ever written after a successful dispatch
+            # (an unchecked failure here would still record the in-flight marker and suppress retries for
+            # up to REVIEW_GRACE_SECONDS despite no review having actually been launched).
+            gh workflow run review-on-pr.yml --repo "$REPO" -f "pr_number=$n" || return 1
             gh pr comment "$n" --repo "$REPO" --body "$REVIEW_MARKER (head $short)." >/dev/null
           }
 
