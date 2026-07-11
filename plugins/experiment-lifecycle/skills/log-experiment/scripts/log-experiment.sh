@@ -248,6 +248,49 @@ WT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in clea
 cleanup() { [ -n "$WT" ] && git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
             [ "$CREATED_BRANCH" = 1 ] && git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+# check_excluded_files: `git add -- $REL` silently drops any path an ignore rule matches (by design — heavy
+# artifacts stay on R2), but nothing surfaced WHICH files that was, and a close audit verifies prose, not the
+# staged set (#331). Compare the files physically present in the staged worktree copy of $REL against the set
+# git actually staged; PRINT any drop, and BLOCK if the dropped file's name is claimed "committed" verbatim in
+# RESULTS.md / ARTIFACT_MANIFEST.md — the exact silent-corruption pattern from #331 (a curated sample dropped
+# by a registry/**/*.jsonl ignore rule while the audited docs said it was committed). MUST be called after
+# `git add` has staged $REL in $WT (present-vs-staged only means something once staging has happened).
+check_excluded_files() {
+  local base="$WT/$REL"
+  local -a present=() staged=() excluded=()
+  local f rel p s found
+  while IFS= read -r -d '' f; do
+    rel="${f#"$base"/}"
+    present+=("$rel")
+  done < <(find "$base" -type f -print0)
+  # `ls-files` (the INDEX), not `diff --cached` (only the DELTA): a file already tracked+unchanged from the
+  # base tree stages no delta but is very much part of the resulting commit, so it must not read as "excluded".
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$REL"/}"
+    staged+=("$rel")
+  done < <(git -C "$WT" ls-files -- "$REL")
+  for p in "${present[@]}"; do
+    found=0
+    for s in "${staged[@]}"; do [ "$p" = "$s" ] && { found=1; break; }; done
+    [ "$found" = 1 ] || excluded+=("$p")
+  done
+  [ "${#excluded[@]}" -gt 0 ] || return 0
+  note "excluded from staging (present in $REL but not staged — an ignore rule matched):"
+  for f in "${excluded[@]}"; do note "  - $f"; done
+  # BLOCK only if a claims file states an excluded filename is committed: basename match (fixed-string, so a
+  # filename with regex metachars can't misfire) + 'committ' wording on the SAME line.
+  local claim_file bn hit
+  for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
+    [ -f "$claim_file" ] || continue
+    for f in "${excluded[@]}"; do
+      bn="$(basename "$f")"
+      if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE 'committ')"; then
+        die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+      fi
+    done
+  done
+}
 stage_worktree() {
   git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
   git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1 \
@@ -261,6 +304,7 @@ stage_worktree() {
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
   if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
+  check_excluded_files
 }
 
 if [ "$DRY_RUN" = 1 ]; then

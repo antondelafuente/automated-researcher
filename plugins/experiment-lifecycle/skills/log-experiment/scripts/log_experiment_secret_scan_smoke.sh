@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306).
+# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306) and
+# check_excluded_files (#331).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
 # runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
@@ -10,6 +11,11 @@
 #     a genuine `sk-…` key (after a non-word char) still blocks.
 # Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
 # no scan bypass), and an empty delta fails on "nothing to commit".
+#
+# Also asserts the #331 excluded-files gate: a file present in the staged dir but dropped by an ignore rule
+# is always PRINTED, logging still PASSES when that drop is not falsely claimed committed, and logging BLOCKS
+# when RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed (the exact silent
+# prose/tree divergence #331 caught a day late).
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +41,21 @@ make_repo() {
   printf '%s\n' "$FP_LINE" > "$root/reg/note/page.html"
   git -C "$root" add -A; git -C "$root" commit -qm base
   git -C "$root" update-ref refs/remotes/origin/main main   # local stand-in for origin/main
+  git -C "$root" checkout -q -b change/x
+}
+
+# make_repo_ignored <dir>: like make_repo, but origin/main ALREADY carries a `reg/**/*.jsonl` ignore rule (the
+# rule must be on the BASE the worktree is created from — a rule added only on change/x would never make it
+# into the staged worktree's checked-out tree).
+make_repo_ignored() {
+  local root="$1"
+  git init -q -b main "$root"
+  git -C "$root" config user.email smoke@test; git -C "$root" config user.name smoke
+  printf 'reg/**/*.jsonl\n' > "$root/.gitignore"
+  mkdir -p "$root/reg/note"
+  printf '%s\n' "$FP_LINE" > "$root/reg/note/page.html"
+  git -C "$root" add -A; git -C "$root" commit -qm base
+  git -C "$root" update-ref refs/remotes/origin/main main
   git -C "$root" checkout -q -b change/x
 }
 
@@ -95,6 +116,52 @@ T=$(mktemp -d); make_repo "$T"
 printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), staged as a new file
 if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 8: a new gitignored file with no committed-claim -> PASS, but PRINTED as excluded (#331)"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'a fresh note, no artifact claims\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then
+  case "$LAST_ERR" in *"excluded from staging"*"rollout_samples.jsonl"*) pass "excluded drop printed, log still passes";;
+    *) fail "logged but the exclusion was not printed: $LAST_ERR";; esac
+else fail "clean case BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 9: RESULTS.md verbatim-claims the dropped file is committed -> BLOCK (the #331 bug)"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "false 'committed' claim on a dropped file was NOT blocked"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "false committed-claim blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 10: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed -> BLOCK"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'no artifact claims here\n' > "$T/reg/note/RESULTS.md"
+printf '| rollout_samples.jsonl | committed | 67 rows |\n' > "$T/reg/note/ARTIFACT_MANIFEST.md"
+if run_dry "$T/reg/note"; then fail "false 'committed' claim in ARTIFACT_MANIFEST.md was NOT blocked"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "ARTIFACT_MANIFEST.md false claim blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 11: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording -> PASS (no false-positive)"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then pass "filename mention without 'committed' wording does not false-positive block"; else
+  fail "blocked despite no committed-claim wording: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 12: an unchanged pre-existing tracked file -> PASS, NOT reported as excluded (no false-positive)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh note\n' > "$T/reg/note/note12.md"
+if run_dry "$T/reg/note"; then
+  case "$LAST_ERR" in *"excluded from staging"*) fail "spurious excluded-files warning on an unchanged pre-existing file: $LAST_ERR";;
+    *) pass "pre-existing unchanged file (page.html) not misreported as excluded";; esac
+else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
