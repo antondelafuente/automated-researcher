@@ -224,6 +224,18 @@ strip any row lacking a valid success marker (a real label/score, not `null` / a
 a downstream discrepancy. Run it detached (`setsid nohup`),
 then watch with a background until-loop SSH-checking the done-marker (plus the self-wake you already armed).
 
+**Multi-wave eval fan-out over many checkpoints needs an explicit canonical checklist, not reactive batching
+(#337).** Batching eval waves reactively — queuing whichever checkpoints/arms/seeds are ready right now — has
+no built-in signal that something was skipped: it only ever adds to what's present, never checks against what's
+supposed to exist. When N known checkpoints/arms/seeds land in an unpredictable order across multiple compute
+units/pods over multiple waves, maintain an explicit canonical list of every expected (arm, seed) — or (unit,
+replicate) — combination up front, and before believing the eval is done, diff what's actually been judged
+against that FULL expected set — not just confirm the last wave's queue is empty (a real incident: an
+18-checkpoint (9 arms x 2 seeds) fan-out across 2 eval pods over several waves silently never queued 5
+specific (arm, seed) pairs into ANY wave, caught only when a pooled per-arm number came up with one seed's
+data missing). This generalizes the SUCCESS-aware done-check above from per-row/per-arm completeness to
+across-the-whole-fan-out completeness.
+
 **Use the `gpu-job` helpers** — its driver library owns the foot-guns (GPU-stage handoffs that wait for the prior runner
 and poll until VRAM frees; port/serve waits; artifact-exists checks; liveness; safe process-tree kills; LoRA merges
 through a mandatory diff gate). Hand-rolling these is how validity bugs breed. **Two kill rules, three incidents each:**
