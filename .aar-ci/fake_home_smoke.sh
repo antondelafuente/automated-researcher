@@ -6,6 +6,9 @@ set -uo pipefail
 REPO=${1:?marketplace source repo}; PLUG=${2:?plugin name}
 # validate the plugin name before it ever touches a path or CLI arg (no traversal/injection)
 [[ "$PLUG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "  SMOKE-FAIL: invalid plugin name: $PLUG" >&2; exit 1; }
+# fail fast and unambiguously if the CLI itself is missing, rather than letting every invocation below
+# die at command-not-found with its output swallowed by >/dev/null (automated-researcher#407)
+command -v claude >/dev/null 2>&1 || { echo "  SMOKE-FAIL: claude CLI not installed" >&2; exit 1; }
 V=$(mktemp -d "${TMPDIR:-/tmp}/smoke.XXXXXX") || { echo "  SMOKE-FAIL: mktemp failed" >&2; exit 1; }   # private dir, independent of $PLUG
 cleanup(){ rm -rf "$V"; }
 trap cleanup EXIT
@@ -32,8 +35,11 @@ fi
 cd "$V/proj" || { echo "  SMOKE-FAIL: cd into fake HOME failed" >&2; exit 1; }
 # marketplace NAME comes from the manifest, not the dir basename (a worktree/checkout may not match it)
 MKT=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['name'])" "$REPO/.claude-plugin/marketplace.json" 2>/dev/null) || err "could not read marketplace name"
-HOME="$V" claude plugin marketplace add "$REPO" >/dev/null 2>&1 || err "marketplace add failed"
-HOME="$V" claude plugin install "$PLUG@${MKT:-$(basename "$REPO")}" >/dev/null 2>&1 || err "plugin install failed: $PLUG"
+# capture combined output to a log instead of >/dev/null so a real failure's cause is visible in
+# SMOKE-FAIL rather than requiring a separate debugging round (automated-researcher#407)
+MKTLOG="$V/marketplace-add.log"; INSTLOG="$V/plugin-install.log"
+HOME="$V" claude plugin marketplace add "$REPO" >"$MKTLOG" 2>&1 || err "marketplace add failed: $(tail -n 5 "$MKTLOG")"
+HOME="$V" claude plugin install "$PLUG@${MKT:-$(basename "$REPO")}" >"$INSTLOG" 2>&1 || err "plugin install failed: $PLUG: $(tail -n 5 "$INSTLOG")"
 
 # installed cache for this plugin (highest version)
 PDIR=$(find "$V/.claude/plugins/cache" -maxdepth 3 -type d -path "*/$PLUG/*" 2>/dev/null | sort -V | tail -1)
