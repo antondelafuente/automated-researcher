@@ -45,20 +45,29 @@ the cross-family Codex review natively. This is proven here first; a copy for `a
 explicit follow-up work, not part of this capability (see automated-researcher#378 /
 agentic-engineering#43).
 
-- **Flow:** researcher (or an engineer bot) labels an Issue `ready` → `implement-on-ready.yml` runs
-  `anthropics/claude-code-action` (execution-tier `claude-sonnet-5`) against the issue, working on
-  `agent/issue-<n>`, and opens a PR with `Closes #<n>` → `review-on-pr.yml` runs `openai/codex-action`
-  against the diff and submits a native APPROVE/REQUEST_CHANGES review as the codex engineer bot →
-  existing branch protection (required opposite-family approval) + this workflow's auto-merge step close
-  the loop. `checks.yml` runs `.aar-ci/checks.sh` as a required status check on every PR, agent or human
-  authored — this is the same deterministic gate `ship-change`'s `wf.sh finish` runs by hand, now wired as
-  a trusted GitHub check instead of relying on the implementor's own honor.
+- **Flow:** researcher (or an engineer bot) labels an Issue `ready` → `implement-on-ready.yml` runs the
+  pinned Claude Code CLI (execution-tier `claude-sonnet-5`) against the issue, working on `agent/issue-<n>`,
+  and opens a PR with `Closes #<n>` → `review-on-pr.yml` runs `openai/codex-action` against the diff and
+  submits a native APPROVE/REQUEST_CHANGES review as the codex engineer bot → on `changes_requested`, an
+  allowlisted mention comment on the PR fires `address-review.yml`, which re-dispatches the pinned CLI onto
+  the SAME PR branch to address the findings and pushes, which fires `synchronize` and re-runs
+  `review-on-pr.yml` automatically → existing branch protection (required opposite-family approval) + the
+  implement workflow's auto-merge step close the loop once a round comes back clean. `checks.yml` runs
+  `.aar-ci/checks.sh` as a required status check on every PR, agent or human authored — this is the same
+  deterministic gate `ship-change`'s `wf.sh finish` runs by hand, now wired as a trusted GitHub check instead
+  of relying on the implementor's own honor.
 - **Authorization predicate:** a privileged implement run requires `issues: labeled` with
   `label.name == 'ready'` AND the labeling actor allowlisted AND (re-verified fresh, before any token is
   minted) the issue's current author AND label state — allowlist = the researcher (`antondelafuente`) +
   the two engineer bots (`claude-code-engineer[bot]`, `codex-engineer[bot]`), hard-coded in the workflow.
   `workflow_dispatch` (issue-number input, actor allowlisted, same fresh re-verification) is the only other
-  entry path — needed because label events don't fire retroactively.
+  entry path — needed because label events don't fire retroactively. A privileged **address-review** run
+  requires `issue_comment: created` on a PR (not a plain Issue) mentioning the claude engineer bot, the
+  comment author allowlisted (same allowlist), AND (re-verified fresh, before any token is minted, via
+  `gh pr view`) the PR is same-repo (no forks) and its author is exactly the claude engineer bot — the same
+  spoof-resistant author predicate `review-on-pr.yml` uses. `issue_comment` workflows always run the
+  workflow file from the default branch regardless of the PR's own content, which is what makes checking
+  out the PR's head branch for the agent's working tree safe here (unlike `pull_request_target`).
 - **Concurrency is per-issue dedup, not a worker pool.** `implement-on-ready.yml`'s
   `concurrency: group: implement-issue-<n>` only prevents a duplicate run on the *same* issue. There is
   **no global cap** in v1 — GitHub Actions `concurrency` groups don't provide one. The spend guard is the
@@ -78,14 +87,18 @@ agentic-engineering#43).
   holding its API key and a short-lived write-scoped GitHub token. Acceptable on this private,
   single-author repo; revisit before adding outside collaborators.
 - **Re-entry / retry:** re-dispatch an issue by removing and re-adding `ready`, or via
-  `workflow_dispatch`. Post-review fixes ride the standard `claude-code-action` `@claude`-mention flow on
-  the PR (already allowlist-gated by the action itself), not a separate workflow.
+  `workflow_dispatch`. Post-review fixes ride `address-review.yml`'s mention flow instead: an allowlisted
+  `@claude-code-engineer` comment on the PR re-dispatches the pinned CLI onto the same PR branch
+  (`.github/prompts/address-review.md`), gated to the researcher + the two engineer bots, same as
+  implement-on-ready's allowlist. It never invokes the review itself — pushing a fix fires `synchronize`,
+  which `review-on-pr.yml`'s own `cancel-in-progress` already handles.
 - **Escalation (`needs-dispatcher`):** if the implementor is blocked, or a review finding conflicts with
   what the issue specifies, it labels the PR (or the issue, if no PR yet) `needs-dispatcher` and comments
   what's needed, then stops that thread of work. This defines only the label convention — the notifier
   that surfaces `needs-dispatcher` to a session or the researcher is instance wiring, not part of this
   product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
   the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
+  `address-review.yml` runs use the same escalation convention on the PR it's already working.
 - **Secrets this flow needs** (instance-provisioned, never checked in): `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `CLAUDE_APP_ID`, `CLAUDE_APP_PRIVATE_KEY`, `CODEX_APP_ID`, `CODEX_APP_PRIVATE_KEY`.
   Until all six are set, `ready` events fail loudly in the Actions tab (a missing-secret error at
