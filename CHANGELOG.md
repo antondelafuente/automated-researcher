@@ -1,3 +1,13 @@
+- experiment-lifecycle 0.3.35 (2026-07-11): block `log-experiment.sh` on a silently gitignored pinned file
+  (#340). Incident: `log-experiment.sh` staged a registry dir with a plain `git add`, which silently honors
+  the research repo's `.gitignore`; a small pinned file (e.g. an instrument the DESIGN.md declares
+  "committed with this design") can share an ignored extension with genuine R2-scale artifacts
+  (`registry/**/*.jsonl`) and vanish from the logged PR with no trace — the PR still opens/merges looking
+  complete. A new `check_ignored_files` guard, run after staging, diffs "files present under the dir" vs
+  "files actually staged"; any non-trivial excluded file is printed and BLOCKS, while well-known junk
+  (`.DS_Store`, `__pycache__`, editor swap/backup files, etc.) is filtered out. A new `--skip-ignored` flag
+  lets the caller explicitly acknowledge an intentional R2-scale exclusion and proceed. Applies uniformly to
+  all three kinds (experiment/design-stage/note) since the underlying `git add` behavior isn't gate-specific.
 - experiment-lifecycle 0.3.34 (2026-07-11): default small-model LoRA generation to direct Tinker-side sampling
   over download-to-vLLM, not only as a congestion fallback (#353). Incident: two concurrent AAR sessions
   sharing one `TINKER_API_KEY` both requested a checkpoint-archive-export (pulling a trained LoRA adapter
