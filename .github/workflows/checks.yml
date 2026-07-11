@@ -32,6 +32,16 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # automated-researcher#407: fake_home_smoke.sh (invoked by checks.sh below) shells out to the
+      # `claude` CLI directly, but this runner never had it installed -- every invocation died at
+      # command-not-found, silently swallowed by the smoke's own >/dev/null redirect. Same pin as
+      # implement-on-ready.yml/address-review.yml (automated-researcher#387/#388): install the raw CLI
+      # directly rather than trusting an auto-installing wrapper.
+      - name: Install pinned Claude Code
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+
       - name: Run .aar-ci/checks.sh on changed paths
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
