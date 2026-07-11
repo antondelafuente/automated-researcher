@@ -20,7 +20,9 @@
 # Also asserts the #331 excluded-files gate: a file present in the staged dir but dropped by an ignore rule
 # is always PRINTED, logging still PASSES when that drop is not falsely claimed committed, and logging BLOCKS
 # when RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed (the exact silent
-# prose/tree divergence #331 caught a day late).
+# prose/tree divergence #331 caught a day late). Plus two review-round hardenings on that same gate: a
+# non-ASCII-named staged file is never misread as excluded (git quotes such paths unless read with `ls-files
+# -z`), and an ignored SYMLINK claimed committed is caught, not just ignored regular files.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -185,6 +187,29 @@ if run_dry "$T/reg/note"; then
   case "$LAST_ERR" in *"excluded from staging"*) fail "spurious excluded-files warning on an unchanged pre-existing file: $LAST_ERR";;
     *) pass "pre-existing unchanged file (page.html) not misreported as excluded";; esac
 else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 15: NEW non-ASCII-named file that IS staged, claimed committed -> PASS, not falsely reported/blocked (git ls-files -z)"
+# git quotes non-ASCII paths in `ls-files`'s default line output; without -z the quoted string never matches
+# the raw path from `find`, so a genuinely-staged file would misread as excluded and, if claimed committed,
+# falsely BLOCK a legitimate log (the wrong-direction failure mode: annoying, not a silent-drop risk).
+T=$(mktemp -d); make_repo "$T"
+NAME="n"$'\303\266'"te.md"                                        # 'nöte.md' (UTF-8)
+printf 'a fresh note\n' > "$T/reg/note/$NAME"
+printf '%s is committed in the registry dir.\n' "$NAME" > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then
+  case "$LAST_ERR" in *"excluded from staging"*) fail "non-ASCII staged file falsely reported as excluded: $LAST_ERR";;
+    *) pass "non-ASCII staged file correctly recognized as staged, no false exclusion/BLOCK";; esac
+else fail "non-ASCII staged file (truly committed) falsely BLOCKED as excluded: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 16: an IGNORED symlink claimed committed -> BLOCK (present-file enumeration must see symlinks, not just regular files)"
+T=$(mktemp -d); make_repo_ignored "$T"
+ln -s page.html "$T/reg/note/rollout_samples.jsonl"               # matches the base's reg/**/*.jsonl ignore rule
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "ignored symlink falsely claimed committed was NOT blocked (symlink missed by present-file scan)"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "ignored symlink claimed committed is blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

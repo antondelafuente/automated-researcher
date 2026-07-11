@@ -291,14 +291,17 @@ check_excluded_files() {
   while IFS= read -r -d '' f; do
     rel="${f#"$base"/}"
     present+=("$rel")
-  done < <(find "$base" -type f -print0)
+  done < <(find "$base" \( -type f -o -type l \) -print0)
   # `ls-files` (the INDEX), not `diff --cached` (only the DELTA): a file already tracked+unchanged from the
   # base tree stages no delta but is very much part of the resulting commit, so it must not read as "excluded".
-  while IFS= read -r f; do
+  # `-z` (NUL-delimited, raw paths): without it git quotes non-ASCII/special paths in its normal line output,
+  # so a staged `nöte.json` would print as `"n\303\266te.json"` — never matching `present`'s raw path, and
+  # falsely reported (and possibly BLOCKed) as excluded even though it IS staged.
+  while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     rel="${f#"$REL"/}"
     staged+=("$rel")
-  done < <(git -C "$WT" ls-files -- "$REL")
+  done < <(git -C "$WT" ls-files -z -- "$REL")
   for p in "${present[@]}"; do
     found=0
     for s in "${staged[@]}"; do [ "$p" = "$s" ] && { found=1; break; }; done
