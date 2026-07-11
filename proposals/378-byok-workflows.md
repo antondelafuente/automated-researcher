@@ -63,8 +63,12 @@ engineer-bot identities:
 
 - `on: issues: { types: [labeled] }` + `workflow_dispatch: { inputs: { issue_number } }`.
 - Job `if:`: (labeled path) `github.event.label.name == 'ready'` AND sender allowlisted; (dispatch path)
-  actor allowlisted. First step re-fetches the issue and re-verifies its author is allowlisted — fails
-  loudly (job failure, visible in the Actions run) otherwise, before any token is minted.
+  actor allowlisted. First step re-fetches the issue (`gh issue view <n> --json author,labels`, ambient
+  read-only token — no App token minted yet) and re-verifies BOTH that its author is allowlisted AND that
+  it currently carries the `ready` label — fails loudly (job failure, visible in the Actions run) otherwise,
+  before any App token is minted. This closes the `workflow_dispatch` gap where only actor+author were
+  checked: `ready` is the only disposition eligible for auto-handling (AGENTS.md), and manual dispatch must
+  not be a way to implement a not-`ready` issue.
 - `concurrency: group: implement-issue-${{ inputs.issue_number || github.event.issue.number }}` — per-issue
   dedup only. **No global cap in v1** — GitHub `concurrency` is not a worker pool; the spend guard is the
   researcher's deliberate one-at-a-time `ready` flip. This limitation is documented in AGENTS.md, not
@@ -113,15 +117,37 @@ engineer-bot identities:
   ```
   `verdict` is `approve` iff there are zero `P0` findings (mechanical rule the trusted step enforces itself
   — it does not trust the model's self-reported `verdict` field alone).
-- A **trusted step** (no repo code, only `actions/github-script` + the mechanical rule above) parses
-  `codex-action`'s `final-message`/structured output: if zero P0 findings, mint the codex App token,
-  **re-verify the PR's current head SHA still equals the captured `head_sha`** (guards a `synchronize` race
-  between review start and approval), then submit a native `APPROVE` review bound to that SHA via the REST
-  API (not `gh pr review` with the ambient token). If P0 findings exist (or the head moved), submit
-  `REQUEST_CHANGES` with the findings listed, as the codex bot.
+- A **trusted step** — plain `bash` + `gh api` under the minted codex App token (no extra third-party
+  action; keeps the pin inventory closed instead of adding an unpinned `actions/github-script` dependency)
+  — parses `codex-action`'s structured JSON output and applies the mechanical rule above: if zero `P0`
+  findings, mint the codex App token, **re-verify the PR's current head SHA still equals the captured
+  `head_sha`** (guards a `synchronize` race between review start and approval), then `gh api
+  repos/:owner/:repo/pulls/:number/reviews -f event=APPROVE -f commit_id=$head_sha` (native review, bound to
+  that SHA) — the review body lists every finding, `P0` and `P1` alike, so non-blocking findings are always
+  visible for a later human pass rather than silently dropped even on a clean approve. If `P0` findings
+  exist (or the head moved), submit the same call with `event=REQUEST_CHANGES` and the findings listed, as
+  the codex bot.
 - Approval and authorship are distinct App identities (`codex-engineer[bot]` approving
   `claude-code-engineer[bot]`'s PR) — branch protection's required-opposite-family-approval holds, and
   self-approval is structurally impossible (the two Apps have separate keys/tokens).
+
+### Deliverable 2b — `.github/workflows/checks.yml` (trusted required-status gate; not in the original issue text, added during design review — see Finding 3 in the review triage)
+
+This repo currently has **no `.github/workflows/` at all**, so nothing runs `.aar-ci/checks.sh` as Actions
+CI today — the implementor prompt's instruction to run it before opening a PR is agent-honor, not a trusted
+gate, and `implement-on-ready`'s auto-merge would otherwise be able to merge a PR that never ran the
+deterministic check suite. Fixed with a third, minimal workflow:
+
+- `on: pull_request: { types: [opened, synchronize, reopened] }` — runs for **every** PR, human or agent
+  authored (this is the same deterministic check every PR should pass, not an agent-specific gate).
+  Ambient read-only `GITHUB_TOKEN` only — no App token, no secrets, no LLM call.
+- Single step: checkout the PR head, run `.aar-ci/checks.sh` (unmodified — this workflow only *calls* it,
+  satisfying the issue's "`.aar-ci/checks.sh` changes — existing checks keep running unchanged" out-of-scope
+  line), fail the job on nonzero exit.
+- Branch protection adds this job's check name as a required status, alongside the existing required
+  opposite-family-approval, so `implement-on-ready`'s auto-merge can only complete once both are green —
+  restoring, natively, the "checks + smoke" half of `ship-change`'s fail-closed merge gate that the
+  tmux-driven `wf.sh finish` step enforced by hand.
 
 ### Deliverable 3 — docs
 
@@ -181,10 +207,11 @@ issue.
 
 ## Blast radius
 
-- **New files only** (this repo, product-adjacent but SWE-pipeline-owned): `.github/workflows/
-  implement-on-ready.yml`, `.github/workflows/review-on-pr.yml`, `.github/prompts/implement.md`, an
-  `AGENTS.md` addition. No existing file's behavior changes — `.aar-ci/checks.sh` is untouched per the
-  issue.
+- **New workflow/prompt files, plus one existing-file addition** (this repo, product-adjacent but
+  SWE-pipeline-owned): `.github/workflows/implement-on-ready.yml`, `.github/workflows/review-on-pr.yml`,
+  `.github/workflows/checks.yml`, `.github/prompts/implement.md` (new files) and an **`AGENTS.md` addition**
+  (existing file, treated as a real dependent — every session that reads this repo's conventions reads it).
+  No existing *behavior* changes to `.aar-ci/checks.sh` itself — it's called, not modified, per the issue.
 - **Instance-owned, not touched by this PR:** the six GitHub Actions secrets (researcher adds values
   post-merge), the `needs-dispatcher` notifier, retiring `ship-change`'s tmux-dispatcher machinery, closing
   agentic-engineering#40/#41/#42, and the agentic-engineering copy of these workflows — all explicitly
@@ -200,6 +227,6 @@ issue.
   adds the six secrets. Bootstrap test: remove/re-add `ready` on #371.
   Until secrets are added, `ready` events on other issues will fail loudly in the Actions tab rather than
   degrading silently — no researcher action is required to keep the repo safe in the interim.
-- **Rollback:** delete or disable the two workflow files (or set a workflow-level `if: false`) — no state
+- **Rollback:** delete or disable the three workflow files (or set a workflow-level `if: false`) — no state
   to unwind, no data migration. Existing `ship-change` tmux-dispatcher path continues to work unmodified as
   a fallback (nothing about it was removed by this change) until an explicit later ticket retires it.
