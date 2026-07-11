@@ -7,7 +7,9 @@ in #382 exists (its own acceptance criterion says so), so they ship together in 
 
 ## Problem
 
-Two independent bugs in the just-merged GitHub-Actions SWE pipeline block every implementor run:
+Two independent bugs — this issue and #381 — block every implementor run in the just-merged
+GitHub-Actions SWE pipeline; this PR closes #381 together with this issue, since the pipeline cannot
+implement either while the crash below exists:
 
 **#382 — schema crash.** `implement-on-ready.yml`'s `claude_args` passes claude-code-action a
 `--json-schema` whose top level contains `allOf` (encoding "status=opened requires integer pr_number").
