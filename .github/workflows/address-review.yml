@@ -1,0 +1,173 @@
+name: address-review
+
+# GitHub-native SWE pipeline, mention leg (automated-researcher#398 / #378's missing return path). An
+# allowlisted mention comment on a bot-authored PR re-dispatches the claude engineer implementor onto the
+# SAME PR branch to address review findings; pushing fires `synchronize`, which re-runs review-on-pr.yml
+# automatically (its own cancel-in-progress handles stale rounds — this workflow never invokes the review
+# itself). See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: address-pr-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  address:
+    name: address
+    runs-on: ubuntu-latest
+    # Coarse pre-filter only (mirrors implement-on-ready.yml automated-researcher#381): the authoritative
+    # gate is the "Resolve + authorize PR" step below, which re-fetches the PR fresh (same-repo, real
+    # author, open state) via the shared canonical-login helper before any token is minted. `issue_comment`
+    # fires for comments on plain Issues too, not just PRs — `github.event.issue.pull_request` is only
+    # present when the comment is on a PR, which is what restricts this to PR comments at all. The
+    # allowlist (researcher + the two engineer bots, both login representations) is hard-coded here for
+    # the same reason as implement-on-ready.yml's own allowlist: a compromised in-repo file must not be
+    # able to widen who can trigger a privileged run.
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude-code-engineer') &&
+      contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.event.comment.user.login)
+    steps:
+      # Checkout runs FIRST (same rationale as implement-on-ready#381): the authorize step below sources a
+      # helper script from the working tree, which must exist before it's sourced. This is a control-plane
+      # checkout of the TRUSTED default branch only — the agent's own working tree checkout (a separate,
+      # later step) is the only place the PR's own head branch content is checked out.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      # Re-verify BEFORE minting any token: same-repo (no forks), and the PR author is exactly the claude
+      # engineer bot (the same spoof-resistant predicate review-on-pr.yml uses, re-implemented here via
+      # freshly-fetched `gh pr view` data since a job-level `if:` has no PR-fork/author fields to check on
+      # an `issue_comment` event payload).
+      - name: Resolve + authorize PR
+        id: resolve_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+
+          pr_json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json author,isCrossRepository,state,headRefName,baseRefName)
+          author=$(echo "$pr_json" | jq -r '.author.login')
+          is_cross=$(echo "$pr_json" | jq -r '.isCrossRepository')
+          state=$(echo "$pr_json" | jq -r '.state')
+          author_canon=$(canonical_login "$author")
+
+          if [ "$is_cross" != "false" ]; then
+            echo "::error::PR #$PR_NUMBER is a fork PR; refusing to run the agent against it"
+            exit 1
+          fi
+          if [ "$author_canon" != "claude-code-engineer[bot]" ]; then
+            echo "::error::PR #$PR_NUMBER author '$author' is not the claude engineer bot; refusing to run"
+            exit 1
+          fi
+          if [ "$state" != "OPEN" ]; then
+            echo "::error::PR #$PR_NUMBER is not open (state: $state); refusing to run"
+            exit 1
+          fi
+
+          echo "head_ref=$(echo "$pr_json" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+          echo "base_ref=$(echo "$pr_json" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
+
+      - name: Render address-review prompt
+        id: render_prompt
+        env:
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ steps.resolve_pr.outputs.head_ref }}
+          BASE_REF: ${{ steps.resolve_pr.outputs.base_ref }}
+          COMMENT_URL: ${{ github.event.comment.html_url }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          body="$(cat .github/prompts/address-review.md)"
+          body="${body//\{\{PR_NUMBER\}\}/$PR_NUMBER}"
+          body="${body//\{\{REPO\}\}/$REPO}"
+          body="${body//\{\{HEAD_REF\}\}/$HEAD_REF}"
+          body="${body//\{\{BASE_REF\}\}/$BASE_REF}"
+          body="${body//\{\{COMMENT_URL\}\}/$COMMENT_URL}"
+          body="${body//\{\{COMMENT_BODY\}\}/$COMMENT_BODY}"
+          {
+            echo "prompt<<PROMPT_EOF"
+            echo "$body"
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Same pin as implement-on-ready.yml (automated-researcher#387/#388) — the wrapper action's own
+      # bun/agent-SDK harness crashes at startup; the raw pinned CLI is verified to run cleanly instead.
+      - name: Install pinned Claude Code
+        id: install_claude
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+
+      # This is the ONLY checkout of the PR's own head branch content, and it happens AFTER authorization
+      # and prompt rendering are both done from the trusted base branch — the agent's working tree is the
+      # PR's head branch, nothing else (matches the issue's explicit "no checkout of anything but the PR
+      # head branch for the agent's working tree" guidance).
+      - name: Checkout PR head branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          ref: ${{ steps.resolve_pr.outputs.head_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure implementor git identity
+        env:
+          CLAUDE_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git config user.name 'claude-code-engineer[bot]'
+          git config user.email '294932622+claude-code-engineer[bot]@users.noreply.github.com'
+          git remote set-url origin "https://x-access-token:${CLAUDE_TOKEN}@github.com/${REPO}.git"
+
+      - name: Run pinned Claude Code CLI (address-review)
+        id: run_claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+            | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
+                --model claude-sonnet-5 \
+                --allowedTools Bash,Edit,Write,Read,Grep,Glob \
+                --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["addressed","blocked"]}}}' \
+            | tee /tmp/claude_stream.jsonl
+
+          # Same validation as implement-on-ready.yml (design-review finding 1 there): don't let a CLI run
+          # that exited 0 but produced no result event / no structured_output fall through silently.
+          structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
+          if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+            echo "::error::claude CLI exited 0 but produced no structured_output in its result event"
+            exit 1
+          fi
+          status=$(echo "$structured" | jq -r '.status // "blocked"')
+          echo "status=$status" >> "$GITHUB_OUTPUT"
