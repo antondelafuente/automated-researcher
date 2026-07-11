@@ -72,6 +72,9 @@ jobs:
         # GitHub-native disposition state (#380): prior codex review rounds + the author's issue-comment
         # responses, so the reviewer can adjudicate rather than re-litigating findings the author already
         # fixed or disputed. Read-only `gh api` calls against this same PR — the job's read token suffices.
+        # automated-researcher#389 review: restricted to the pipeline's own trusted identities (same
+        # allowlist as implement-on-ready.yml's ALLOWLIST) — an unrelated or adversarial review/comment must
+        # not be able to inject or crowd out disposition context.
         id: history
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,15 +84,22 @@ jobs:
           set -euo pipefail
           MAX_ROUNDS=6
           MAX_CHARS=20000
+          ALLOW='["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]"]'
 
+          # canon_login mirrors .github/scripts/canonical-login.sh's remap (a jq filter can't source that
+          # bash helper, so the same "app/<slug>" -> "<slug>[bot]" logic is duplicated here) so a review or
+          # comment authored by the trusted identities is recognized under either login form the API uses.
           # --paginate emits one JSON array per page; `jq -s add` slurps and flattens them into one array
           # regardless of page count.
-          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
-            add // [] | map(select((.body // "") != ""))
+          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s --argjson allow "$ALLOW" '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select((.body // "") != "" and ((.user.login | canon_login) as $c | ($allow | index($c)) != null)))
               | map({ts: .submitted_at, kind: "review", user: .user.login, state, body})
           ')
-          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s '
-            add // [] | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
+          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --argjson allow "$ALLOW" '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select((.user.login | canon_login) as $c | ($allow | index($c)) != null))
+              | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
           ')
 
           combined=$(jq -n --argjson r "$reviews" --argjson c "$comments" '($r + $c) | sort_by(.ts) | reverse')
@@ -105,7 +115,7 @@ jobs:
 
           note=""
           if [ "$capped_count" -lt "$total" ]; then
-            note="showing the $capped_count most recent of $total prior review entries; older entries omitted"
+            note="showing the $capped_count most recent of $total trusted prior review entries; older entries omitted"
           fi
 
           if [ "${#rendered}" -gt "$MAX_CHARS" ]; then
@@ -118,12 +128,16 @@ jobs:
             fi
           fi
 
+          # automated-researcher#389 review: $rendered embeds review/comment BODIES verbatim, so a fixed
+          # delimiter (previously "HISTORY_EOF") could be matched by a body line and used to inject extra
+          # keys into $GITHUB_OUTPUT. A per-run random delimiter closes that off.
+          delim="history_$(openssl rand -hex 20)"
           {
             echo "count=$capped_count"
             echo "note=$note"
-            echo "rendered<<HISTORY_EOF"
-            echo "$rendered"
-            echo "HISTORY_EOF"
+            echo "rendered<<$delim"
+            printf '%s\n' "$rendered"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Render review prompt
@@ -155,9 +169,7 @@ jobs:
             history_section="This is the first review of this PR; there is no prior review history to consider."
           fi
 
-          {
-            echo "prompt<<PROMPT_EOF"
-            cat <<PROMPT
+          prompt=$(cat <<PROMPT
           This is PR #$PR_NUMBER for $REPO.
 
           Review ONLY the changes introduced by this PR. From the checked-out repository root:
@@ -176,7 +188,17 @@ jobs:
           you have, P0 and P1 alike, in the findings array — non-blocking P1 findings are still recorded
           for a later human pass, never omitted.
           PROMPT
-            echo "PROMPT_EOF"
+          )
+
+          # automated-researcher#389 review: $prompt embeds prior review/comment bodies (via
+          # $history_section), so a fixed delimiter (previously "PROMPT_EOF") could be matched by a body
+          # line and used to inject extra keys into $GITHUB_OUTPUT. A per-run random delimiter closes that
+          # off.
+          delim="prompt_$(openssl rand -hex 20)"
+          {
+            echo "prompt<<$delim"
+            printf '%s\n' "$prompt"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run codex-action (review)
