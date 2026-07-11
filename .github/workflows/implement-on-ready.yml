@@ -122,7 +122,7 @@ jobs:
           claude_args: |
             --model claude-sonnet-5
             --allowedTools Bash,Edit,Write,Read,Grep,Glob
-            --json-schema {"type":"object","properties":{"pr_number":{"type":["integer","null"]},"status":{"type":"string","enum":["opened","blocked"]}},"required":["status"]}
+            --json-schema {"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}},"allOf":[{"if":{"properties":{"status":{"const":"opened"}}},"then":{"required":["pr_number"],"properties":{"pr_number":{"type":"integer"}}}},{"if":{"properties":{"status":{"const":"blocked"}}},"then":{"properties":{"pr_number":{"type":"null"}}}}]}
 
       - name: Resolve job outputs
         id: resolve_outputs
