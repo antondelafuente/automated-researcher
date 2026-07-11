@@ -73,21 +73,26 @@ engineer-bot identities:
   dedup only. **No global cap in v1** — GitHub `concurrency` is not a worker pool; the spend guard is the
   researcher's deliberate one-at-a-time `ready` flip. This limitation is documented in AGENTS.md, not
   worked around (per the issue's explicit instruction).
-- Steps: mint the claude App token (`actions/create-github-app-token@<sha>`, `CLAUDE_APP_ID` +
-  `CLAUDE_APP_PRIVATE_KEY`, scoped to this repo) → checkout base ref → run
-  `anthropics/claude-code-action@<sha>` with:
-  - `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`
-  - `github_token: <minted claude App token>` (so every git/gh operation — branch, commits, `gh pr
-    create` — runs as `claude-code-engineer[bot]`, not the ambient `GITHUB_TOKEN`)
-  - `prompt:` committed at `.github/prompts/implement.md`, filled with the issue number/repo (agent mode —
-    providing `prompt` puts the action in automation mode, no `@claude` mention needed)
-  - `claude_args: --model claude-sonnet-5` + tool access broad enough to implement (Bash/Edit/Write/Read/
-    Grep/Glob) — matches the accepted-risk statement above.
-  - `base_branch: main`, `branch_prefix: agent/` so the working branch is `agent/issue-378`-shaped
-    (`agent/issue-<n>`).
-- Post-step (control-plane, same App token, `if: always()` guarded on the PR having been created): enable
-  auto-merge (`gh pr merge --auto --squash`) on the created PR; on failure (auto-merge disabled repo-wide,
-  missing permission) comment instead of failing the job.
+- **Two jobs**, not steps in one job (per `openai/codex-action`'s own security guidance, which applies
+  symmetrically to `claude-code-action`: "run as the last step in a job" because the agent could have
+  spawned lingering processes or touched host state — the control-plane action that follows should not
+  trust that job's runner):
+  - **job `implement`**: mint the claude App token (`actions/create-github-app-token@<sha>`, `CLAUDE_APP_ID`
+    + `CLAUDE_APP_PRIVATE_KEY`, scoped to this repo) → checkout base ref → run
+    `anthropics/claude-code-action@<sha>` with:
+    - `anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}`
+    - `github_token: <minted claude App token>` (so every git/gh operation — branch, commits, `gh pr
+      create` — runs as `claude-code-engineer[bot]`, not the ambient `GITHUB_TOKEN`)
+    - `prompt:` committed at `.github/prompts/implement.md`, filled with the issue number/repo (agent mode —
+      providing `prompt` puts the action in automation mode, no `@claude` mention needed)
+    - `claude_args: --model claude-sonnet-5` + tool access broad enough to implement (Bash/Edit/Write/Read/
+      Grep/Glob) — matches the accepted-risk statement above.
+    - `base_branch: main`, `branch_prefix: agent/` so the working branch is `agent/issue-378`-shaped
+      (`agent/issue-<n>`).
+    - Outputs the created PR number (from the action's own structured output) for the next job.
+  - **job `enable-automerge`** (`needs: implement`, fresh runner, `if:` the PR number output is non-empty):
+    mints its own fresh claude App token, runs `gh pr merge --auto --squash` on the created PR; on failure
+    (auto-merge disabled repo-wide, missing permission) comments instead of failing the job.
 - Escalation: the prompt instructs the implementor that if it's blocked, or if implementing would
   contradict what the issue specifies, it labels the PR (or issue, if no PR yet) `needs-dispatcher` +
   comments what's needed, then stops. This ticket only defines the label convention (per the issue's
@@ -104,27 +109,33 @@ engineer-bot identities:
   actor login, not a title/label/branch-prefix match; human PRs keep the existing manual review path).
 - `concurrency: group: review-pr-${{ github.event.pull_request.number }}, cancel-in-progress: true` — a
   `synchronize` cancels stale review work.
-- Steps: capture `head_sha: ${{ github.event.pull_request.head.sha }}` → checkout that ref (read-only,
-  `permission-profile: ":read-only"`, no write scope on this step) → run `openai/codex-action@<sha>` with
-  `openai-api-key: ${{ secrets.OPENAI_API_KEY }}`, a `prompt` embedding the diff range + this repo's
-  AGENTS.md review guidance (P0/P1, below), and an `output-schema` forcing structured JSON:
-  ```json
-  {"type":"object","required":["verdict","findings"],"properties":{
-    "verdict":{"enum":["approve","changes_requested"]},
-    "findings":{"type":"array","items":{"type":"object","required":["severity","summary"],
-      "properties":{"severity":{"enum":["P0","P1"]},"summary":{"type":"string"},
-      "evidence":{"type":"string"}}}}}}
-  ```
-  `verdict` is `approve` iff there are zero `P0` findings (mechanical rule the trusted step enforces itself
-  — it does not trust the model's self-reported `verdict` field alone).
-- A **trusted step** — plain `bash` + `gh api` under the minted codex App token (no extra third-party
-  action; keeps the pin inventory closed instead of adding an unpinned `actions/github-script` dependency)
-  — parses `codex-action`'s structured JSON output and applies the mechanical rule above: if zero `P0`
-  findings, mint the codex App token, **re-verify the PR's current head SHA still equals the captured
-  `head_sha`** (guards a `synchronize` race between review start and approval), then `gh api
-  repos/:owner/:repo/pulls/:number/reviews -f event=APPROVE -f commit_id=$head_sha` (native review, bound to
-  that SHA) — the review body lists every finding, `P0` and `P1` alike, so non-blocking findings are always
-  visible for a later human pass rather than silently dropped even on a clean approve. If `P0` findings
+- **Two jobs** (same rationale as `implement-on-ready`, straight from `openai/codex-action`'s own security
+  doc: "run `openai/codex-action` as the last step in a job" and hand its output to a fresh job for
+  anything trusted that follows):
+  - **job `review`**: capture `head_sha: ${{ github.event.pull_request.head.sha }}` → checkout that ref
+    (read-only, `permission-profile: ":read-only"`, no write scope on this job — it never sees a GitHub
+    write token) → run `openai/codex-action@<sha>` with `openai-api-key: ${{ secrets.OPENAI_API_KEY }}`, a
+    `prompt` embedding the diff range + this repo's AGENTS.md review guidance (P0/P1, below), and an
+    `output-schema` forcing structured JSON written to `output-file: codex-review.json` (read back via `jq`
+    in the next job — avoids stuffing large JSON through a GitHub Actions string output):
+    ```json
+    {"type":"object","required":["verdict","findings"],"properties":{
+      "verdict":{"enum":["approve","changes_requested"]},
+      "findings":{"type":"array","items":{"type":"object","required":["severity","summary"],
+        "properties":{"severity":{"enum":["P0","P1"]},"summary":{"type":"string"},
+        "evidence":{"type":"string"}}}}}}
+    ```
+    `verdict` is `approve` iff there are zero `P0` findings (mechanical rule the *next* job enforces itself
+    — it does not trust the model's self-reported `verdict` field alone). Uploads `codex-review.json` as a
+    build artifact for the next job to download (the two jobs don't share a filesystem).
+  - **job `submit-verdict`** (`needs: review`, fresh runner, no repo code checkout at all — just the
+    downloaded artifact + `gh api`): parses `codex-review.json` and applies the mechanical `P0`-count rule
+    above: if zero `P0` findings, mint the codex App token, **re-verify the PR's current head SHA still
+    equals the captured `head_sha`** (guards a `synchronize` race between review start and approval), then
+    `gh api repos/:owner/:repo/pulls/:number/reviews -f event=APPROVE -f commit_id=$head_sha` (native
+    review, bound to that SHA) — the review body lists every finding, `P0` and `P1` alike, so non-blocking
+    findings are always visible for a later human pass rather than silently dropped even on a clean
+    approve. If `P0` findings
   exist (or the head moved), submit the same call with `event=REQUEST_CHANGES` and the findings listed, as
   the codex bot.
 - Approval and authorship are distinct App identities (`codex-engineer[bot]` approving
