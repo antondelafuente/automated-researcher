@@ -162,35 +162,73 @@ def main():
 
     # ---- stratified HIGH-RISK sample (not just random) ----
     order = sorted(range(n), key=lambda i: lens[i])
-    # "priority" strata carry the coverage guarantees this script promises (esp. per-label/per-arm
-    # coverage of a minority subset) — they must survive the size cap below untouched. Only the
-    # evenly-spaced "spread" fill is size-capped; truncating priority picks by sorted-index (as a
-    # single capped set used to) silently drops high-index minority rows appended near the end of
-    # the file, defeating the --label-field guarantee.
-    priority = set()
-    priority.update(order[: a.sample_k])              # shortest
-    priority.update(order[-a.sample_k:])              # longest
-    priority.update(near_cap[: a.sample_k])           # near cap
-    priority.update(open_think[: a.sample_k])         # truncated (CoT)
-    priority.update(parse_errs[: a.sample_k])         # parser failures
-    priority.update(empties[: a.sample_k])            # empties
-    # one per source + per label/arm
-    seen_s = {}
-    for i, r in enumerate(rows):
-        s = str(r.get(a.source_field))
-        if seen_s.get(s, 0) < 2:
-            priority.add(i); seen_s[s] = seen_s.get(s, 0) + 1
-    if a.label_field:
-        seen_l = {}
-        for i, r in enumerate(rows):
-            l = str(r.get(a.label_field))
-            if seen_l.get(l, 0) < 2:
-                priority.add(i); seen_l[l] = seen_l.get(l, 0) + 1
-    # some random (deterministic: evenly spaced), capped to fill only the remaining budget
     cap = max(40, a.sample_k * 8)
+
+    def group_by(field):
+        g = {}
+        for i, r in enumerate(rows):
+            g.setdefault(str(r.get(field)), []).append(i)
+        return g
+
+    def allocate_coverage(groups, budget, picks, kind):
+        """Spend at most `budget` new picks covering every group: minimum 1 per group (deterministic
+        group order), then proportional fill of any leftover budget favoring larger groups. Never adds
+        more than `budget` rows, so callers compose without ever exceeding the overall sample cap."""
+        keys = sorted(groups)
+        added = []
+        if not keys or budget <= 0:
+            if keys:
+                rep["warnings"].append(
+                    f"{len(keys)} distinct {kind} values but 0 sample slots remain (cap={cap}): "
+                    f"{kind} coverage is PARTIAL"
+                )
+            return added
+        covered = keys[:budget]
+        if len(keys) > budget:
+            rep["warnings"].append(
+                f"{len(keys)} distinct {kind} values exceed the {budget}-row sample budget (cap={cap}): "
+                f"only {budget} {kind} values are represented in the sample — coverage is PARTIAL"
+            )
+        remaining = budget
+        for k in covered:
+            if remaining <= 0:
+                break
+            row = next((i for i in groups[k] if i not in picks and i not in added), None)
+            if row is None:
+                continue
+            added.append(row); remaining -= 1
+        if remaining > 0:
+            fill_order = sorted(covered, key=lambda k: (-len(groups[k]), k))
+            progress = True
+            while remaining > 0 and progress:
+                progress = False
+                for k in fill_order:
+                    if remaining <= 0:
+                        break
+                    row = next((i for i in groups[k] if i not in picks and i not in added), None)
+                    if row is None:
+                        continue
+                    added.append(row); remaining -= 1; progress = True
+        return added
+
+    # Every stage below only spends whatever budget (cap - len(picks)) remains, so the sample never
+    # exceeds `cap` regardless of source/label cardinality. Per-label coverage goes FIRST, with the
+    # full cap as its budget — that's the guarantee --label-field exists to make (every distinct label
+    # represented whenever label-count <= cap), so it gets first claim rather than being squeezed out
+    # by the other (lower-stakes) risk strata.
+    picks = set()
+    if a.label_field:
+        picks.update(allocate_coverage(group_by(a.label_field), cap - len(picks), picks, "label"))
+    for stratum in (order[: a.sample_k], order[-a.sample_k:], near_cap[: a.sample_k],
+                    open_think[: a.sample_k], parse_errs[: a.sample_k], empties[: a.sample_k]):
+        for i in stratum:
+            if len(picks) >= cap:
+                break
+            picks.add(i)
+    picks.update(allocate_coverage(group_by(a.source_field), cap - len(picks), picks, "source"))
     step = max(1, n // a.sample_k)
-    spread = [i for i in range(0, n, step) if i not in priority]
-    picks = sorted(priority) + sorted(spread)[: max(0, cap - len(priority))]
+    spread = [i for i in range(0, n, step) if i not in picks]
+    picks.update(spread[: max(0, cap - len(picks))])
     picks = sorted(picks)
 
     with open(a.sample, "w") as f:
@@ -199,7 +237,7 @@ def main():
             f.write(json.dumps(row) + "\n")
     rep["sample_file"] = a.sample
     rep["sample_n"] = len(picks)
-    rep["sample_strata"] = "shortest|longest|near_cap|open_think|parse_err|empty|per_source|per_label|spread"
+    rep["sample_strata"] = "per_label|shortest|longest|near_cap|open_think|parse_err|empty|per_source|spread"
 
     json.dump(rep, open(a.out, "w"), indent=2)
     status = "HARD FAIL" if rep["HARD_FAILS"] else "ok"
