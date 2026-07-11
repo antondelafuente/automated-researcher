@@ -294,22 +294,59 @@ is_trivial_ignore() {
     *) return 1 ;;
   esac
 }
+# check_excluded_claim <excluded-file>...: BLOCK if RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims one of
+# the given (already-known-excluded) files is "committed" — the exact prose/tree divergence #331 caught a day
+# late (a curated 67-row sample dropped by a registry/**/*.jsonl ignore rule while the audited docs said it
+# was committed). Match: basename (fixed-string, so a filename with regex metachars can't misfire) + a
+# commit-claim word on the SAME line — a loose 'committ' substring both over-matches ("is NOT committed") and
+# under-matches (bare "commit" lacks that substring); a doc mentioning the file in an R2/not-committed context
+# is legitimate, only a same-line claim it's actually committed is the lie. A trailing negation-word filter
+# (NEGATION_RE) is a cheap courtesy for the common "is not committed" / "isn't committed" phrasing — it is
+# NOT exhaustive NL negation detection (that's out of scope for a bash heuristic; the chase never ends). This
+# check is a best-effort belt-and-braces layer, not the only safeguard: the excluded-file list above is ALWAYS
+# printed regardless of this check's verdict, so a human still sees every drop even on a miss, and a false
+# BLOCK here has no --skip-ignored escape (fail-closed is the safe direction to err in): called from
+# check_ignored_files BEFORE its --skip-ignored bypass, since an intentional R2 exclusion is fine but a doc
+# that still claims the file landed is not, and that flag must never wave a committed-claim through. The real
+# escape on a false positive is per the die message below — fix the ignore rule or reword the offending prose
+# line, then retry.
+check_excluded_claim() {
+  local claim_file bn hit f
+  local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
+  local -r NEGATION_RE=' not |n'"'"'t '
+  for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
+    [ -f "$claim_file" ] || continue
+    for f in "$@"; do
+      bn="$(basename "$f")"
+      if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE")"; then
+        die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+      fi
+    done
+  done
+}
 # check_ignored_files (#340): MUST be called AFTER `git add -- "$REL"` in the worktree. Lists any file under
-# $REL that the BASE tree's .gitignore excluded from the just-staged set (`git status --ignored=matching`,
-# NUL-delimited for the same path-safety reason secret_scan reads paths raw — see its comment). A silent
-# exclusion is fine for a genuine R2-scale artifact but not for a small pinned file sharing the ignored
-# extension (the #340 incident); BLOCK by default and print the list, unless the caller passed
-# --skip-ignored to explicitly acknowledge the exclusion is intentional.
+# $REL that the BASE tree's .gitignore excluded from the just-staged set (`git ls-files --others --ignored
+# --exclude-standard`, NOT `git status`, which collapses a wholly-ignored directory to a single `!! dir/`
+# entry and so would only ever surface the directory's own basename — silently missing every filename inside
+# it against check_excluded_claim's per-file prose check below). `ls-files` walks INTO an ignored directory
+# and lists each file individually, NUL-delimited for the same path-safety reason secret_scan reads paths raw
+# — see its comment; this also means an ignored SYMLINK is caught the same as a regular file, and a
+# non-ASCII path is never git-quoted into a mismatch. A silent exclusion is fine for a genuine R2-scale
+# artifact but not for a small pinned file sharing the ignored extension (the #340 incident) — BLOCK by
+# default and print the list, unless the caller passed --skip-ignored to explicitly acknowledge the exclusion
+# is intentional. #331's check_excluded_claim reuses this SAME excluded-file list (rather than re-deriving it
+# with a second present-vs-staged diff) to catch the one thing --skip-ignored must never wave through: a doc
+# claiming an excluded file is committed.
 check_ignored_files() {
-  local entry path; local -a hits=()
-  while IFS= read -r -d '' entry; do
-    case "$entry" in '!! '*) path="${entry#!! }" ;; *) continue ;; esac
+  local path; local -a hits=()
+  while IFS= read -r -d '' path; do
     is_trivial_ignore "$path" && continue
     hits+=("$path")
-  done < <(git -C "$WT" status --porcelain=v1 -z --ignored=matching -- "$REL")
+  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "$REL")
   [ "${#hits[@]}" -eq 0 ] && return 0
   note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
   printf '  %s\n' "${hits[@]}" >&2
+  check_excluded_claim "${hits[@]}"
   if [ "$SKIP_IGNORED" = 1 ]; then
     note "--skip-ignored: proceeding anyway (acknowledged)"
     return 0
