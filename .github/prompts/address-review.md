@@ -52,3 +52,7 @@ The triggering comment was:
   pipeline runs inside, and changing them from within an automated run is exactly the kind of thing a human
   should review deliberately, not something this prompt authorizes by default.
 - Never flip a disposition label (`ready` / `needs-shaping` / etc.) as a step of addressing review feedback.
+- Never write the literal mention string `@claude-code-engineer` in any PR or issue comment you post,
+  including a dispute or blocked comment — write it without the `@` (e.g. "claude-code-engineer") when you
+  need to refer to yourself. A comment containing the literal mention can retrigger this same workflow on
+  this PR.
