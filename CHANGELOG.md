@@ -1,3 +1,12 @@
+- experiment-lifecycle 0.3.41 (2026-07-11): add a kill-or-verify step to `run-experiment` SKILL.md's Execution
+  discipline section for mid-run pod reassignment (#334). Incident: a pod that finished its original `--arms`
+  queue auto-continued to the next item in that baked-in list while the same item had just been reassigned to
+  a different, newly-free pod — both generated the same corpus concurrently; caught only by a row-count
+  sanity check (a corpus file unexpectedly climbing from 0 on a pod that should have been idle), not by
+  design. Fix: a new bullet next to the existing fan-out/concurrency guidance says the reassignment decision
+  lives in the orchestrator's head, not the original pod's — before treating a reassignment as clean, check
+  the pod's actual running process argv (not idleness) and kill (or verify already-exited) it, then also kill
+  any orphaned worker process it spawned (e.g. `VLLM::EngineCore`) or the GPU isn't actually free.
 - experiment-lifecycle 0.3.40 (2026-07-11): document an all-null/all-zero join or aggregation result as a loud
   bug signal in `run-experiment` SKILL.md's Execution discipline section (#349). Incident: a per-item
   correlation script joining direction-reader verdicts against a blind-key parsed from judged-rollout
