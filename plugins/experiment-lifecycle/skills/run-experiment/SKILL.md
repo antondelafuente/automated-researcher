@@ -229,7 +229,28 @@ path>)` samples straight from Tinker's hosted model state and never touches the 
 default to direct sampling rather than reaching for it only once congestion is already observed. Before trusting
 either serving stack (a mid-run switch or a from-the-start default), run an anchor-reproduction guard: re-generate
 a known-reference subject with byte-identical decoding config on the stack you're about to use, and confirm its
-rollouts CI-overlap historical values before trusting it for the real run.
+rollouts CI-overlap historical values before trusting it for the real run. A local adapter file is still genuinely
+needed for two remaining cases — vLLM serving of models too large for direct Tinker-side sampling, and offline
+artifact archival — see the archive-download guidance immediately below (#330) for those.
+
+**Tinker checkpoint-archive downloads, for the remaining cases above where a local adapter file is genuinely
+required (#330): timeout AND concurrency guidance differ by code path.** Archive creation server-side can take up
+to ~1hr even for a modest rank-32 LoRA adapter (observed 29-55min for a 3B-base adapter) — a plain
+`tinker.ServiceClient()` in a custom `download_adapter.py`-style script uses the SDK's shorter default HTTP
+timeout and raises `tinker.APITimeoutError` well before archive creation finishes, despite the SDK's own poll-loop
+heartbeat implying long waits are expected. Fix: pass a generous explicit timeout —
+`tinker.ServiceClient(timeout=3600)`. Once that fix is in place, multiple adapter downloads *within the same run*
+don't add self-inflicted blocking beyond what the export queue already imposes (confirmed 4/4 succeeding
+concurrently after the fix, and separately 20/20 small-corpus adapters in ~5-10min total run concurrently — real
+variance, not evidence the long wait is gone in general) — but this is orthogonal to the cross-session
+account-level queue congestion described above: if another session is exporting concurrently on the same
+`TINKER_API_KEY`, you can still hit the 20-40+ min stall regardless of how many downloads your own run launches at
+once, which is itself a reason to keep archive-download usage to the remaining cases above rather than the
+default generation path. The `tinker` CLI's own `checkpoint download` command is a DIFFERENT code path with no
+equivalent override available (no flag/env var): its internal retry loop has a hardcoded 300s cumulative wait
+budget, and launching several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4
+timed out, twice in a row) while the identical downloads run ONE AT A TIME each succeeded well within it. For the
+CLI path specifically: prefer serial, not concurrent, when fetching more than one adapter.
 
 **On-compute agent delegate (RARE):** drive a named agent in the compute's tmux via the send-keys protocol (clear input
 first, send text, separate Enter; long msgs via a literal heredoc). If it loses auth, finish auth-free with a shell
