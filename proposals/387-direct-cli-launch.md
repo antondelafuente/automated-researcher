@@ -45,14 +45,21 @@ the pinned CLI install (#384), concurrency, and the `enable-automerge` post-step
    with `ANTHROPIC_API_KEY` and `GH_TOKEN` in env, `timeout-minutes: 45` on the step, and the stream teed to
    the step log for progress visibility (probe 2's output showed this is line-delimited JSON — `system`/
    `assistant`/`user`/`result` events — safe to tee directly).
-4. **Extract structured output.** The probe's final `"type":"result"` event carries a top-level
-   `.structured_output` object matching the schema directly (e.g. `{"status":"blocked","pr_number":null}`),
-   not the JSON-encoded `.result` string. `jq` the last `type == "result"` event's `.structured_output` out
-   of the tee'd log and feed it into the existing `Resolve job outputs` step unchanged, including its
-   `opened` ⇒ requires-valid-`pr_number` invariant enforcement (#382). Missing/absent structured output stays
-   a loud failure, as today (a missing/garbled result line surfaces as `jq` returning `null`, which the
-   unchanged `resolve_outputs` step already turns into an error for `status=opened` and a cleared
-   `pr_number` otherwise).
+4. **Extract structured output — fail loudly, don't fall through.** The probe's final `"type":"result"`
+   event carries a top-level `.structured_output` object matching the schema directly (e.g.
+   `{"status":"blocked","pr_number":null}`), not the JSON-encoded `.result` string. `set -euo pipefail` on
+   the run step means a non-zero CLI exit (a crash, a timeout) already fails the step/job loudly via
+   `pipefail` on the `| tee` pipeline — no separate check needed there. But the *existing*
+   `Resolve job outputs` step's `jq -r '.status // "blocked"'` silently resolves an **empty** `$STRUCTURED`
+   to `status=blocked` with exit 0 (verified: `echo "" | jq -r '.status // "blocked"'` exits 0) — under the
+   wrapper, this was safe because the action step itself would already have failed the job before
+   `resolve_outputs` ever ran on a launch crash; now that this job owns extraction directly, that silent
+   fallback would make a CLI run that exited 0 but produced no result event (or no `structured_output` on
+   it) look identical to a real `blocked` decision instead of erroring (design-review finding 1). So the new
+   extraction step itself validates before handing off: pull the last `type == "result"` event's
+   `.structured_output` from the tee'd log, and if that's empty or `null`, `echo "::error::..."` and
+   `exit 1` right there — `resolve_outputs` only ever sees a populated `$STRUCTURED`, and its existing
+   `opened` ⇒ requires-valid-`pr_number` invariant enforcement (#382) is otherwise unchanged.
 5. Note `--permission-mode bypassPermissions` as the documented fallback knob for tool-permission denials, in
    a comment, without enabling it preemptively — no evidence yet that it's needed.
 
