@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306).
+# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306)
+# and its ignored-file guard (#340).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
 # runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
@@ -9,7 +10,10 @@
 #   - sk- boundary guard: a long hyphenated identifier merely CONTAINING `sk-` is not a false-positive, while
 #     a genuine `sk-…` key (after a non-word char) still blocks.
 # Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
-# no scan bypass), and an empty delta fails on "nothing to commit".
+# no scan bypass), and an empty delta fails on "nothing to commit". Also covers #340: a non-trivial file the
+# BASE tree's .gitignore silently excludes from staging (even alongside other content that stages fine) BLOCKS
+# and is listed; --skip-ignored explicitly acknowledges and proceeds; well-known junk (e.g. .DS_Store) never
+# blocks on its own.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,14 +42,29 @@ make_repo() {
   git -C "$root" checkout -q -b change/x
 }
 
-# run_dry <dir>: run the gate under a clean XDG_CONFIG_HOME (no profile) + BASE_BRANCH=main. Echoes nothing;
-# returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
+# run_dry <dir> [extra-args...]: run the gate under a clean XDG_CONFIG_HOME (no profile) + BASE_BRANCH=main.
+# Echoes nothing; returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
 LAST_ERR=""
 run_dry() {
-  local dir="$1" cfg; cfg="$(mktemp -d)"
+  local dir="$1"; shift; local cfg; cfg="$(mktemp -d)"
   local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
-      bash "$SCRIPT" "$dir" --dry-run 2>&1)"; local rc=$?
+      bash "$SCRIPT" "$dir" --dry-run "$@" 2>&1)"; local rc=$?
   LAST_ERR="$out"; rm -rf "$cfg"; return $rc
+}
+
+# make_repo_with_gitignore <dir> <gitignore-content>: like make_repo, but the BASE commit also carries a
+# .gitignore (the ignored-file guard is decided by the BASE tree the worktree checks out, not the working
+# tree — see log-experiment.sh's stage_worktree comment).
+make_repo_with_gitignore() {
+  local root="$1" ignore="$2"
+  git init -q -b main "$root"
+  git -C "$root" config user.email smoke@test; git -C "$root" config user.name smoke
+  mkdir -p "$root/reg/note"
+  printf '%s\n' "$FP_LINE" > "$root/reg/note/page.html"
+  printf '%s\n' "$ignore" > "$root/.gitignore"
+  git -C "$root" add -A; git -C "$root" commit -qm base
+  git -C "$root" update-ref refs/remotes/origin/main main
+  git -C "$root" checkout -q -b change/x
 }
 
 echo "[smoke] case 1: unchanged pre-existing FP page + a clean new note -> PASS (was: blocked #306)"
@@ -95,6 +114,30 @@ T=$(mktemp -d); make_repo "$T"
 printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), staged as a new file
 if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 8: a pinned .jsonl silently gitignored alongside other content that stages fine -> BLOCK (#340)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'notes\n' > "$T/reg/note/note8.md"                       # a normal new file — stages fine
+printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"      # pinned instrument file — silently gitignored
+if run_dry "$T/reg/note"; then fail "gitignored pinned file was NOT blocked (#340 regression) — record looked complete but dropped battery.jsonl"; else
+  case "$LAST_ERR" in *"gitignored file"*"battery.jsonl"*) pass "gitignored pinned file blocked and listed, even though other content staged fine";; *) fail "blocked but not on the ignored-file guard: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 9: same gitignored pinned file, but with --skip-ignored -> PASS (explicit acknowledgment)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'notes\n' > "$T/reg/note/note9.md"
+printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"
+if run_dry "$T/reg/note" --skip-ignored; then pass "--skip-ignored proceeds past the ignored-file guard"; else
+  fail "--skip-ignored did NOT bypass the guard: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 10: only a trivial ignored file (.DS_Store) -> PASS, no block (junk filter)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '.DS_Store'
+printf 'notes\n' > "$T/reg/note/note10.md"
+touch "$T/reg/note/.DS_Store"
+if run_dry "$T/reg/note"; then pass "trivial .DS_Store ignore does not block"; else
+  fail "trivial-only ignore blocked (should not): $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

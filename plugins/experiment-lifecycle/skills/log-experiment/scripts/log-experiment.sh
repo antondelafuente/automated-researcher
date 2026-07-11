@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# log-experiment.sh <registry-dir> [--dry-run]
+# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -8,6 +8,13 @@
 #   - note         (anything else):            deterministic secret scan only.
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
+#
+# Ignored-file guard (#340): a plain `git add` silently drops anything the BASE tree's .gitignore matches —
+# fine for the R2-scale artifacts it's meant to keep out of git, but a small *pinned* file (e.g. a frozen
+# instrument the DESIGN.md declares "committed with this design") can share the same ignored extension and
+# vanish with no trace. After staging, any non-trivial (not `.DS_Store`/`__pycache__`/etc.) file under the
+# dir that the .gitignore excluded is printed and BLOCKS; pass --skip-ignored to acknowledge and proceed
+# when the exclusion really is an intentional R2-scale one.
 #
 # Config (instance, env-overridable; NO instance defaults — fail closed):
 #   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
@@ -105,15 +112,16 @@ fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
-DRY_RUN=0; DIR=""
+DRY_RUN=0; SKIP_IGNORED=0; DIR=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
+    --skip-ignored) SKIP_IGNORED=1 ;;
     -*) die "unknown flag: $a" ;;
     *) DIR="$a" ;;
   esac
 done
-[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run]"
+[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]"
 [ -d "$DIR" ] || die "not a directory: $DIR"
 DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
@@ -248,6 +256,37 @@ WT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in clea
 cleanup() { [ -n "$WT" ] && git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
             [ "$CREATED_BRANCH" = 1 ] && git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
+
+# is_trivial_ignore <path>: well-known junk that is never meant to be committed regardless of context —
+# excluded from the guard below so its output stays signal, not noise.
+is_trivial_ignore() {
+  case "$1" in
+    */.DS_Store|.DS_Store|*/__pycache__/*|__pycache__/*|*.pyc|*.pyo|*/.ipynb_checkpoints/*|.ipynb_checkpoints/*|*~|*.swp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# check_ignored_files (#340): MUST be called AFTER `git add -- "$REL"` in the worktree. Lists any file under
+# $REL that the BASE tree's .gitignore excluded from the just-staged set (`git status --ignored=matching`,
+# NUL-delimited for the same path-safety reason secret_scan reads paths raw — see its comment). A silent
+# exclusion is fine for a genuine R2-scale artifact but not for a small pinned file sharing the ignored
+# extension (the #340 incident); BLOCK by default and print the list, unless the caller passed
+# --skip-ignored to explicitly acknowledge the exclusion is intentional.
+check_ignored_files() {
+  local entry path; local -a hits=()
+  while IFS= read -r -d '' entry; do
+    case "$entry" in '!! '*) path="${entry#!! }" ;; *) continue ;; esac
+    is_trivial_ignore "$path" && continue
+    hits+=("$path")
+  done < <(git -C "$WT" status --porcelain=v1 -z --ignored=matching -- "$REL")
+  [ "${#hits[@]}" -eq 0 ] && return 0
+  note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
+  printf '  %s\n' "${hits[@]}" >&2
+  if [ "$SKIP_IGNORED" = 1 ]; then
+    note "--skip-ignored: proceeding anyway (acknowledged)"
+    return 0
+  fi
+  die "$KIND has gitignored file(s) excluded from the staged commit (listed above) — if this is an intentional R2-scale exclusion, re-run with --skip-ignored; if any of these should have been committed (e.g. a small pinned instrument file sharing an ignored extension), fix the .gitignore or rename/relocate the file, then retry"
+}
 stage_worktree() {
   git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
   git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1 \
@@ -258,6 +297,7 @@ stage_worktree() {
   mkdir -p "$WT/$(dirname "$REL")"
   cp -r "$DIR" "$WT/$(dirname "$REL")/"
   git -C "$WT" add -- "$REL"                          # respects the BASE tree's .gitignore (large artifacts stay on R2)
+  check_ignored_files                                 # #340: BLOCK on a non-trivial file the .gitignore silently dropped
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
   if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
