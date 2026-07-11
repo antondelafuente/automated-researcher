@@ -311,13 +311,19 @@ check_excluded_files() {
   note "excluded from staging (present in $REL but not staged — an ignore rule matched):"
   for f in "${excluded[@]}"; do note "  - $f"; done
   # BLOCK only if a claims file states an excluded filename is committed: basename match (fixed-string, so a
-  # filename with regex metachars can't misfire) + 'committ' wording on the SAME line.
+  # filename with regex metachars can't misfire) + a commit-claim word on the SAME line. A loose 'committ'
+  # substring (the prior version) both over-matched (e.g. "is NOT committed") and under-matched (a bare
+  # "commit" doesn't contain that substring) — a doc that mentions the excluded file in an R2/not-committed
+  # context is legitimate; only a same-line claim it's actually committed is the lie #331 caught. Precision
+  # over recall here: the excluded-files list above is always printed, so a claim this misses is still
+  # visible to a human.
   local claim_file bn hit
+  local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
     for f in "${excluded[@]}"; do
       bn="$(basename "$f")"
-      if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE 'committ')"; then
+      if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS")"; then
         die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
       fi
     done

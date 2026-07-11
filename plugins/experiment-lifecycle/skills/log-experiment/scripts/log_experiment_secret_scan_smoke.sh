@@ -20,9 +20,12 @@
 # Also asserts the #331 excluded-files gate: a file present in the staged dir but dropped by an ignore rule
 # is always PRINTED, logging still PASSES when that drop is not falsely claimed committed, and logging BLOCKS
 # when RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed (the exact silent
-# prose/tree divergence #331 caught a day late). Plus two review-round hardenings on that same gate: a
+# prose/tree divergence #331 caught a day late). Plus review-round hardenings on that same gate: a
 # non-ASCII-named staged file is never misread as excluded (git quotes such paths unless read with `ls-files
-# -z`), and an ignored SYMLINK claimed committed is caught, not just ignored regular files.
+# -z`), an ignored SYMLINK claimed committed is caught (not just ignored regular files), and the commit-claim
+# match is a same-line basename + specific word (committed/commit/in the registry/in this dir) instead of a
+# loose 'committ' substring — so a bare "commit" claim is caught (previously missed) and a commit-claim word
+# elsewhere in the doc on a different line does not false-positive block.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -210,6 +213,32 @@ printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/not
 if run_dry "$T/reg/note"; then fail "ignored symlink falsely claimed committed was NOT blocked (symlink missed by present-file scan)"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "ignored symlink claimed committed is blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 17: RESULTS.md uses bare 'commit' (not 'committed') on the same line -> BLOCK (prior 'committ' substring missed this — a real claim, not just a false-positive fix)"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'We commit rollout_samples.jsonl to the registry after review.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "bare 'commit' claim on a dropped file was NOT blocked"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "bare 'commit' claim blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 18: RESULTS.md claims 'in this dir' (no 'commit'/'committed' word) on the same line -> BLOCK"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is in this dir, alongside the other artifacts.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "'in this dir' claim on a dropped file was NOT blocked"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "'in this dir' claim blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 19: dropped filename and a 'committed' claim about something else appear on DIFFERENT lines -> PASS (no false-positive; same-line co-occurrence only)"
+T=$(mktemp -d); make_repo_ignored "$T"
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\nEverything else in this note is committed.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then pass "filename and unrelated 'committed' line on separate lines does not false-positive block"; else
+  fail "blocked despite the commit-claim word being on a different line: $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
