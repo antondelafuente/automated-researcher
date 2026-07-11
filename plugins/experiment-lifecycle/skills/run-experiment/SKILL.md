@@ -462,6 +462,18 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   self-inflicted by your own fan-out). Cap LOCAL launch concurrency independently of the remote/provider limit —
   `local_job_queue.sh` in this skill's `scripts/` is a reusable throttled-launch queue (poll a running-process count
   against a cap, launch the next queued command as a slot frees) so this doesn't get re-derived from scratch per run.
+- **Kill-or-verify the original pod before treating a mid-run reassignment as clean (#334).** Rebalancing a
+  queue item onto a newly-free pod is a decision that lives in *your* head, not the original pod's: its
+  already-running driver still holds the stale arm/queue list it was launched with and, once it finishes its
+  current item, will auto-continue to the next item in that baked-in list — even if you've since reassigned
+  that item elsewhere. "The pod looks idle now" is not evidence its driver won't pick the item back up; check
+  its actual running process argv (the `--arms`/queue it's really executing) before reassigning, and kill (or
+  positively confirm already-exited) that process — then also kill any orphaned worker process it spawned
+  (e.g. a `VLLM::EngineCore` left behind by a killed driver, same pattern as `gpu-job` SKILL.md's multi-adapter
+  kill guidance) or the GPU isn't actually free either. One pod duplicating another's corpus generation
+  concurrently was caught only by a downstream row-count sanity check (a corpus file unexpectedly climbing on
+  a pod that should have been idle) — a mechanical kill-or-verify check catches the silent 2x-spend before it
+  happens, not after.
 - **Utilization is judged as a series, in context — and YOU own that judgment, not the designer (#323, relocated by
   #342).** A single `nvidia-smi` read is one-sample noise (cf. the DATA AUDIT gate's distrust of a 2-sample
   self-smoke): during a long-running GPU-bound step, sample `nvidia-smi
