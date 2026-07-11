@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306).
+# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306) and
+# symlink_scan (#416).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
-# runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
-# fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
+# runs the secret + symlink scans on the STAGED set, then stops BEFORE any push/token/network), against
+# throwaway git fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
 #   - staged-set scoping: a pre-existing merged file (even one that trips a pattern) does NOT block a log that
 #     leaves it unchanged (it stages nothing); a NEWLY added / MODIFIED file carrying a real key DOES block.
 #   - sk- boundary guard: a long hyphenated identifier merely CONTAINING `sk-` is not a false-positive, while
 #     a genuine `sk-…` key (after a non-word char) still blocks.
 # Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
 # no scan bypass), and an empty delta fails on "nothing to commit".
+#
+# #416: also asserts symlink_scan blocks ANY staged symlink — one pointing outside the repo (the original
+# incident: a design-stage PR committing a git symlink into another session's /tmp scratchpad) AND one whose
+# relative target happens to resolve inside the repo (wholesale rejection, not a resolve-and-judge heuristic)
+# — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -95,6 +101,24 @@ T=$(mktemp -d); make_repo "$T"
 printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), staged as a new file
 if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 8: NEW staged symlink pointing OUTSIDE the repo -> BLOCK (the #416 incident)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note8.md"
+ln -s /etc/passwd "$T/reg/note/bad_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink pointing outside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "symlink outside the repo blocked";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 9: NEW staged symlink whose RELATIVE target resolves INSIDE the repo -> still BLOCK (wholesale reject, not resolve-and-judge)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note9.md"
+ln -s note9.md "$T/reg/note/rel_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink resolving inside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "in-repo-resolving symlink still blocked (wholesale reject)";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
