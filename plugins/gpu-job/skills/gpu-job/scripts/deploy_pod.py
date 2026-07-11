@@ -112,9 +112,14 @@ def resolve_gpu_types(types_csv, type_single):
     sent together as one gpuTypeIds batch (gpuTypePriority=availability picks whichever is available,
     the same pattern dataCenterIds/dataCenterPriority already uses for DCs). GPU_TYPES wins when set;
     GPU_TYPE is the one-item back-compat form; neither set falls back to _DEFAULT_GPU_TYPES rather than
-    a single scarce premium SKU (#351)."""
+    a single scarce premium SKU (#351). A GPU_TYPES value that parses to no usable entries (e.g. "," or
+    " ") is a misconfiguration, not "no preference" — raises rather than silently sending an empty
+    gpuTypeIds batch to the API."""
     if types_csv:
-        return [t.strip() for t in types_csv.split(",") if t.strip()]
+        parsed = [t.strip() for t in types_csv.split(",") if t.strip()]
+        if not parsed:
+            raise SystemExit(f"GPU_TYPES={types_csv!r} has no usable entries after parsing")
+        return parsed
     if type_single:
         return [type_single]
     return list(_DEFAULT_GPU_TYPES)
@@ -414,6 +419,11 @@ def _selftest():
     assert resolve_gpu_types(None, None) == _DEFAULT_GPU_TYPES, "no override -> ample default list"
     assert len(_DEFAULT_GPU_TYPES) > 1 and "NVIDIA H200" not in _DEFAULT_GPU_TYPES, \
         "default must be a multi-SKU, non-premium list, not the old single scarce card"
+    try:
+        resolve_gpu_types(",", None)
+        assert False, "malformed GPU_TYPES (no usable entries) must raise, not send an empty gpuTypeIds batch"
+    except SystemExit:
+        pass
     print(f"deploy_pod selftest OK: {len(ids)} DCs -> {len(t)} tiers")
 
 
