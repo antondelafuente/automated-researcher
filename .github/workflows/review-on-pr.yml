@@ -105,9 +105,11 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           permission-profile: ":read-only"
-          # Pinned deliberately (automated-researcher#394) so the reviewer model is a conscious choice,
-          # not whatever the codex-action/CLI pin defaults to. Bump here when moving to a newer model.
+          # Pinned deliberately (automated-researcher#394) so the reviewer model/effort are a conscious
+          # choice, not whatever the codex-action/CLI pin defaults to. Bump here when moving to a newer
+          # model or effort.
           model: gpt-5.6-sol
+          effort: medium
           # The triggering actor for this pull_request run is whoever opened/pushed the PR — the claude
           # engineer bot — and openai/codex-action denies bot actors by default (docs/security.md) even
           # though this job's own `if:` already restricts the run to that exact identity.
