@@ -1,3 +1,13 @@
+- experiment-lifecycle 0.3.40 (2026-07-11): document an all-null/all-zero join or aggregation result as a loud
+  bug signal in `run-experiment` SKILL.md's Execution discipline section (#349). Incident: a per-item
+  correlation script joining direction-reader verdicts against a blind-key parsed from judged-rollout
+  filenames returned `null`/`n_items=0` for every row on first run — `mid.rsplit("__", 1)` silently mis-split
+  a filename with more than two `__`-delimited segments, producing zero matching join keys with no error; only
+  caught because the executor happened to eyeball the output. Fix: a new bullet next to the existing
+  read-full-rollouts data-audit guidance says a zero-match or all-null/all-zero aggregation result is (almost)
+  never a real finding — re-derive the join keys from a hand-inspected sample and assert the join rate is sane
+  (e.g. >90% of expected rows matched) before reporting it, the aggregation-stage analog of `gpu-job`
+  SKILL.md's N-conditions-collapse-to-identical-numbers gotcha.
 - experiment-lifecycle 0.3.39 (2026-07-11) / gpu-job 0.2.10 (2026-07-11): make the `gpu-job` pod-lease refresh an
   automatic self-wake heartbeat instead of an operator-remembered step (#293). Incident: a ~15h experiment lost
   two GPU pods mid-work to their own set-once deadlines — a recovered-orphan pod whose lease still held its
