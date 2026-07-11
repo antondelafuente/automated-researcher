@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.35 (2026-07-11): document the Tinker checkpoint-archive-download timeout/concurrency
+- experiment-lifecycle 0.3.37 (2026-07-11): document the Tinker checkpoint-archive-download timeout/concurrency
   footgun in `run-experiment` SKILL.md's Step 3, scoped as guidance for the remaining cases where a local
   adapter file is genuinely needed (vLLM serving of large models, or offline artifact archival) now that #353
   makes direct Tinker-side sampling the default for small-model generation (#330). Archive creation can take up
@@ -16,6 +16,29 @@
   several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4 timed out, twice in
   a row) while the identical downloads run one at a time each succeeded well within it — for that CLI path
   specifically, prefer serial over concurrent when fetching more than one adapter.
+- experiment-lifecycle 0.3.36 (2026-07-11): add a pre-flight balance-vs-estimated-spend check for long
+  LLM-judge/metered-API drivers (#354). Incident: a dedicated OpenRouter judge key ran out of credits
+  mid-judging-run TWICE in the same experiment close — once from ~$0 balance (no check before launch), and
+  again after a top-up that lasted only 1-2 hours at the run's real burn rate. Each depletion was caught only
+  via a burst of runtime `JUDGE_CALL_FAILED ... Insufficient credits` errors, requiring a killed process, a
+  prune of the null-valued rows written during the failure window, and a designer round-trip to resume, twice.
+  `run-experiment` SKILL.md's Execution discipline section gains a bullet directing executors to check the
+  provider's balance against the estimated remaining spend (rows-left * the run's own observed $/row) before
+  EVERY (re)launch of such a driver, not just the first — the second depletion happened on a resume. A new
+  `judge_balance_check.sh` (+ smoke) in `run-experiment`'s `scripts/` does the threshold/comparison arithmetic
+  (skip below a cost floor, default $5; OK if balance covers the estimate; BLOCKED otherwise) so it doesn't get
+  re-derived per run — it takes numbers the executor already has and has no opinion on the provider or how the
+  balance was fetched (that stays instance-owned, via the cost_policy recipe).
+- experiment-lifecycle 0.3.35 (2026-07-11): block `log-experiment.sh` on a silently gitignored pinned file
+  (#340). Incident: `log-experiment.sh` staged a registry dir with a plain `git add`, which silently honors
+  the research repo's `.gitignore`; a small pinned file (e.g. an instrument the DESIGN.md declares
+  "committed with this design") can share an ignored extension with genuine R2-scale artifacts
+  (`registry/**/*.jsonl`) and vanish from the logged PR with no trace — the PR still opens/merges looking
+  complete. A new `check_ignored_files` guard, run after staging, diffs "files present under the dir" vs
+  "files actually staged"; any non-trivial excluded file is printed and BLOCKS, while well-known junk
+  (`.DS_Store`, `__pycache__`, editor swap/backup files, etc.) is filtered out. A new `--skip-ignored` flag
+  lets the caller explicitly acknowledge an intentional R2-scale exclusion and proceed. Applies uniformly to
+  all three kinds (experiment/design-stage/note) since the underlying `git add` behavior isn't gate-specific.
 - experiment-lifecycle 0.3.34 (2026-07-11): default small-model LoRA generation to direct Tinker-side sampling
   over download-to-vLLM, not only as a congestion fallback (#353). Incident: two concurrent AAR sessions
   sharing one `TINKER_API_KEY` both requested a checkpoint-archive-export (pulling a trained LoRA adapter
