@@ -49,14 +49,22 @@ jobs:
           fi
           mapfile -t changed_paths <<< "$diff_output"
 
-          # Run the TRUSTED base-ref copy of checks.sh, not the PR head's own copy: otherwise a PR could
-          # weaken checks.sh in the same diff and trivially pass its own required check. The script still
-          # evaluates the actual PR-head working tree (we don't check out anything else) -- only the
-          # validation LOGIC comes from the base commit, mirroring the same base-ref-materialization
-          # pattern already used for the Codex review guidance in review-on-pr.yml.
-          if ! git show "$BASE_SHA:.aar-ci/checks.sh" > /tmp/trusted_checks.sh 2>/dev/null; then
-            echo "::error::could not materialize trusted .aar-ci/checks.sh from base $BASE_SHA"
-            exit 1
-          fi
-          chmod +x /tmp/trusted_checks.sh
-          bash /tmp/trusted_checks.sh "${changed_paths[@]}"
+          # Overwrite the .aar-ci/ CI profile in place with its BASE-ref content before running it, so a
+          # PR cannot weaken checks.sh (or a helper it directly shells out to, like fake_home_smoke.sh) in
+          # the same diff and trivially pass its own required check. This covers the per-repo CI profile
+          # ship-change's own SKILL.md names as the trust boundary (checks.sh + fake_home_smoke.sh +
+          # checks_marketplace_smoke.sh) -- the actual working tree everything else runs against is still
+          # the real PR-head content, only these three files are pinned to base. checks.sh also shells out
+          # to dozens of PER-PLUGIN smoke scripts scattered under plugins/*/skills/*/scripts/ depending on
+          # which paths changed; materializing every one of those from base too would silently break
+          # legitimate PRs that add a new plugin's smoke test alongside the plugin itself (the base ref
+          # wouldn't have that new smoke script yet), so that broader surface is left as an accepted
+          # residual risk -- mitigated by the cross-family Codex review scrutinizing the exact same diff
+          # under its P0 trust-boundary-violation criteria, not by this gate.
+          for f in checks.sh fake_home_smoke.sh checks_marketplace_smoke.sh; do
+            if git cat-file -e "$BASE_SHA:.aar-ci/$f" 2>/dev/null; then
+              git show "$BASE_SHA:.aar-ci/$f" > ".aar-ci/$f"
+              chmod +x ".aar-ci/$f"
+            fi
+          done
+          bash .aar-ci/checks.sh "${changed_paths[@]}"
