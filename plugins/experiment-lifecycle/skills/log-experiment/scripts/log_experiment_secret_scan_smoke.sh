@@ -24,11 +24,14 @@
 # BLOCKs with a specific message even when --skip-ignored is passed (the exact silent prose/tree divergence
 # #331 caught a day late — an intentional R2 exclusion is fine, a doc that still claims the file landed is
 # not). Also covers the review-round hardenings on that check: an ignored SYMLINK claimed committed is caught
-# (not just ignored regular files, since it reuses check_ignored_files' `git status --ignored=matching -z`
-# list), and the commit-claim match is a same-line basename + specific word (committed/commit/in the
-# registry/in this dir) instead of a loose 'committ' substring — so a bare "commit" claim is caught
-# (previously missed) and a commit-claim word elsewhere in the doc on a different line does not
-# false-positive block.
+# (not just ignored regular files, since it reuses check_ignored_files' `git ls-files --others --ignored
+# --exclude-standard -z` list), the commit-claim match is a same-line basename + specific word (committed/
+# commit/in the registry/in this dir) instead of a loose 'committ' substring — so a bare "commit" claim is
+# caught (previously missed) and a commit-claim word elsewhere in the doc on a different line does not
+# false-positive block — a courtesy negation filter (' not '/'n't ' on the same line) means "is not committed"
+# does not false-positive block either — and a claim about a file inside a WHOLLY-ignored directory (not just
+# an individually-ignored file) is still caught, since `ls-files` enumerates every file under an ignored
+# directory individually rather than collapsing it to one directory entry the way `git status` does.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -252,6 +255,24 @@ printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\nEverything else in this note is committed.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then pass "filename and unrelated 'committed' line on separate lines does not false-positive block"; else
   fail "blocked despite the commit-claim word being on a different line: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 22: RESULTS.md says the dropped file is 'not committed' (negated), --skip-ignored -> PASS (courtesy negation filter)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is not committed; it lives on R2.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note" --skip-ignored; then pass "negated 'is not committed' claim does not false-positive block"; else
+  fail "blocked despite the claim being negated ('not committed'): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 23: dropped file lives inside a WHOLLY-ignored directory (not an individually-ignored file), RESULTS.md claims it's committed, WITHOUT --skip-ignored -> BLOCK (ls-files enumerates files inside the ignored dir, not just the dir's own basename)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'artifacts/'
+mkdir -p "$T/reg/note/artifacts"
+printf 'row\n' > "$T/reg/note/artifacts/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "false 'committed' claim on a file inside a wholly-ignored directory was NOT blocked"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "claim about a file inside a wholly-ignored directory is blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
