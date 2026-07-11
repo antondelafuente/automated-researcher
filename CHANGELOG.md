@@ -1,17 +1,21 @@
 - experiment-lifecycle 0.3.35 (2026-07-11): document the Tinker checkpoint-archive-download timeout/concurrency
-  footgun in `run-experiment` SKILL.md's Step 3 (#330). Archive creation can take up to ~1hr server-side even
-  for a modest rank-32 LoRA adapter (29-55min observed on a 3B base) — a custom `download_adapter.py`-style
-  script using a plain `tinker.ServiceClient()` hits the SDK's shorter default HTTP timeout and raises
-  `tinker.APITimeoutError` before archive creation finishes. Fix: an explicit generous client timeout
-  (`tinker.ServiceClient(timeout=3600)`), confirmed working across multiple downloads. With that fix in place,
-  parallelizing multiple adapter downloads is fine (they don't block each other server-side; 4/4 succeeded
-  concurrently after the fix, and separately 20/20 small-corpus adapters completed in ~5-10min total run
-  concurrently — real variance, not evidence the long wait is gone generally). The `tinker` CLI's own
-  `checkpoint download` command is a distinct code path with no equivalent timeout override (no flag/env var):
-  its retry loop has a hardcoded 300s cumulative wait budget, and launching several `checkpoint download`
-  invocations concurrently reproducibly blew that budget (4/4 timed out, twice in a row) while the identical
-  downloads run one at a time each succeeded well within it — for that CLI path specifically, prefer serial
-  over concurrent when fetching more than one adapter.
+  footgun in `run-experiment` SKILL.md's Step 3, scoped as guidance for the remaining cases where a local
+  adapter file is genuinely needed (vLLM serving of large models, or offline artifact archival) now that #353
+  makes direct Tinker-side sampling the default for small-model generation (#330). Archive creation can take up
+  to ~1hr server-side even for a modest rank-32 LoRA adapter (29-55min observed on a 3B base) — a custom
+  `download_adapter.py`-style script using a plain `tinker.ServiceClient()` hits the SDK's shorter default HTTP
+  timeout and raises `tinker.APITimeoutError` before archive creation finishes. Fix: an explicit generous client
+  timeout (`tinker.ServiceClient(timeout=3600)`), confirmed working across multiple downloads. With that fix in
+  place, multiple adapter downloads within the same run don't add self-inflicted blocking beyond what the export
+  queue already imposes (4/4 succeeded concurrently after the fix, and separately 20/20 small-corpus adapters
+  completed in ~5-10min total run concurrently — real variance, not evidence the long wait is gone generally) —
+  but that's orthogonal to the cross-session account-level queue congestion #353 documents: a concurrent session
+  exporting on the same `TINKER_API_KEY` can still cause the 20-40+ min stall regardless of your own run's
+  concurrency. The `tinker` CLI's own `checkpoint download` command is a distinct code path with no equivalent
+  timeout override (no flag/env var): its retry loop has a hardcoded 300s cumulative wait budget, and launching
+  several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4 timed out, twice in
+  a row) while the identical downloads run one at a time each succeeded well within it — for that CLI path
+  specifically, prefer serial over concurrent when fetching more than one adapter.
 - experiment-lifecycle 0.3.34 (2026-07-11): default small-model LoRA generation to direct Tinker-side sampling
   over download-to-vLLM, not only as a congestion fallback (#353). Incident: two concurrent AAR sessions
   sharing one `TINKER_API_KEY` both requested a checkpoint-archive-export (pulling a trained LoRA adapter
