@@ -141,41 +141,62 @@ jobs:
           npm install -g @anthropic-ai/claude-code@2.1.207
           echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
 
-      - name: Run claude-code-action (implementor)
-        id: run_claude
-        uses: anthropics/claude-code-action@536f2c32a39763739000b0e1ac69ca2647d97ce9 # anthropics/claude-code-action v1.0.170
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ steps.mint_claude_token.outputs.token }}
-          prompt: ${{ steps.render_prompt.outputs.prompt }}
-          # Skips claude-code-action's own auto-install, which is the actual startup-crash trigger; use
-          # the version pinned above instead.
-          path_to_claude_code_executable: ${{ steps.install_claude.outputs.path }}
-          base_branch: main
-          branch_prefix: "agent/"
-          # Default template is '{{prefix}}{{entityType}}-{{entityNumber}}-{{timestamp}}' (e.g.
-          # agent/issue-378-20260711153000) — pin it to the exact agent/issue-<n> shape AGENTS.md and the
-          # implementor prompt both promise.
-          branch_name_template: "{{prefix}}issue-{{entityNumber}}"
-          # Re-dispatch (AGENTS.md "remove and re-add ready") can be done by either engineer bot, and the
-          # action denies bot actors by default (see docs/security.md) even though our own job-level `if:`
-          # already allowlisted them.
-          allowed_bots: "claude-code-engineer[bot],codex-engineer[bot]"
-          # Without these, the action's git-operation identity defaults to its own generic "claude[bot]"
-          # (id 41898282) regardless of which token pushes -- commits would be attributed to the wrong App.
+      # automated-researcher#387: implement-on-ready died ~0.4s after SDK launch on every run under
+      # anthropics/claude-code-action; debug PR #386 proved the raw pinned CLI (this exact invocation)
+      # exits 0 with clean structured output on a real runner (run 29135070985), isolating the crash to
+      # the wrapper action's own bun/agent-SDK harness (matches upstream #947/#892/#804). This launches
+      # the CLI directly instead, doing explicitly what the wrapper did implicitly. The wrapper can be
+      # re-adopted later, in one step, once upstream fixes its startup crash.
+      - name: Configure implementor git identity
+        env:
+          CLAUDE_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
           # id is the numeric prefix from the bot's own noreply commit email (confirmed from this repo's
-          # git log: claude-code-engineer[bot] <294932622+claude-code-engineer[bot]@users.noreply.github.com>).
-          bot_id: "294932622"
-          bot_name: "claude-code-engineer[bot]"
-          # automated-researcher#382: the repo is private with controlled access (researcher accepts
-          # run-log visibility), matching anthropics/claude-code-action's docs/security.md guidance on
-          # when show_full_output is safe to enable — surfaces the real API error instead of an opaque
-          # exit-1 if the SDK ever fails to launch again.
-          show_full_output: true
-          claude_args: |
-            --model claude-sonnet-5
-            --allowedTools Bash,Edit,Write,Read,Grep,Glob
-            --json-schema {"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}}}
+          # git log: claude-code-engineer[bot] <294932622+claude-code-engineer[bot]@users.noreply.github.com>),
+          # what the wrapper action's bot_id/bot_name inputs set up for us before.
+          git config user.name 'claude-code-engineer[bot]'
+          git config user.email '294932622+claude-code-engineer[bot]@users.noreply.github.com'
+          # Ephemeral runner, no persistent tracking branch needed — plain `git push origin <branch>`
+          # (no -u) from inside the agent's own Bash tool calls picks this up.
+          git remote set-url origin "https://x-access-token:${CLAUDE_TOKEN}@github.com/${REPO}.git"
+
+      - name: Run pinned Claude Code CLI (implementor)
+        id: run_claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # So `gh` calls the agent makes from its own Bash tool are authorized as the engineer App.
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          # `set -e` + `pipefail` on the `| tee` below already fails this step loudly if the CLI itself
+          # exits non-zero (a crash, a timeout) — no separate exit-code check needed for that case.
+          #
+          # If tool-permission denials surface in practice, the documented fallback knob is
+          # `--permission-mode bypassPermissions` on the invocation below — not enabled preemptively.
+          # -c (compact): stream-json input is line-delimited — pretty-printed (jq's default) multi-line
+          # output here breaks the CLI's line parser ("Error parsing streaming input line", verified
+          # locally against the pinned 2.1.207 binary).
+          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+            | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
+                --model claude-sonnet-5 \
+                --allowedTools Bash,Edit,Write,Read,Grep,Glob \
+                --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}}}' \
+            | tee /tmp/claude_stream.jsonl
+
+          # design-review finding 1 (#387 doc): don't let a CLI run that exited 0 but produced no result
+          # event / no structured_output on it fall through resolve_outputs' `// "blocked"` default, which
+          # exits 0 on empty input — validate here and fail loudly instead.
+          structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
+          if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+            echo "::error::claude CLI exited 0 but produced no structured_output in its result event"
+            exit 1
+          fi
+          echo "structured_output=$structured" >> "$GITHUB_OUTPUT"
 
       - name: Resolve job outputs
         id: resolve_outputs
