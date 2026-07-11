@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.32 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
+- experiment-lifecycle 0.3.33 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
   in `run-experiment` SKILL.md, alongside the two existing kill-rule footguns in the same Step 3 section
   (#415). Incident: a sample-fanout driver launched each sampling job with `nohup ... & disown`, then closed
   with a bare `wait` intended to block until every job finished before writing a "DONE" marker. `disown`
@@ -12,6 +12,18 @@
   liveness poll loop on the collected PIDs instead. The concrete `sample_fanout_cab1.sh`/cpc1 driver scripts
   this incident traces to are instance-owned (not present in this repo per the Releasability rule); this
   change carries the generic, product-owned lesson.
+- experiment-lifecycle 0.3.32 (2026-07-11): make the detached-driver "skip cells whose output exists"
+  resume check SUCCESS-aware, not presence-only (#357). Incident: `ld1_driver.py`'s resume check treated
+  ANY row present in the output as permanently done regardless of whether the read actually succeeded, so
+  a row that hit `final_label=null` / `final_source="excluded_parse_failure"` was never retried on later
+  driver invocations — it sat silently wrong until a downstream aggregate happened to disagree (a
+  73/8884-row, 0.8% discrepancy caught only by comparing `n_lie_rows` vs `n_direction_read` at close). The
+  same failure class was already fixed in `judge_b0_tdc1.py`'s `cell_todo()` (strip any non-"ok"
+  `parse_status` row from "done" every pass) but the direction-reader template never got the analogous
+  fix, and it's reused verbatim across experiments. `run-experiment` SKILL.md's Step 3 driver guidance now
+  spells out that the done-check must strip any row lacking a valid success marker (a real label/score,
+  not `null` / an `excluded_*`/error status) from the "done" set before computing what's left `todo`, so a
+  failed read gets requeued instead of sitting silently wrong.
 - experiment-lifecycle 0.3.31 (2026-07-11): clarify that "concurrency is free" is a REMOTE/provider-side
   billing statement only, and add a reusable throttled-launch helper for LOCAL driver concurrency (#402).
   Incident: a 40-way Tinker LoRA train fan-out followed run-experiment's "concurrency is free" guidance and

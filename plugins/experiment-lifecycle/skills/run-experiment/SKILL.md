@@ -182,7 +182,14 @@ the human — and mention what you moved.)
 ## Step 3 — Drive it
 
 **Default = the detached driver.** scp a self-contained, **idempotent** `*.sh` (skip cells whose output exists): resolve
-base → serve/train → eval → parse → copy artifacts to your store → `touch …/.done`. Run it detached (`setsid nohup`),
+base → serve/train → eval → parse → copy artifacts to your store → `touch …/.done`. **The "skip cells whose output
+exists" check must be SUCCESS-aware, not presence-only (#357):** a done-check that treats ANY row written to the
+output as permanently complete — regardless of whether the read actually succeeded — silently never retries a row
+that hit a parse failure / null label (a real incident: 73/8884 direction-read rows sat silently wrong across an
+entire experiment, caught only by comparing aggregate row counts at close). Before computing what's left `todo`,
+strip any row lacking a valid success marker (a real label/score, not `null` / an `excluded_*`/error status) from the
+"done" set, so a failed read gets requeued on the next pass instead of sitting silently wrong until someone notices
+a downstream discrepancy. Run it detached (`setsid nohup`),
 then watch with a background until-loop SSH-checking the done-marker (plus the self-wake you already armed).
 
 **Use the `gpu-job` helpers** — its driver library owns the foot-guns (GPU-stage handoffs that wait for the prior runner
