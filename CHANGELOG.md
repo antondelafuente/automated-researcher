@@ -1,3 +1,15 @@
+- experiment-lifecycle 0.3.34 (2026-07-11) / gpu-job 0.2.9 (2026-07-11): make the `gpu-job` pod-lease refresh an
+  automatic self-wake heartbeat instead of an operator-remembered step (#293). Incident: a ~15h experiment lost
+  two GPU pods mid-work to their own set-once deadlines — a recovered-orphan pod whose lease still held its
+  short, never-enriched acquire-window expiry (reaped ~1.5h in), and the eval pod's watchdog-era keepalive,
+  set once at deploy and never refreshed (deleted mid-eval; the per-pod watchdog itself is separately retired,
+  #266/#284). `run-experiment` SKILL.md's self-wake section now folds the lease refresh into the SAME tick that
+  already reads each job's liveness + progress signal: for every pod id in the run-supervision record's
+  `lease_pod_ids`, a healthy (busy/progressing) tick calls `pod_lease.sh refresh`, or `enrich` first if the
+  lease is still `provisional` (the recovered-orphan case) — a hung/BLOCKED tick does not refresh, leaving the
+  lease/reaper as the backstop for a genuinely abandoned pod. `gpu-job` SKILL.md's lease section now points at
+  `run-experiment`'s tick as the concrete owner of that refresh, and `design-experiment`'s `CHECKLIST_TEMPLATE.md`
+  self-wake / resume-contract gates name the heartbeat as part of their evidence bar.
 - experiment-lifecycle 0.3.33 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
   in `run-experiment` SKILL.md, alongside the two existing kill-rule footguns in the same Step 3 section
   (#415). Incident: a sample-fanout driver launched each sampling job with `nohup ... & disown`, then closed

@@ -78,6 +78,19 @@ advancing / bytes growing — liveness alone can't tell working from a wedged ho
 BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
 the signal you parked, so STOP re-waiting, diagnose, and notify the human.
 
+**The same tick also owns the pod-lease heartbeat — refresh is not something to remember by hand.** The `gpu-job`
+lease's `expiry` is the SOLE deletion trigger the standing reaper enforces (the per-pod watchdog is retired, #266/
+#284), so a run that silently outlives its lease gets reaped out from under it — a real incident lost a ~15h run's
+eval pod mid-stage this way, plus a recovered orphan pod whose lease never got past its short, un-enriched
+acquire-window expiry. Fold the refresh into the SAME tick that already computed the liveness + progress signal
+above, gated on that signal — never a separate step to remember: for every pod id in the run-supervision record's
+`lease_pod_ids` (`run_supervision_record.sh status <run-id>`), if this tick read the job healthy (busy or
+progressing, not hung/BLOCKED), `bash pod_lease.sh refresh <nonce> --expiry-min <N>`; if a lease is still
+`provisional` (never enriched — e.g. a recovered/adopted orphan) but you've confirmed SSH reachability, `enrich`
+it instead (`--ssh <host:port> --expiry-min <N>`) so it stops carrying its short intent-window deadline. A tick
+that instead reads hung/BLOCKED does **not** refresh — the lease's existing expiry (or the reaper) stays the
+backstop for a genuinely wedged/abandoned pod, exactly as before.
+
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
 `CHECKLIST.md` self-wake gate **FAIL**, notify/escalate before GPU/API spend, and either relaunch in a substrate that
@@ -266,6 +279,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   (never SSH liveness; a 404 from the wrong key masquerades as deleted while it bills).
 - **Stepping away?** Your unit is lease-covered — `gpu-job`'s lease reaper tears down **THIS unit's id** at lease
   expiry (set a short lease for faster idle teardown; the per-pod watchdog was retired, #266). Peers own theirs.
+  This is for a deliberate idle stop — a run you're actively driving keeps its lease fresh via the self-wake
+  heartbeat above, so it is never reaped mid-work.
 - **Write `RESULTS.md` FIRST — the experiment-close gate (do NOT skip).** Bar: *a fresh agent could reproduce this run
   and understand the data **from this dir alone**.* **Describe each arm's data (the numbers / the plot) per the DESIGN
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
