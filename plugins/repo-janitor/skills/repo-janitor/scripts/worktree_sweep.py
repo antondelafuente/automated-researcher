@@ -105,7 +105,7 @@ def resolve_default_ref(repo, default_branch):
     remote_ref = f"refs/remotes/origin/{default_branch}"
     rc, _, _ = run_git(["rev-parse", "-q", "--verify", remote_ref], cwd=repo)
     if rc == 0:
-        return f"origin/{default_branch}"
+        return remote_ref
     if rc != 1:
         return None  # lookup error, not a confirmed "absent" — never guess
 
