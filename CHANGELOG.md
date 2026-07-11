@@ -1,3 +1,16 @@
+- experiment-lifecycle 0.3.34 (2026-07-11): add a pre-flight balance-vs-estimated-spend check for long
+  LLM-judge/metered-API drivers (#354). Incident: a dedicated OpenRouter judge key ran out of credits
+  mid-judging-run TWICE in the same experiment close — once from ~$0 balance (no check before launch), and
+  again after a top-up that lasted only 1-2 hours at the run's real burn rate. Each depletion was caught only
+  via a burst of runtime `JUDGE_CALL_FAILED ... Insufficient credits` errors, requiring a killed process, a
+  prune of the null-valued rows written during the failure window, and a designer round-trip to resume, twice.
+  `run-experiment` SKILL.md's Execution discipline section gains a bullet directing executors to check the
+  provider's balance against the estimated remaining spend (rows-left * the run's own observed $/row) before
+  EVERY (re)launch of such a driver, not just the first — the second depletion happened on a resume. A new
+  `judge_balance_check.sh` (+ smoke) in `run-experiment`'s `scripts/` does the threshold/comparison arithmetic
+  (skip below a cost floor, default $5; OK if balance covers the estimate; BLOCKED otherwise) so it doesn't get
+  re-derived per run — it takes numbers the executor already has and has no opinion on the provider or how the
+  balance was fetched (that stays instance-owned, via the cost_policy recipe).
 - experiment-lifecycle 0.3.33 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
   in `run-experiment` SKILL.md, alongside the two existing kill-rule footguns in the same Step 3 section
   (#415). Incident: a sample-fanout driver launched each sampling job with `nohup ... & disown`, then closed
