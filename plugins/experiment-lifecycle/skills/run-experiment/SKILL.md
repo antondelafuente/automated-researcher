@@ -87,8 +87,10 @@ above, gated on **that same progress principle, not raw compute activity** — a
 producing, and gating on "busy" alone would refresh it forever, defeating the expiry backstop (#428 review). For
 every pod id in the run-supervision record's `lease_pod_ids` (`run_supervision_record.sh status <run-id>`),
 first resolve the pod id to its lease nonce — leases are addressed by nonce, never by pod id directly —
-the `gpu-job` plugin's `scripts/pod_lease.sh find-by-pod <pod-id>` (empty output means no matching non-terminal
-lease; skip it, don't guess a nonce), then:
+the `gpu-job` plugin's `scripts/pod_lease.sh find-by-pod <pod-id>` — empty output is not safely-skippable, it
+means no single matching non-terminal lease (none, or several — `find-by-pod` only prints a nonce for exactly
+one match); enumerate via `scripts/pod_lease.sh list` to disambiguate before deciding, never guess a nonce —
+then:
 - **positive-progress evidence this tick** (the stage-advancing / bytes-growing / log-heartbeat signal above,
   actually observed — not merely busy) → the `gpu-job` plugin's `scripts/pod_lease.sh refresh <nonce>
   --expiry-min <N>`; if the lease is
@@ -99,8 +101,8 @@ lease; skip it, don't guess a nonce), then:
   (`reason` + a bounded `quiet_until` horizon, same shape as `LOOK_AGAIN.md` below) written only because the
   brief or a human explicitly told you to expect an extended silent stretch (e.g. a known long non-logging
   compile/index stage); never self-declare one just because a tick came up empty, that's the over-strict-gating
-  failure re-created through the back door. A marker whose `quiet_until` has passed counts as absent → refresh/
-  enrich the same as the progress case above.
+  failure re-created through the back door. A marker whose `quiet_until` has passed counts as absent → falls
+  through to the **neither** case below: do NOT refresh, surface loudly on the next wake.
 - **neither** (busy-but-not-progressing, hung, BLOCKED, or simply quiet with no active marker) → do **NOT**
   refresh. Don't let this pass silently: treat it like a look-again-deadline miss — surface it loudly on the
   next wake (diagnose, notify the human) instead of quietly trusting the lease's existing expiry to eventually
