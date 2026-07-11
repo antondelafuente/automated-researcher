@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306),
-# symlink_scan (#416), and check_excluded_files (#331).
+# symlink_scan (#416), and its ignored-file guard (#340) + committed-claim check (#331).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
 # runs the secret + symlink scans on the STAGED set, then stops BEFORE any push/token/network), against
@@ -17,15 +17,18 @@
 # relative target happens to resolve inside the repo (wholesale rejection, not a resolve-and-judge heuristic)
 # — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
 #
-# Also asserts the #331 excluded-files gate: a file present in the staged dir but dropped by an ignore rule
-# is always PRINTED, logging still PASSES when that drop is not falsely claimed committed, and logging BLOCKS
-# when RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed (the exact silent
-# prose/tree divergence #331 caught a day late). Plus review-round hardenings on that same gate: a
-# non-ASCII-named staged file is never misread as excluded (git quotes such paths unless read with `ls-files
-# -z`), an ignored SYMLINK claimed committed is caught (not just ignored regular files), and the commit-claim
-# match is a same-line basename + specific word (committed/commit/in the registry/in this dir) instead of a
-# loose 'committ' substring — so a bare "commit" claim is caught (previously missed) and a commit-claim word
-# elsewhere in the doc on a different line does not false-positive block.
+# #340: also covers a non-trivial file the BASE tree's .gitignore silently excludes from staging (even
+# alongside other content that stages fine) BLOCKS and is listed; --skip-ignored explicitly acknowledges and
+# proceeds; well-known junk (e.g. .DS_Store) never blocks on its own.
+# #331: on top of that guard, an excluded file verbatim-claimed "committed" in RESULTS.md / ARTIFACT_MANIFEST.md
+# BLOCKs with a specific message even when --skip-ignored is passed (the exact silent prose/tree divergence
+# #331 caught a day late — an intentional R2 exclusion is fine, a doc that still claims the file landed is
+# not). Also covers the review-round hardenings on that check: an ignored SYMLINK claimed committed is caught
+# (not just ignored regular files, since it reuses check_ignored_files' `git status --ignored=matching -z`
+# list), and the commit-claim match is a same-line basename + specific word (committed/commit/in the
+# registry/in this dir) instead of a loose 'committ' substring — so a bare "commit" claim is caught
+# (previously missed) and a commit-claim word elsewhere in the doc on a different line does not
+# false-positive block.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,29 +57,29 @@ make_repo() {
   git -C "$root" checkout -q -b change/x
 }
 
-# make_repo_ignored <dir>: like make_repo, but origin/main ALREADY carries a `reg/**/*.jsonl` ignore rule (the
-# rule must be on the BASE the worktree is created from — a rule added only on change/x would never make it
-# into the staged worktree's checked-out tree).
-make_repo_ignored() {
-  local root="$1"
+# run_dry <dir> [extra-args...]: run the gate under a clean XDG_CONFIG_HOME (no profile) + BASE_BRANCH=main.
+# Echoes nothing; returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
+LAST_ERR=""
+run_dry() {
+  local dir="$1"; shift; local cfg; cfg="$(mktemp -d)"
+  local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
+      bash "$SCRIPT" "$dir" --dry-run "$@" 2>&1)"; local rc=$?
+  LAST_ERR="$out"; rm -rf "$cfg"; return $rc
+}
+
+# make_repo_with_gitignore <dir> <gitignore-content>: like make_repo, but the BASE commit also carries a
+# .gitignore (the ignored-file guard is decided by the BASE tree the worktree checks out, not the working
+# tree — see log-experiment.sh's stage_worktree comment).
+make_repo_with_gitignore() {
+  local root="$1" ignore="$2"
   git init -q -b main "$root"
   git -C "$root" config user.email smoke@test; git -C "$root" config user.name smoke
-  printf 'reg/**/*.jsonl\n' > "$root/.gitignore"
   mkdir -p "$root/reg/note"
   printf '%s\n' "$FP_LINE" > "$root/reg/note/page.html"
+  printf '%s\n' "$ignore" > "$root/.gitignore"
   git -C "$root" add -A; git -C "$root" commit -qm base
   git -C "$root" update-ref refs/remotes/origin/main main
   git -C "$root" checkout -q -b change/x
-}
-
-# run_dry <dir>: run the gate under a clean XDG_CONFIG_HOME (no profile) + BASE_BRANCH=main. Echoes nothing;
-# returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
-LAST_ERR=""
-run_dry() {
-  local dir="$1" cfg; cfg="$(mktemp -d)"
-  local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
-      bash "$SCRIPT" "$dir" --dry-run 2>&1)"; local rc=$?
-  LAST_ERR="$out"; rm -rf "$cfg"; return $rc
 }
 
 echo "[smoke] case 1: unchanged pre-existing FP page + a clean new note -> PASS (was: blocked #306)"
@@ -146,98 +149,108 @@ if run_dry "$T/reg/note"; then fail "symlink resolving inside the repo was NOT b
   case "$LAST_ERR" in *"staged symlink"*) pass "in-repo-resolving symlink still blocked (wholesale reject)";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 10: a new gitignored file with no committed-claim -> PASS, but PRINTED as excluded (#331)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 10: a pinned .jsonl silently gitignored alongside other content that stages fine -> BLOCK (#340)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'notes\n' > "$T/reg/note/note10.md"                      # a normal new file — stages fine
+printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"      # pinned instrument file — silently gitignored
+if run_dry "$T/reg/note"; then fail "gitignored pinned file was NOT blocked (#340 regression) — record looked complete but dropped battery.jsonl"; else
+  case "$LAST_ERR" in *"gitignored file"*"battery.jsonl"*) pass "gitignored pinned file blocked and listed, even though other content staged fine";; *) fail "blocked but not on the ignored-file guard: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 11: same gitignored pinned file, but with --skip-ignored -> PASS (explicit acknowledgment)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'notes\n' > "$T/reg/note/note11.md"
+printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"
+if run_dry "$T/reg/note" --skip-ignored; then pass "--skip-ignored proceeds past the ignored-file guard"; else
+  fail "--skip-ignored did NOT bypass the guard: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 12: only a trivial ignored file (.DS_Store) -> PASS, no block (junk filter)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '.DS_Store'
+printf 'notes\n' > "$T/reg/note/note12.md"
+touch "$T/reg/note/.DS_Store"
+if run_dry "$T/reg/note"; then pass "trivial .DS_Store ignore does not block"; else
+  fail "trivial-only ignore blocked (should not): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 13: gitignored file with no committed-claim, --skip-ignored -> PASS, still PRINTED as excluded (#331)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'a fresh note, no artifact claims\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then
-  case "$LAST_ERR" in *"excluded from staging"*"rollout_samples.jsonl"*) pass "excluded drop printed, log still passes";;
+if run_dry "$T/reg/note" --skip-ignored; then
+  case "$LAST_ERR" in *"gitignored file"*"rollout_samples.jsonl"*) pass "excluded drop printed, log still passes";;
     *) fail "logged but the exclusion was not printed: $LAST_ERR";; esac
 else fail "clean case BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 11: RESULTS.md verbatim-claims the dropped file is committed -> BLOCK (the #331 bug)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 14: RESULTS.md verbatim-claims the dropped file is committed, WITHOUT --skip-ignored -> BLOCK with the specific claims message (#331 gate composed into the #340 default-block path)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note"; then fail "false 'committed' claim on a dropped file was NOT blocked"; else
-  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "false committed-claim blocked";;
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "false committed-claim blocked with the specific message";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 12: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed -> BLOCK"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 15: same false 'committed' claim, but WITH --skip-ignored -> still BLOCK (the #331 bug: --skip-ignored must never wave through a doc/tree divergence)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note" --skip-ignored; then fail "--skip-ignored bypassed a false 'committed' claim (the #331 incident)"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "--skip-ignored does NOT bypass a false committed-claim";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 16: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed, --skip-ignored -> BLOCK"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'no artifact claims here\n' > "$T/reg/note/RESULTS.md"
 printf '| rollout_samples.jsonl | committed | 67 rows |\n' > "$T/reg/note/ARTIFACT_MANIFEST.md"
-if run_dry "$T/reg/note"; then fail "false 'committed' claim in ARTIFACT_MANIFEST.md was NOT blocked"; else
+if run_dry "$T/reg/note" --skip-ignored; then fail "false 'committed' claim in ARTIFACT_MANIFEST.md was NOT blocked"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "ARTIFACT_MANIFEST.md false claim blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 13: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording -> PASS (no false-positive)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 17: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording, --skip-ignored -> PASS (no false-positive)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then pass "filename mention without 'committed' wording does not false-positive block"; else
+if run_dry "$T/reg/note" --skip-ignored; then pass "filename mention without 'committed' wording does not false-positive block"; else
   fail "blocked despite no committed-claim wording: $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 14: an unchanged pre-existing tracked file -> PASS, NOT reported as excluded (no false-positive)"
-T=$(mktemp -d); make_repo "$T"
-printf 'a fresh note\n' > "$T/reg/note/note14.md"
-if run_dry "$T/reg/note"; then
-  case "$LAST_ERR" in *"excluded from staging"*) fail "spurious excluded-files warning on an unchanged pre-existing file: $LAST_ERR";;
-    *) pass "pre-existing unchanged file (page.html) not misreported as excluded";; esac
-else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
-rm -rf "$T"
-
-echo "[smoke] case 15: NEW non-ASCII-named file that IS staged, claimed committed -> PASS, not falsely reported/blocked (git ls-files -z)"
-# git quotes non-ASCII paths in `ls-files`'s default line output; without -z the quoted string never matches
-# the raw path from `find`, so a genuinely-staged file would misread as excluded and, if claimed committed,
-# falsely BLOCK a legitimate log (the wrong-direction failure mode: annoying, not a silent-drop risk).
-T=$(mktemp -d); make_repo "$T"
-NAME="n"$'\303\266'"te.md"                                        # 'nöte.md' (UTF-8)
-printf 'a fresh note\n' > "$T/reg/note/$NAME"
-printf '%s is committed in the registry dir.\n' "$NAME" > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then
-  case "$LAST_ERR" in *"excluded from staging"*) fail "non-ASCII staged file falsely reported as excluded: $LAST_ERR";;
-    *) pass "non-ASCII staged file correctly recognized as staged, no false exclusion/BLOCK";; esac
-else fail "non-ASCII staged file (truly committed) falsely BLOCKED as excluded: $LAST_ERR"; fi
-rm -rf "$T"
-
-echo "[smoke] case 16: an IGNORED symlink claimed committed -> BLOCK (present-file enumeration must see symlinks, not just regular files)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 18: an IGNORED symlink claimed committed, --skip-ignored -> BLOCK (check_ignored_files' status --ignored=matching list covers symlinks too, not just regular files)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 ln -s page.html "$T/reg/note/rollout_samples.jsonl"               # matches the base's reg/**/*.jsonl ignore rule
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then fail "ignored symlink falsely claimed committed was NOT blocked (symlink missed by present-file scan)"; else
+if run_dry "$T/reg/note" --skip-ignored; then fail "ignored symlink falsely claimed committed was NOT blocked"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "ignored symlink claimed committed is blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 17: RESULTS.md uses bare 'commit' (not 'committed') on the same line -> BLOCK (prior 'committ' substring missed this — a real claim, not just a false-positive fix)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 19: RESULTS.md uses bare 'commit' (not 'committed') on the same line, --skip-ignored -> BLOCK (a real claim, not just a false-positive fix)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'We commit rollout_samples.jsonl to the registry after review.\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then fail "bare 'commit' claim on a dropped file was NOT blocked"; else
+if run_dry "$T/reg/note" --skip-ignored; then fail "bare 'commit' claim on a dropped file was NOT blocked"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "bare 'commit' claim blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 18: RESULTS.md claims 'in this dir' (no 'commit'/'committed' word) on the same line -> BLOCK"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 20: RESULTS.md claims 'in this dir' (no 'commit'/'committed' word) on the same line, --skip-ignored -> BLOCK"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is in this dir, alongside the other artifacts.\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then fail "'in this dir' claim on a dropped file was NOT blocked"; else
+if run_dry "$T/reg/note" --skip-ignored; then fail "'in this dir' claim on a dropped file was NOT blocked"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "'in this dir' claim blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 19: dropped filename and a 'committed' claim about something else appear on DIFFERENT lines -> PASS (no false-positive; same-line co-occurrence only)"
-T=$(mktemp -d); make_repo_ignored "$T"
+echo "[smoke] case 21: dropped filename and a 'committed' claim about something else appear on DIFFERENT lines, --skip-ignored -> PASS (no false-positive; same-line co-occurrence only)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\nEverything else in this note is committed.\n' > "$T/reg/note/RESULTS.md"
-if run_dry "$T/reg/note"; then pass "filename and unrelated 'committed' line on separate lines does not false-positive block"; else
+if run_dry "$T/reg/note" --skip-ignored; then pass "filename and unrelated 'committed' line on separate lines does not false-positive block"; else
   fail "blocked despite the commit-claim word being on a different line: $LAST_ERR"; fi
 rm -rf "$T"
 

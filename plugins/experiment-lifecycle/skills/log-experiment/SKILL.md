@@ -32,11 +32,12 @@ does **not** source `wf.sh`. (Why here: logging/auditing experiments is a resear
 ## How
 
 ```bash
-scripts/log-experiment.sh <registry-dir> [--dry-run]
+scripts/log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
 ```
 
 That one command does everything: classify → gate → branch (in a dedicated worktree) → PR → cross-family
 bot approval → squash-merge → sync local `main`. `--dry-run` classifies and gates, then stops before any push.
+`--skip-ignored` acknowledges the ignored-file guard below and proceeds past it.
 
 The driver **classifies by the registry convention** (no label needed):
 
@@ -80,6 +81,25 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
 A BLOCK prints the reason; fix the record (add the missing audit, remove the secret) and re-run, or surface
 to the researcher if it needs a human call.
 
+## The ignored-file guard (#340) and the committed-claim check (#331)
+
+A plain `git add` silently drops anything the research repo's `.gitignore` matches — by design for R2-scale
+artifacts (see Composes below), but a small **pinned** file (e.g. a frozen instrument the `DESIGN.md`
+declares "committed with this design") can share the same ignored extension and vanish with no trace: the PR
+still opens and merges, looking complete, while a dispatched brief ends up referencing an input that was
+never actually landed. After staging, the driver diffs "files present in the dir" against "files actually
+staged": any non-trivial excluded file (well-known junk like `.DS_Store`/`__pycache__`/`*.pyc` is filtered
+out) is printed and **BLOCKS**. If the exclusion really is an intentional R2-scale one, re-run with
+`--skip-ignored` to acknowledge and proceed; otherwise fix the `.gitignore` or rename/relocate the file so it
+lands, then retry. Applies to every kind (experiment/design-stage/note) — the underlying `git add` behavior
+is generic, not gate-specific.
+
+`--skip-ignored` never bypasses one thing, though: if `RESULTS.md` or `ARTIFACT_MANIFEST.md` verbatim-claims
+(same line as "committed"/"commit"/"in the registry"/"in this dir") that an excluded file *is* committed, the
+driver BLOCKS regardless — the exact silent prose/tree divergence #331 caught a day late (a curated sample
+dropped by an ignore rule while the audited docs said it was committed). An intentional R2-scale exclusion is
+fine; a doc that still claims the file landed is not.
+
 ## Identity / auth
 
 Both the writes and the review go through **engineer bots**: the **author-family** bot does the commit /
@@ -107,7 +127,8 @@ For an **experiment** or **design-stage** PR, the already-run audit is **surface
   gate verifies).
 - **gh** — PR create / review / merge.
 - The research repo's per-dir `.gitignore` keeps large artifacts on R2; `git add` honors it, so only the
-  lightweight record lands.
+  lightweight record lands — the ignored-file guard above catches the case where it excludes something that
+  should have landed too.
 
 ## Worked reference
 

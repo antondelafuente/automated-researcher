@@ -18,7 +18,9 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
 
 ## The loop
 
-1. **Acquire:** `python3 scripts/deploy_pod.py` (env knobs: `GPU_TYPE`, `GPU_COUNT`,
+1. **Acquire:** `python3 scripts/deploy_pod.py` (env knobs: `GPU_TYPES` (comma list of acceptable SKUs,
+   e.g. `"NVIDIA L40S,NVIDIA A100 80GB PCIe"` — state the job's actual hardware need here rather than
+   taking the default) or `GPU_TYPE` (single id, back-compat), `GPU_COUNT`,
    `DISK_GB`, `POD_NAME`, `POD_NAME_PREFIX` (prepended to the pod name for shared-account dashboard visibility, e.g. `anton-`; empty default), `DATA_CENTERS`, `VOLUME_ID`). Prints `POD_ID` / `LEASE_NONCE` / `SSH` /
    cost. Big-model jobs need big disks — the 220GB default is deliberate. Acquire also writes a
    **pod lease** (see *The pod lease + the standing reaper* below) so an abandoned pod can be reaped
@@ -54,7 +56,7 @@ copies or forks it into an experiment dir.
   calls the RunPod API to *create* the pod and prints the SSH endpoint) and `run_remote.sh` (it `scp`s a job
   script over and launches it detached). A driver runs these **in place** against the canonical path —
   either `python3 <this-scripts-dir>/deploy_pod.py`, or through a **box-side symlink/shim into this scripts
-  dir** that the consuming instance provides. The env knobs (`GPU_TYPE`, `DISK_GB`, `POD_NAME`, …) are the
+  dir** that the consuming instance provides. The env knobs (`GPU_TYPES`, `DISK_GB`, `POD_NAME`, …) are the
   customization seam — not a reason to fork the code.
 - **Pod-side (they run on the pod, so they are copied *to* it from THIS scripts dir at provision time):**
   `bootstrap_pod.sh` (run on first ssh) and `job_lib.sh` (sourced by the job). `scp` them from the canonical

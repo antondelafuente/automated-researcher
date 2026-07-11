@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# log-experiment.sh <registry-dir> [--dry-run]
+# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -12,6 +12,13 @@
 # specific session, that created it.
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
+#
+# Ignored-file guard (#340): a plain `git add` silently drops anything the BASE tree's .gitignore matches —
+# fine for the R2-scale artifacts it's meant to keep out of git, but a small *pinned* file (e.g. a frozen
+# instrument the DESIGN.md declares "committed with this design") can share the same ignored extension and
+# vanish with no trace. After staging, any non-trivial (not `.DS_Store`/`__pycache__`/etc.) file under the
+# dir that the .gitignore excluded is printed and BLOCKS; pass --skip-ignored to acknowledge and proceed
+# when the exclusion really is an intentional R2-scale one.
 #
 # Config (instance, env-overridable; NO instance defaults — fail closed):
 #   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
@@ -109,15 +116,16 @@ fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
-DRY_RUN=0; DIR=""
+DRY_RUN=0; SKIP_IGNORED=0; DIR=""
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY_RUN=1 ;;
+    --skip-ignored) SKIP_IGNORED=1 ;;
     -*) die "unknown flag: $a" ;;
     *) DIR="$a" ;;
   esac
 done
-[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run]"
+[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]"
 [ -d "$DIR" ] || die "not a directory: $DIR"
 DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
@@ -277,57 +285,62 @@ WT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in clea
 cleanup() { [ -n "$WT" ] && git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
             [ "$CREATED_BRANCH" = 1 ] && git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-# check_excluded_files: `git add -- $REL` silently drops any path an ignore rule matches (by design — heavy
-# artifacts stay on R2), but nothing surfaced WHICH files that was, and a close audit verifies prose, not the
-# staged set (#331). Compare the files physically present in the staged worktree copy of $REL against the set
-# git actually staged; PRINT any drop, and BLOCK if the dropped file's name is claimed "committed" verbatim in
-# RESULTS.md / ARTIFACT_MANIFEST.md — the exact silent-corruption pattern from #331 (a curated sample dropped
-# by a registry/**/*.jsonl ignore rule while the audited docs said it was committed). MUST be called after
-# `git add` has staged $REL in $WT (present-vs-staged only means something once staging has happened).
-check_excluded_files() {
-  local base="$WT/$REL"
-  local -a present=() staged=() excluded=()
-  local f rel p s found
-  while IFS= read -r -d '' f; do
-    rel="${f#"$base"/}"
-    present+=("$rel")
-  done < <(find "$base" \( -type f -o -type l \) -print0)
-  # `ls-files` (the INDEX), not `diff --cached` (only the DELTA): a file already tracked+unchanged from the
-  # base tree stages no delta but is very much part of the resulting commit, so it must not read as "excluded".
-  # `-z` (NUL-delimited, raw paths): without it git quotes non-ASCII/special paths in its normal line output,
-  # so a staged `nöte.json` would print as `"n\303\266te.json"` — never matching `present`'s raw path, and
-  # falsely reported (and possibly BLOCKed) as excluded even though it IS staged.
-  while IFS= read -r -d '' f; do
-    [ -n "$f" ] || continue
-    rel="${f#"$REL"/}"
-    staged+=("$rel")
-  done < <(git -C "$WT" ls-files -z -- "$REL")
-  for p in "${present[@]}"; do
-    found=0
-    for s in "${staged[@]}"; do [ "$p" = "$s" ] && { found=1; break; }; done
-    [ "$found" = 1 ] || excluded+=("$p")
-  done
-  [ "${#excluded[@]}" -gt 0 ] || return 0
-  note "excluded from staging (present in $REL but not staged — an ignore rule matched):"
-  for f in "${excluded[@]}"; do note "  - $f"; done
-  # BLOCK only if a claims file states an excluded filename is committed: basename match (fixed-string, so a
-  # filename with regex metachars can't misfire) + a commit-claim word on the SAME line. A loose 'committ'
-  # substring (the prior version) both over-matched (e.g. "is NOT committed") and under-matched (a bare
-  # "commit" doesn't contain that substring) — a doc that mentions the excluded file in an R2/not-committed
-  # context is legitimate; only a same-line claim it's actually committed is the lie #331 caught. Precision
-  # over recall here: the excluded-files list above is always printed, so a claim this misses is still
-  # visible to a human.
-  local claim_file bn hit
+
+# is_trivial_ignore <path>: well-known junk that is never meant to be committed regardless of context —
+# excluded from the guard below so its output stays signal, not noise.
+is_trivial_ignore() {
+  case "$1" in
+    */.DS_Store|.DS_Store|*/__pycache__/*|__pycache__/*|*.pyc|*.pyo|*/.ipynb_checkpoints/*|.ipynb_checkpoints/*|*~|*.swp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# check_excluded_claim <excluded-file>...: BLOCK if RESULTS.md / ARTIFACT_MANIFEST.md verbatim-claims one of
+# the given (already-known-excluded) files is "committed" — the exact prose/tree divergence #331 caught a day
+# late (a curated 67-row sample dropped by a registry/**/*.jsonl ignore rule while the audited docs said it
+# was committed). Match: basename (fixed-string, so a filename with regex metachars can't misfire) + a
+# commit-claim word on the SAME line — a loose 'committ' substring both over-matches ("is NOT committed") and
+# under-matches (bare "commit" lacks that substring); a doc mentioning the file in an R2/not-committed context
+# is legitimate, only a same-line claim it's actually committed is the lie. Called from check_ignored_files
+# BEFORE its --skip-ignored bypass: an intentional R2 exclusion is fine, a doc that still claims the file
+# landed is not — --skip-ignored must never wave that through.
+check_excluded_claim() {
+  local claim_file bn hit f
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
-    for f in "${excluded[@]}"; do
+    for f in "$@"; do
       bn="$(basename "$f")"
       if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS")"; then
         die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
       fi
     done
   done
+}
+# check_ignored_files (#340): MUST be called AFTER `git add -- "$REL"` in the worktree. Lists any file under
+# $REL that the BASE tree's .gitignore excluded from the just-staged set (`git status --ignored=matching`,
+# NUL-delimited for the same path-safety reason secret_scan reads paths raw — see its comment; this also
+# means an ignored SYMLINK is caught the same as a regular file, and a non-ASCII path is never git-quoted into
+# a mismatch). A silent exclusion is fine for a genuine R2-scale artifact but not for a small pinned file
+# sharing the ignored extension (the #340 incident) — BLOCK by default and print the list, unless the caller
+# passed --skip-ignored to explicitly acknowledge the exclusion is intentional. #331's check_excluded_claim
+# reuses this SAME excluded-file list (rather than re-deriving it with a second present-vs-staged diff) to
+# catch the one thing --skip-ignored must never wave through: a doc claiming an excluded file is committed.
+check_ignored_files() {
+  local entry path; local -a hits=()
+  while IFS= read -r -d '' entry; do
+    case "$entry" in '!! '*) path="${entry#!! }" ;; *) continue ;; esac
+    is_trivial_ignore "$path" && continue
+    hits+=("$path")
+  done < <(git -C "$WT" status --porcelain=v1 -z --ignored=matching -- "$REL")
+  [ "${#hits[@]}" -eq 0 ] && return 0
+  note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
+  printf '  %s\n' "${hits[@]}" >&2
+  check_excluded_claim "${hits[@]}"
+  if [ "$SKIP_IGNORED" = 1 ]; then
+    note "--skip-ignored: proceeding anyway (acknowledged)"
+    return 0
+  fi
+  die "$KIND has gitignored file(s) excluded from the staged commit (listed above) — if this is an intentional R2-scale exclusion, re-run with --skip-ignored; if any of these should have been committed (e.g. a small pinned instrument file sharing an ignored extension), fix the .gitignore or rename/relocate the file, then retry"
 }
 stage_worktree() {
   git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
@@ -339,10 +352,10 @@ stage_worktree() {
   mkdir -p "$WT/$(dirname "$REL")"
   cp -r "$DIR" "$WT/$(dirname "$REL")/"
   git -C "$WT" add -- "$REL"                          # respects the BASE tree's .gitignore (large artifacts stay on R2)
+  check_ignored_files                                 # #340: BLOCK on a non-trivial file the .gitignore silently dropped
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
   if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
-  check_excluded_files
 }
 
 if [ "$DRY_RUN" = 1 ]; then
