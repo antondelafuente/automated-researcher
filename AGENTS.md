@@ -102,15 +102,35 @@ agentic-engineering#43).
   product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
   the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
   `address-review.yml` runs use the same escalation convention on the PR it's already working.
+- **Review re-fire actuator:** `review-on-pr.yml` also accepts `workflow_dispatch` (input: `pr_number`),
+  running the same authorize→review→verdict path against the PR's CURRENT head — same actor allowlist as
+  implement-on-ready's dispatch path (re-verified fresh via `gh pr view`: same-repo, bot-authored, open).
+  Useless against a still-conflicted PR (no merge ref to review); used by the reconciler below for the
+  mergeable-but-unreviewed case, and as a hand tool.
+- **Reconciler (scheduled, level-triggered):** GitHub fires no `pull_request` run at all while a PR is
+  unmergeable at event time — the run targets `refs/pull/N/merge`, which can't be built while the PR
+  conflicts with base. This is deterministic platform behavior, not dropped events, and was the dominant
+  silence mode observed in wave operation (automated-researcher#431): a sibling merge lands on main, a
+  still-open same-area PR goes conflicted, and every subsequent `opened`/`synchronize` event on it produces
+  nothing until a human/dispatcher notices. `reconcile-prs.yml` runs on a ~10-minute schedule and walks
+  open bot-authored PRs to repair this itself: `mergeable == CONFLICTING` → post the allowlisted
+  `@claude-code-engineer` resolution-dispatch mention (round-budgeted; escalates to `needs-dispatcher`
+  instead of nudging forever once the head stops moving); `mergeable == MERGEABLE` with no completed codex
+  review at the current head → re-fire `review-on-pr.yml` via the actuator above (the residual
+  true-event-loss case, if one exists).
 - **Dispatcher playbook** — the operations a human/dispatcher uses to drive this pipeline day to day (each
   mechanic is defined above; this is the consolidated at-a-glance list):
   - Dispatch/re-dispatch an Issue: add `ready` (or remove it and re-add after ~5s so the label event
     re-fires), or `workflow_dispatch` with the issue number.
   - Trigger an addressing round on a PR carrying review findings: comment `@claude-code-engineer` plus
     guidance on the PR (allowlisted authors only — see "Re-entry / retry" above).
-  - Re-run checks/review after a base-branch fix lands (e.g. main moved past a flake or a shared-file bug):
-    `gh pr update-branch <n>` to bring the PR branch current, which fires `synchronize` and re-runs both
-    `checks.yml` and `review-on-pr.yml`.
+  - **PR gone silent (no checks/review run at all):** check `mergeable` first (`gh pr view <n> --json
+    mergeable`) — don't reach for `gh pr update-branch` on reflex, since that only helps a base-branch fix
+    that already landed. `CONFLICTING` → trigger a resolution round the same way the reconciler does
+    (comment `@claude-code-engineer` asking it to merge origin/main, resolve, and push — see the bullet
+    above); `MERGEABLE` with no review at the current head → `gh workflow run review-on-pr.yml -f
+    pr_number=<n>` (the actuator). The scheduled reconciler normally beats a human to both within ~10
+    minutes; this is the manual equivalent for when you don't want to wait.
   - Unblock a `needs-dispatcher` Issue or PR: answer the blocking question in a comment, remove
     `needs-dispatcher`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
 - **Gate configuration** (state it here so it doesn't drift or get "fixed" back by someone who doesn't know

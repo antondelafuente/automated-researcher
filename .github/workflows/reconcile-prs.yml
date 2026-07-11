@@ -1,0 +1,207 @@
+name: reconcile-prs
+
+# GitHub-native SWE pipeline, reconciler leg (automated-researcher#431). GitHub creates NO `pull_request`
+# workflow run when a PR is unmergeable at event time (the run targets refs/pull/N/merge, which can't be
+# built while the PR conflicts with base) -- deterministic platform behavior, not dropped events. In wave
+# operation this is the dominant silence mode: a sibling merge lands on main, a still-open same-area PR
+# becomes conflicted, and from that moment every `opened`/`synchronize` event on it silently produces
+# nothing until a human/dispatcher notices. This scheduled, level-triggered reconciler walks open
+# bot-authored PRs every ~10 minutes and repairs the two resulting states itself:
+#   - `mergeable == CONFLICTING`: post the allowlisted `@claude-code-engineer` resolution-dispatch mention
+#     (address-review.yml re-dispatches the implementor onto the SAME branch to merge origin/main, resolve,
+#     and push -- which fires `synchronize` on the now-buildable merge ref). Round-budgeted: escalates to
+#     `needs-dispatcher` instead of nudging forever if the head never moves.
+#   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
+#     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
+# See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    name: reconcile
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout runs FIRST (same rationale as the other pipeline workflows): the reconcile step below
+      # sources the canonical-login helper from the working tree, which must exist before it's sourced.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      # A single minted token covers every gh call this job makes, read AND write alike: every mutation
+      # (mention comment, label, workflow_dispatch) needs it anyway, and address-review.yml's comment-author
+      # allowlist (["antondelafuente","codex-engineer[bot]","app/codex-engineer"]) deliberately EXCLUDES the
+      # claude engineer bot, so the resolution-dispatch mention specifically must be posted as this identity.
+      - name: Mint codex engineer App token
+        id: mint_codex_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CODEX_APP_ID }}
+          private-key: ${{ secrets.CODEX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Reconcile open bot PRs
+        env:
+          GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+
+          # Round budget before a CONFLICTING PR with no progress escalates to needs-dispatcher, rather
+          # than being re-nudged forever.
+          BUDGET=3
+          CONFLICT_MARKER="Reconciler: PR conflicts with main"
+          REVIEW_MARKER="Reconciler: re-firing review actuator"
+          # Comfortably above address-review.yml's 45-minute Claude-CLI timeout (conflict path) / a codex
+          # review's typical few-minute runtime (review-actuator path): a dispatch this recent against the
+          # SAME head is treated as still in flight rather than re-dispatched or counted as a fresh round.
+          CONFLICT_GRACE_SECONDS=$((55 * 60))
+          REVIEW_GRACE_SECONDS=$((30 * 60))
+          now_epoch=$(date -u +%s)
+
+          # last_marker_comment REPO PR_NUMBER MARKER -> most recent matching comment (or "null"), via the
+          # same canon_login duplication idiom review-on-pr.yml's history step uses (a jq filter can't
+          # source the bash helper).
+          last_marker_comment() {
+            local n="$1" marker="$2"
+            gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg marker "$marker" '
+              def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+              add // [] | map(select(((.user.login | canon_login) == "codex-engineer[bot]") and ((.body // "") | startswith($marker))))
+                | sort_by(.created_at) | last
+            '
+          }
+
+          handle_conflicted() {
+            local n="$1" head="$2"
+            local short="${head:0:8}"
+
+            local last
+            last=$(last_marker_comment "$n" "$CONFLICT_MARKER")
+
+            local round=1
+            if [ "$last" != "null" ] && [ -n "$last" ]; then
+              local prev_sha prev_round prev_ts elapsed
+              prev_sha=$(jq -r '.body' <<<"$last" | grep -oE 'head [0-9a-f]{8}' | head -1 | awk '{print $2}')
+              prev_round=$(jq -r '.body' <<<"$last" | grep -oE 'round [0-9]+' | head -1 | awk '{print $2}')
+              prev_ts=$(jq -r '.created_at' <<<"$last")
+              if [ "$prev_sha" = "$short" ] && [ -n "$prev_round" ]; then
+                elapsed=$(( now_epoch - $(date -u -d "$prev_ts" +%s) ))
+                if [ "$elapsed" -lt "$CONFLICT_GRACE_SECONDS" ]; then
+                  echo "PR #$n: conflict-resolution round $prev_round dispatched ${elapsed}s ago against the same head; treating as still in flight, skipping this tick"
+                  return
+                fi
+                round=$((prev_round + 1))
+              fi
+            fi
+
+            if [ "$round" -gt "$BUDGET" ]; then
+              echo "PR #$n: conflicted with no progress after $((round - 1)) reconciler dispatch(es); escalating to needs-dispatcher"
+              gh pr comment "$n" --repo "$REPO" --body "Reconciler: PR has stayed conflicted with main across $((round - 1)) resolution-dispatch round(s) with no new commit landing (still at head $short). Escalating to \`needs-dispatcher\` rather than continuing to nudge."
+              gh pr edit "$n" --repo "$REPO" --add-label needs-dispatcher
+              return
+            fi
+
+            echo "PR #$n: conflicted with main; dispatching resolution round $round/$BUDGET (head $short)"
+            gh pr comment "$n" --repo "$REPO" --body "$CONFLICT_MARKER (auto-dispatch round $round/$BUDGET, head $short). @claude-code-engineer this PR conflicts with the base branch. Merge origin/main, resolve the conflicts, and push."
+          }
+
+          handle_mergeable() {
+            local n="$1" head="$2"
+            local short="${head:0:8}"
+
+            local reviewed
+            reviewed=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
+              def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+              add // [] | any(.commit_id == $head and ((.user.login | canon_login) == "codex-engineer[bot]"))
+            ')
+            if [ "$reviewed" = "true" ]; then
+              echo "PR #$n: head $short already has a completed codex review; nothing to do"
+              return
+            fi
+
+            local last
+            last=$(last_marker_comment "$n" "$REVIEW_MARKER")
+            if [ "$last" != "null" ] && [ -n "$last" ]; then
+              local prev_sha prev_ts elapsed
+              prev_sha=$(jq -r '.body' <<<"$last" | grep -oE 'head [0-9a-f]{8}' | head -1 | awk '{print $2}')
+              prev_ts=$(jq -r '.created_at' <<<"$last")
+              if [ "$prev_sha" = "$short" ]; then
+                elapsed=$(( now_epoch - $(date -u -d "$prev_ts" +%s) ))
+                if [ "$elapsed" -lt "$REVIEW_GRACE_SECONDS" ]; then
+                  echo "PR #$n: review actuator already re-fired ${elapsed}s ago against the same head; treating as still in flight, skipping this tick"
+                  return
+                fi
+              fi
+            fi
+
+            echo "PR #$n: mergeable with no completed review at head $short; re-firing review-on-pr.yml via workflow_dispatch"
+            gh workflow run review-on-pr.yml --repo "$REPO" -f "pr_number=$n"
+            gh pr comment "$n" --repo "$REPO" --body "$REVIEW_MARKER (head $short)." >/dev/null
+          }
+
+          # A plain `mapfile -t arr < <(cmd)` does NOT propagate cmd's exit status through `set -e` (process
+          # substitution failures are invisible to the parent shell's error trap) -- a failing `gh pr list`
+          # would silently look like "zero open PRs" and this tick would exit 0 having reconciled nothing
+          # (same lesson as .aar-ci/checks.sh's own diff-capture step). Capture through a checked command
+          # substitution instead.
+          if ! numbers_output=$(gh pr list --repo "$REPO" --state open --author "app/claude-code-engineer" --json number --jq '.[].number' --limit 100); then
+            echo "::error::gh pr list failed"
+            exit 1
+          fi
+          numbers=()
+          if [ -n "$numbers_output" ]; then
+            mapfile -t numbers <<< "$numbers_output"
+          fi
+          echo "found ${#numbers[@]} open PR(s) authored by app/claude-code-engineer"
+
+          for n in "${numbers[@]}"; do
+            if ! pr=$(gh pr view "$n" --repo "$REPO" --json number,author,isCrossRepository,state,mergeable,headRefOid,labels); then
+              echo "::warning::PR #$n: gh pr view failed; skipping this tick"
+              continue
+            fi
+            author_canon=$(canonical_login "$(jq -r '.author.login' <<<"$pr")" 2>/dev/null || echo "")
+            is_cross=$(jq -r '.isCrossRepository' <<<"$pr")
+            state=$(jq -r '.state' <<<"$pr")
+
+            # Re-verify fresh (belt-and-suspenders on top of the --author list filter above), same
+            # predicate every other leg of this pipeline applies before acting on a PR.
+            if [ "$author_canon" != "claude-code-engineer[bot]" ] || [ "$is_cross" != "false" ] || [ "$state" != "OPEN" ]; then
+              echo "PR #$n: failed fresh re-verification (author=$author_canon cross=$is_cross state=$state); skipping"
+              continue
+            fi
+
+            labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
+            case ",$labels," in
+              *,needs-dispatcher,*) echo "PR #$n: needs-dispatcher already set, skipping"; continue ;;
+            esac
+
+            mergeable=$(jq -r '.mergeable' <<<"$pr")
+            head_sha=$(jq -r '.headRefOid' <<<"$pr")
+
+            # Fault-isolate each PR: one PR's transient API failure must not abort reconciliation of every
+            # other PR in the same tick (the reconciler is level-triggered and self-healing -- the next
+            # tick, ~10 minutes later, simply retries). `if ! fn; then` is the standard idiom for capturing
+            # a function's exit status without an inner failure tripping the script-wide `set -e` abort.
+            case "$mergeable" in
+              CONFLICTING)
+                if ! handle_conflicted "$n" "$head_sha"; then
+                  echo "::warning::PR #$n: conflict-resolution handling failed this tick"
+                fi
+                ;;
+              MERGEABLE)
+                if ! handle_mergeable "$n" "$head_sha"; then
+                  echo "::warning::PR #$n: review re-fire handling failed this tick"
+                fi
+                ;;
+              *) echo "PR #$n: mergeable status '$mergeable' not yet resolved by GitHub; skipping this tick" ;;
+            esac
+          done

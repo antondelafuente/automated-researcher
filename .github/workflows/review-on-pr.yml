@@ -5,13 +5,27 @@ name: review-on-pr
 # or REQUEST_CHANGES (findings) review as the codex engineer bot. Human PRs and fork PRs are skipped — they
 # keep the existing manual review path. See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust
 # model and the P0/P1 review-guidance convention this reads from the PR's base ref.
+#
+# automated-researcher#431: `pull_request` events (opened/synchronize) fire NO run at all while a PR is
+# unmergeable (GitHub can't build the refs/pull/N/merge ref to run against) — deterministic platform
+# behavior, not event loss, but it means a PR that becomes mergeable again with no NEW push (e.g. a
+# conflict resolved via a merge from main) needs an explicit re-fire since no fresh `pull_request` event
+# will ever arrive for that head. `workflow_dispatch` (input: pr_number) is that actuator: same
+# authorize->review->verdict path, run against the PR's CURRENT head. Used by the reconcile-prs.yml
+# scheduled reconciler and as a hand tool; useless against a still-conflicted PR (no merge ref to review).
 
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to re-fire the review against (its current head)"
+        required: true
+        type: number
 
 concurrency:
-  group: review-pr-${{ github.event.pull_request.number }}
+  group: review-pr-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 permissions:
@@ -28,33 +42,104 @@ jobs:
     # automated-researcher#381: this is a job-level `if:` (evaluated before any step/shell runs), so it
     # can't share the canonical_login() shell helper; both known representations of the App identity are
     # checked explicitly instead (event-payload "<slug>[bot]" and CLI/GraphQL "app/<slug>").
-    if: >
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.pull_request.user.login == 'claude-code-engineer[bot]' ||
-        github.event.pull_request.user.login == 'app/claude-code-engineer')
+    # automated-researcher#431: the workflow_dispatch branch is only a COARSE pre-filter on the triggering
+    # actor (mirrors implement-on-ready.yml) — the "Resolve PR context" step below re-verifies the target
+    # PR is same-repo, bot-authored, and open, fresh, before anything else runs. A job-level `if:` has no
+    # PR-fork/author fields to check against an arbitrary dispatch-supplied PR number.
+    if: |
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (github.event.pull_request.user.login == 'claude-code-engineer[bot]' ||
+          github.event.pull_request.user.login == 'app/claude-code-engineer'))
+      || (github.event_name == 'workflow_dispatch'
+        && contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.actor))
     outputs:
-      head_sha: ${{ steps.capture.outputs.head_sha }}
+      head_sha: ${{ steps.resolve_pr.outputs.head_sha }}
+      pr_number: ${{ steps.resolve_pr.outputs.pr_number }}
     steps:
-      - name: Capture PR head SHA
-        id: capture
-        run: echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+      # Checkout runs FIRST (same rationale as implement-on-ready#381/address-review#398): the resolve step
+      # below sources the canonical-login helper from the working tree, which must exist before it's
+      # sourced. A base-branch checkout is trusted content regardless of which step runs first.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      # Resolves PR_NUMBER/HEAD_SHA/BASE_SHA/BASE_REF for BOTH trigger paths. For `pull_request`, these
+      # come straight from the event payload (job-level `if:` already gated it). For `workflow_dispatch`,
+      # re-fetches the PR fresh via `gh pr view` and re-applies the SAME predicate the `pull_request` path
+      # gets for free from the event payload (same-repo, bot-authored, open) — an allowlisted actor must
+      # not be able to point this actuator at an arbitrary human or fork PR.
+      - name: Resolve PR context
+        id: resolve_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_PR: ${{ github.event.inputs.pr_number }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$DISPATCH_PR"
+            pr_json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+              --json author,isCrossRepository,state,headRefOid,baseRefOid,baseRefName)
+            author=$(jq -r '.author.login' <<<"$pr_json")
+            is_cross=$(jq -r '.isCrossRepository' <<<"$pr_json")
+            state=$(jq -r '.state' <<<"$pr_json")
+            author_canon=$(canonical_login "$author")
+
+            if [ "$is_cross" != "false" ]; then
+              echo "::error::PR #$PR_NUMBER is a fork PR; refusing to re-fire review"
+              exit 1
+            fi
+            if [ "$author_canon" != "claude-code-engineer[bot]" ]; then
+              echo "::error::PR #$PR_NUMBER author '$author' is not the claude engineer bot; refusing to re-fire review"
+              exit 1
+            fi
+            if [ "$state" != "OPEN" ]; then
+              echo "::error::PR #$PR_NUMBER is not open (state: $state); refusing to re-fire review"
+              exit 1
+            fi
+
+            HEAD_SHA=$(jq -r '.headRefOid' <<<"$pr_json")
+            BASE_SHA=$(jq -r '.baseRefOid' <<<"$pr_json")
+            BASE_REF=$(jq -r '.baseRefName' <<<"$pr_json")
+          else
+            PR_NUMBER="$EVENT_PR_NUMBER"
+            HEAD_SHA="$EVENT_HEAD_SHA"
+            BASE_SHA="$EVENT_BASE_SHA"
+            BASE_REF="$EVENT_BASE_REF"
+          fi
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$BASE_SHA"
+            echo "base_ref=$BASE_REF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout PR head
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.resolve_pr.outputs.head_sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Fetch base ref
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REF: ${{ steps.resolve_pr.outputs.base_ref }}
         run: git fetch --no-tags origin "$BASE_REF"
 
       - name: Extract review guidance from base AGENTS.md
         id: guidance
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_REF: ${{ steps.resolve_pr.outputs.base_ref }}
         run: |
           set -euo pipefail
           # Deliberately read AGENTS.md from origin/<base>, NOT the checked-out PR head: a PR that edits
@@ -102,7 +187,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
         run: |
           set -euo pipefail
           MAX_ROUNDS=6
@@ -178,9 +263,9 @@ jobs:
         id: render_prompt
         env:
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+          BASE_SHA: ${{ steps.resolve_pr.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.resolve_pr.outputs.head_sha }}
           GUIDANCE: ${{ steps.guidance.outputs.guidance }}
           HISTORY_COUNT: ${{ steps.history.outputs.count }}
           HISTORY_NOTE: ${{ steps.history.outputs.note }}
@@ -246,10 +331,12 @@ jobs:
           # model or effort.
           model: gpt-5.6-sol
           effort: medium
-          # The triggering actor for this pull_request run is whoever opened/pushed the PR — the claude
-          # engineer bot — and openai/codex-action denies bot actors by default (docs/security.md) even
-          # though this job's own `if:` already restricts the run to that exact identity.
-          allow-bot-users: "claude-code-engineer[bot]"
+          # The triggering actor is whoever opened/pushed the PR (pull_request) or whoever/whatever
+          # dispatched this actuator (workflow_dispatch — automated-researcher#431), and openai/codex-action
+          # denies bot actors by default (docs/security.md) even though this job's own `if:` already
+          # restricts the run to an allowlisted identity. Passing the actual triggering actor here covers
+          # both paths (a human actor is simply inert against this bot-only denylist).
+          allow-bot-users: ${{ github.actor }}
           prompt: ${{ steps.render_prompt.outputs.prompt }}
           output-file: codex-review.json
           output-schema: |
@@ -278,7 +365,7 @@ jobs:
       - name: Upload review verdict
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
         with:
-          name: codex-review-${{ github.event.pull_request.number }}
+          name: codex-review-${{ steps.resolve_pr.outputs.pr_number }}
           path: codex-review.json
           retention-days: 1
 
@@ -294,7 +381,7 @@ jobs:
       - name: Download review verdict
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
-          name: codex-review-${{ github.event.pull_request.number }}
+          name: codex-review-${{ needs.review.outputs.pr_number }}
 
       - name: Mint codex engineer App token
         id: mint_codex_token
@@ -309,7 +396,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.review.outputs.pr_number }}
           CAPTURED_HEAD_SHA: ${{ needs.review.outputs.head_sha }}
         run: |
           set -euo pipefail
