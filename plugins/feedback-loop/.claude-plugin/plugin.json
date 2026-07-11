@@ -1,7 +1,7 @@
 {
   "name": "feedback-loop",
   "description": "Product feedback skills for automated-researcher: file-feedback routes scaffold friction to product Issues or instance guidance, and triage-feedback turns open feedback into product fixes through the maintained workflow.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": {
     "name": "Anton de la Fuente"
   }
