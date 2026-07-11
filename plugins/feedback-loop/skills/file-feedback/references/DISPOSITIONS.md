@@ -29,9 +29,12 @@ the back of an actual researcher conversation, and the flip must **cite it** —
 summarizing/linking the shaping discussion. An agent asked to *implement* an issue never flips its disposition
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
-close) is that lane's own concern to build out. Agents filing Issues (including via `file-feedback`, see
-#405) never self-apply `ready` — an Issue an agent files always lands at `needs-design`, the same resting
-state as a human-filed one; only the researcher's explicit flip moves it to `ready`.
+close) is that lane's own concern to build out. An Issue an agent files (including via `file-feedback`, see
+#405) carries exactly `needs-design` plus a type label — nothing else: never self-apply `ready`, and never
+self-apply `blocked`, `parked`, or `other` either. Those three remain valid dispositions but are
+researcher/triage-applied only, same reasoning as never self-applying `ready` — self-parking is a triage
+decision. An agent that believes a filing is blocked or parkable says so in the issue body, for the triage
+pass to act on.
 
 **Invariant:** every open Issue is EITHER unlabeled (= untriaged, awaiting triage — distinct from
 `needs-design`) OR carries **exactly one** disposition. Enforcement flags only an Issue with two-or-more.
