@@ -489,6 +489,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   self-smoke is exactly what misses a truncation bug. **Always pass `--label-field`** when auditing a surface where
   an added/edited subset sits inside a much larger unchanged base (ablations, add-back waves, targeted edits) — the
   default sample can otherwise oversample the unchanged majority and miss the subset the gate actually cares about.
+- **An all-null/all-zero join or aggregation result is (almost) never a real finding — treat it as a loud bug
+  signal, not a possible legitimate result.** A per-item join (e.g. correlating verdicts against a blind-key
+  parsed from filenames) that returns `null`/`n_items=0` for EVERY row usually means the join key itself is
+  broken, not that the correlation happened to vanish — e.g. `mid.rsplit("__", 1)` silently mis-splitting a
+  filename that has more than the two `__`-delimited segments the code assumed, producing zero matching keys
+  with no error anywhere (#349). Before reporting a zero-match or all-null/all-zero aggregation result:
+  re-derive the join keys from a hand-inspected sample and assert the join rate is sane (e.g. >90% of expected
+  rows matched) — don't accept "the correlation happened to be null" at face value. This is the
+  aggregation-stage analog of the eval-script gotcha where N conditions collapsing to N *identical* numbers
+  signals a reused server/stale cache, not a real result (`gpu-job` SKILL.md's `serve_adapters_eval` section).
 - **Cheap proxy in, full-scale out.** Search on small model / small-n / cheap grader; validate finalists at full scale.
   **Re-run finalists once** before believing them (best-of-N from noise fakes ≈ SE·√(2 ln N) — often bigger than the
   gaps you chase).
