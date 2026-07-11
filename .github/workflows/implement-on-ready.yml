@@ -129,6 +129,12 @@ jobs:
           # action denies bot actors by default (see docs/security.md) even though our own job-level `if:`
           # already allowlisted them.
           allowed_bots: "claude-code-engineer[bot],codex-engineer[bot]"
+          # Without these, the action's git-operation identity defaults to its own generic "claude[bot]"
+          # (id 41898282) regardless of which token pushes -- commits would be attributed to the wrong App.
+          # id is the numeric prefix from the bot's own noreply commit email (confirmed from this repo's
+          # git log: claude-code-engineer[bot] <294932622+claude-code-engineer[bot]@users.noreply.github.com>).
+          bot_id: "294932622"
+          bot_name: "claude-code-engineer[bot]"
           claude_args: |
             --model claude-sonnet-5
             --allowedTools Bash,Edit,Write,Read,Grep,Glob
