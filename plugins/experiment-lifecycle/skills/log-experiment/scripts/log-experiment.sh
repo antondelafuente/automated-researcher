@@ -305,9 +305,11 @@ is_trivial_ignore() {
 # NOT exhaustive NL negation detection (that's out of scope for a bash heuristic; the chase never ends). This
 # check is a best-effort belt-and-braces layer, not the only safeguard: the excluded-file list above is ALWAYS
 # printed regardless of this check's verdict, so a human still sees every drop even on a miss, and a false
-# BLOCK here just costs one re-run with --skip-ignored (fail-closed is the safe direction to err in). Called
-# from check_ignored_files BEFORE its --skip-ignored bypass: an intentional R2 exclusion is fine, a doc that
-# still claims the file landed is not — --skip-ignored must never wave that through.
+# BLOCK here has no --skip-ignored escape (fail-closed is the safe direction to err in): called from
+# check_ignored_files BEFORE its --skip-ignored bypass, since an intentional R2 exclusion is fine but a doc
+# that still claims the file landed is not, and that flag must never wave a committed-claim through. The real
+# escape on a false positive is per the die message below — fix the ignore rule or reword the offending prose
+# line, then retry.
 check_excluded_claim() {
   local claim_file bn hit f
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
