@@ -192,14 +192,19 @@ never raw `pkill -f` / `pgrep -f` in an ssh one-liner (it self-matches your own 
 helper); never end a driver in a bare `wait` when `exec > >(tee …)` is in play (the tee child is a job; `wait` never
 returns and the done-marker never fires — wait on explicit PIDs, or touch the marker first).
 
-**Sibling footgun, same failure class — `disown` and a meaningful trailing `wait` are mutually exclusive for the
-SAME jobs.** A sample-fanout driver that launches each job with `nohup ... & disown` and then closes with a bare
+**Sibling footgun, same failure class — `disown` and ANY `wait` on the SAME jobs are mutually exclusive, bare
+or by PID.** A sample-fanout driver that launches each job with `nohup ... & disown` and then closes with a bare
 `wait` (no PID args) does NOT block until those jobs finish: `disown` removes the job from the shell's OWN job
 table, so the bare `wait` returns as soon as the launch loop itself finishes, and any done-marker written right
 after fires early while the jobs are still running (caught once via `ps` / growing row counts: a "DONE" marker
-landed with 11 of 19 subjects still mid-sample). Either don't disown (keep jobs in the job table so a bare `wait`
-genuinely blocks) or collect PIDs into an array during the launch loop and `wait "${pids[@]}"` explicitly (disown
-is then fine, since nothing relies on the job table) — never neither.
+landed with 11 of 19 subjects still mid-sample). Collecting PIDs does not rescue this: bash cannot `wait` on a
+disowned PID at all — `wait "${pids[@]}"` on disowned jobs returns immediately too, same false-early marker.
+Two actually-correct patterns, pick by whether the driver itself is the thing that needs to block: **the driver
+waits → don't disown** (a detached driver that stays up polling until its own `wait`/`wait "${pids[@]}"` returns
+needs the jobs to stay in its job table — that's the common case, and `nohup` alone already protects them from a
+dropped SSH session); **the jobs must outlive the driver for some other reason → disown, and replace `wait` with
+a `kill -0` liveness poll loop on the collected PIDs** (`while kill -0 "$pid" 2>/dev/null; do sleep …; done`,
+per PID or over the array) instead of `wait` — never `wait`, bare or by PID, on a disowned job.
 
 **Train/eval overlap (free wall-clock for adapter arms):** when the train artifact is a small adapter (hops via the
 store in seconds), run eval cells on a SECOND unit *during* training — eval does the base-anchor cells first, then waits

@@ -5,10 +5,13 @@
   removes the job from the shell's own job table, so the bare `wait` returned as soon as the launch loop
   itself finished — NOT when the jobs actually completed — and the "DONE" marker fired while 11 of 19
   subjects were still mid-sample (caught only because the executor independently verified PIDs/row counts).
-  The new guidance states the rule plainly: `disown` and a meaningful trailing `wait` are mutually exclusive
-  for the same jobs — either don't disown, or collect PIDs into an array and `wait "${pids[@]}"` explicitly.
-  The concrete `sample_fanout_cab1.sh`/cpc1 driver scripts this incident traces to are instance-owned (not
-  present in this repo per the Releasability rule); this change carries the generic, product-owned lesson.
+  The new guidance states the rule plainly: `disown` and ANY `wait` on the same jobs are mutually exclusive,
+  bare or by PID — bash cannot wait on a disowned PID at all, so collecting PIDs does not rescue a disowned
+  `wait`. Pick by whether the driver itself needs to block: don't disown when the driver's own `wait` is how
+  it blocks until the jobs finish; disown for survivability past the driver and replace `wait` with a `kill -0`
+  liveness poll loop on the collected PIDs instead. The concrete `sample_fanout_cab1.sh`/cpc1 driver scripts
+  this incident traces to are instance-owned (not present in this repo per the Releasability rule); this
+  change carries the generic, product-owned lesson.
 - experiment-lifecycle 0.3.31 (2026-07-11): clarify that "concurrency is free" is a REMOTE/provider-side
   billing statement only, and add a reusable throttled-launch helper for LOCAL driver concurrency (#402).
   Incident: a 40-way Tinker LoRA train fan-out followed run-experiment's "concurrency is free" guidance and
