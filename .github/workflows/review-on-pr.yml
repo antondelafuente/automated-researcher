@@ -111,13 +111,19 @@ jobs:
           allow-bot-users: "claude-code-engineer[bot]"
           prompt: ${{ steps.render_prompt.outputs.prompt }}
           output-file: codex-review.json
+          # Strict-mode valid per OpenAI's structured-outputs rules (#390): additionalProperties:false at
+          # every object level, and every properties key present in that object's required array (evidence
+          # is optional in spirit, so it's required-with-nullable-type — ["string", "null"] — rather than
+          # omitted from required, which strict mode disallows). type is paired with enum on verdict/severity
+          # to match OpenAI's own documented examples, closing off an untested corner even though it isn't
+          # the cause of the additionalProperties failure this fixes.
           output-schema: |
             {
               "type": "object",
               "additionalProperties": false,
               "required": ["verdict", "findings"],
               "properties": {
-                "verdict": { "enum": ["approve", "changes_requested"] },
+                "verdict": { "type": "string", "enum": ["approve", "changes_requested"] },
                 "findings": {
                   "type": "array",
                   "items": {
@@ -125,7 +131,7 @@ jobs:
                     "additionalProperties": false,
                     "required": ["severity", "summary", "evidence"],
                     "properties": {
-                      "severity": { "enum": ["P0", "P1"] },
+                      "severity": { "type": "string", "enum": ["P0", "P1"] },
                       "summary": { "type": "string" },
                       "evidence": { "type": ["string", "null"] }
                     }
