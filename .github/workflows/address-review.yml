@@ -106,10 +106,16 @@ jobs:
           body="${body//\{\{BASE_REF\}\}/$BASE_REF}"
           body="${body//\{\{COMMENT_URL\}\}/$COMMENT_URL}"
           body="${body//\{\{COMMENT_BODY\}\}/$COMMENT_BODY}"
+
+          # $body embeds COMMENT_BODY verbatim (untrusted PR comment text), so a fixed delimiter
+          # ("PROMPT_EOF") could be matched by a line inside that comment and used to inject extra keys
+          # into $GITHUB_OUTPUT (same genre as the review-memory fix on automated-researcher#389). A
+          # per-run random delimiter closes that off.
+          delim="prompt_$(openssl rand -hex 20)"
           {
-            echo "prompt<<PROMPT_EOF"
+            echo "prompt<<$delim"
             echo "$body"
-            echo "PROMPT_EOF"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Mint claude engineer App token

@@ -9,8 +9,15 @@
 # form used by every allowlist in this repo. A bare "<slug>" (no prefix, no suffix) is a DIFFERENT,
 # untrusted identity (a plain user account, not the App) and must NOT be treated as equivalent — it
 # passes through unchanged, so it correctly still fails an allowlist comparison against "<slug>[bot]".
+#
+# A null/empty login (e.g. a deleted GitHub user) must fail closed with a clear error rather than
+# canonicalizing to an empty string, which could accidentally match some other empty value downstream.
 canonical_login() {
   local s="$1"
+  if [ -z "$s" ]; then
+    echo "canonical_login: empty/null login input" >&2
+    return 1
+  fi
   case "$s" in
     app/*) printf '%s[bot]' "${s#app/}" ;;
     *) printf '%s' "$s" ;;

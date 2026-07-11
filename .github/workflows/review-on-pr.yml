@@ -314,16 +314,27 @@ jobs:
         run: |
           set -euo pipefail
           p0_count=$(jq '[.findings[] | select(.severity == "P0")] | length' codex-review.json)
+          verdict=$(jq -r '.verdict // "changes_requested"' codex-review.json)
           current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
 
           # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
           # review start and this approval): a stale review must never approve new, unreviewed commits.
+          #
+          # code-review finding: approving must require BOTH zero P0 findings AND the model's own
+          # `verdict` field saying "approve" -- deriving approval from p0_count alone let an
+          # internally-inconsistent result (verdict="changes_requested" with an empty/malformed
+          # findings array, or any verdict value other than the literal "approve") slip through as an
+          # APPROVE. Any inconsistency between the two signals now fails closed to REQUEST_CHANGES,
+          # never the other direction.
           if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
             echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — requesting changes instead of a stale approve"
             event="REQUEST_CHANGES"
-          elif [ "$p0_count" -eq 0 ]; then
+          elif [ "$p0_count" -eq 0 ] && [ "$verdict" = "approve" ]; then
             event="APPROVE"
           else
+            if [ "$p0_count" -eq 0 ] && [ "$verdict" != "approve" ]; then
+              echo "::warning::codex-review.json has zero P0 findings but verdict='$verdict' (not 'approve') — requesting changes instead of trusting an inconsistent result"
+            fi
             event="REQUEST_CHANGES"
           fi
 
