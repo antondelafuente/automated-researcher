@@ -125,6 +125,22 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
+      # automated-researcher#384: claude-code-action auto-installs Claude Code on the runner with no
+      # version pin, and that auto-install has landed on versions that crash at SDK launch before any API
+      # call (opaque "SDK execution error", runs 29134553863/29134534809) — a known startup-crash class in
+      # upstream claude-code-action issues #947/#892/#804. The exact same invocation is verified to succeed
+      # (exit 0) on Claude Code v2.1.207, so pin to that version explicitly instead of trusting auto-install.
+      # ubuntu-latest ships Node.js/npm preinstalled, so no actions/setup-node step is needed here; if that
+      # ever stops being true, add actions/setup-node (pinned by full commit SHA) directly before this step.
+      # Bumping the pinned version later (once a newer release is verified) is a normal PR editing the
+      # version string below.
+      - name: Install pinned Claude Code
+        id: install_claude
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+
       - name: Run claude-code-action (implementor)
         id: run_claude
         uses: anthropics/claude-code-action@536f2c32a39763739000b0e1ac69ca2647d97ce9 # anthropics/claude-code-action v1.0.170
@@ -132,6 +148,9 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.mint_claude_token.outputs.token }}
           prompt: ${{ steps.render_prompt.outputs.prompt }}
+          # Skips claude-code-action's own auto-install, which is the actual startup-crash trigger; use
+          # the version pinned above instead.
+          path_to_claude_code_executable: ${{ steps.install_claude.outputs.path }}
           base_branch: main
           branch_prefix: "agent/"
           # Default template is '{{prefix}}{{entityType}}-{{entityNumber}}-{{timestamp}}' (e.g.
