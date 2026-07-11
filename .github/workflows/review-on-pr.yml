@@ -17,6 +17,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   review:
@@ -67,6 +68,64 @@ jobs:
             echo "GUIDANCE_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Fetch prior review history
+        # GitHub-native disposition state (#380): prior codex review rounds + the author's issue-comment
+        # responses, so the reviewer can adjudicate rather than re-litigating findings the author already
+        # fixed or disputed. Read-only `gh api` calls against this same PR — the job's read token suffices.
+        id: history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MAX_ROUNDS=6
+          MAX_CHARS=20000
+
+          # --paginate emits one JSON array per page; `jq -s add` slurps and flattens them into one array
+          # regardless of page count.
+          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
+            add // [] | map(select((.body // "") != ""))
+              | map({ts: .submitted_at, kind: "review", user: .user.login, state, body})
+          ')
+          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s '
+            add // [] | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
+          ')
+
+          combined=$(jq -n --argjson r "$reviews" --argjson c "$comments" '($r + $c) | sort_by(.ts) | reverse')
+          total=$(jq 'length' <<<"$combined")
+          capped=$(jq --argjson n "$MAX_ROUNDS" '.[0:$n]' <<<"$combined")
+          capped_count=$(jq 'length' <<<"$capped")
+
+          rendered=$(jq -r '
+            .[] | (if .kind == "review" then "### Review (" + .state + ") by " + .user + " at " + .ts
+                   else "### Comment by " + .user + " at " + .ts end)
+              + "\n" + .body + "\n"
+          ' <<<"$capped")
+
+          note=""
+          if [ "$capped_count" -lt "$total" ]; then
+            note="showing the $capped_count most recent of $total prior review entries; older entries omitted"
+          fi
+
+          if [ "${#rendered}" -gt "$MAX_CHARS" ]; then
+            rendered="${rendered:0:$MAX_CHARS}
+          [...truncated to fit a ${MAX_CHARS}-character cap...]"
+            if [ -n "$note" ]; then
+              note="$note; additionally truncated to fit a ${MAX_CHARS}-character cap"
+            else
+              note="truncated to fit a ${MAX_CHARS}-character cap; some older entries omitted"
+            fi
+          fi
+
+          {
+            echo "count=$capped_count"
+            echo "note=$note"
+            echo "rendered<<HISTORY_EOF"
+            echo "$rendered"
+            echo "HISTORY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Render review prompt
         id: render_prompt
         env:
@@ -75,8 +134,27 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GUIDANCE: ${{ steps.guidance.outputs.guidance }}
+          HISTORY_COUNT: ${{ steps.history.outputs.count }}
+          HISTORY_NOTE: ${{ steps.history.outputs.note }}
+          HISTORY_RENDERED: ${{ steps.history.outputs.rendered }}
         run: |
           set -euo pipefail
+
+          if [ "$HISTORY_COUNT" -gt 0 ]; then
+            note_suffix=""
+            [ -n "$HISTORY_NOTE" ] && note_suffix=" ($HISTORY_NOTE)"
+            history_section="Prior review rounds and the author's responses follow, most recent first$note_suffix.
+          Treat an author response that fixed a finding (commit referenced) or disputed it with cited
+          evidence as that finding's DISPOSITION. Do not re-raise a finding whose disposition you judge
+          sound — adjudicate it, don't merely trust it: if a disposition is unsound, re-raise the finding
+          and say precisely why the response fails. Findings not previously raised are judged fresh, as
+          usual. Your P0/approve bar is unchanged.
+
+          $HISTORY_RENDERED"
+          else
+            history_section="This is the first review of this PR; there is no prior review history to consider."
+          fi
+
           {
             echo "prompt<<PROMPT_EOF"
             cat <<PROMPT
@@ -90,6 +168,8 @@ jobs:
           so the PR cannot weaken the criteria it is judged by, even if this diff itself edits AGENTS.md):
 
           $GUIDANCE
+
+          $history_section
 
           Be concise and specific: cite the exact file and evidence for each finding. Set "verdict" to
           "approve" only if you find zero P0 findings; otherwise "changes_requested". List every finding
