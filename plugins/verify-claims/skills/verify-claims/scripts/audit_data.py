@@ -162,29 +162,36 @@ def main():
 
     # ---- stratified HIGH-RISK sample (not just random) ----
     order = sorted(range(n), key=lambda i: lens[i])
-    picks = set()
-    picks.update(order[: a.sample_k])              # shortest
-    picks.update(order[-a.sample_k:])              # longest
-    picks.update(near_cap[: a.sample_k])           # near cap
-    picks.update(open_think[: a.sample_k])         # truncated (CoT)
-    picks.update(parse_errs[: a.sample_k])         # parser failures
-    picks.update(empties[: a.sample_k])            # empties
+    # "priority" strata carry the coverage guarantees this script promises (esp. per-label/per-arm
+    # coverage of a minority subset) — they must survive the size cap below untouched. Only the
+    # evenly-spaced "spread" fill is size-capped; truncating priority picks by sorted-index (as a
+    # single capped set used to) silently drops high-index minority rows appended near the end of
+    # the file, defeating the --label-field guarantee.
+    priority = set()
+    priority.update(order[: a.sample_k])              # shortest
+    priority.update(order[-a.sample_k:])              # longest
+    priority.update(near_cap[: a.sample_k])           # near cap
+    priority.update(open_think[: a.sample_k])         # truncated (CoT)
+    priority.update(parse_errs[: a.sample_k])         # parser failures
+    priority.update(empties[: a.sample_k])            # empties
     # one per source + per label/arm
     seen_s = {}
     for i, r in enumerate(rows):
         s = str(r.get(a.source_field))
         if seen_s.get(s, 0) < 2:
-            picks.add(i); seen_s[s] = seen_s.get(s, 0) + 1
+            priority.add(i); seen_s[s] = seen_s.get(s, 0) + 1
     if a.label_field:
         seen_l = {}
         for i, r in enumerate(rows):
             l = str(r.get(a.label_field))
             if seen_l.get(l, 0) < 2:
-                picks.add(i); seen_l[l] = seen_l.get(l, 0) + 1
-    # some random (deterministic: evenly spaced)
+                priority.add(i); seen_l[l] = seen_l.get(l, 0) + 1
+    # some random (deterministic: evenly spaced), capped to fill only the remaining budget
+    cap = max(40, a.sample_k * 8)
     step = max(1, n // a.sample_k)
-    picks.update(range(0, n, step))
-    picks = sorted(picks)[: max(40, a.sample_k * 8)]   # cap the sample size
+    spread = [i for i in range(0, n, step) if i not in priority]
+    picks = sorted(priority) + sorted(spread)[: max(0, cap - len(priority))]
+    picks = sorted(picks)
 
     with open(a.sample, "w") as f:
         for i in picks:
