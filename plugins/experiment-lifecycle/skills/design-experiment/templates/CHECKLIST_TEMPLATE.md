@@ -37,8 +37,10 @@
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
       (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).
-      Same tick also owns the pod-lease refresh heartbeat (gated on that tick's liveness/progress read) for every
-      live pod — a healthy long run must never silently outlive its lease expiry (#293).            ev:
+      Same tick also owns the pod-lease refresh heartbeat for every live pod, gated on POSITIVE-PROGRESS
+      evidence (or an active operator-declared `QUIET_PHASE.md`) — never raw busy/liveness alone, or a wedged
+      hot-loop refreshes forever — with no-progress-and-no-marker surfaced loudly on the next wake rather than
+      silently skipped; a healthy long run must never silently outlive its lease expiry (#293).      ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
       bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the

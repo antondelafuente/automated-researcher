@@ -83,13 +83,27 @@ lease's `expiry` is the SOLE deletion trigger the standing reaper enforces (the 
 #284), so a run that silently outlives its lease gets reaped out from under it — a real incident lost a ~15h run's
 eval pod mid-stage this way, plus a recovered orphan pod whose lease never got past its short, un-enriched
 acquire-window expiry. Fold the refresh into the SAME tick that already computed the liveness + progress signal
-above, gated on that signal — never a separate step to remember: for every pod id in the run-supervision record's
-`lease_pod_ids` (`run_supervision_record.sh status <run-id>`), if this tick read the job healthy (busy or
-progressing, not hung/BLOCKED), `bash pod_lease.sh refresh <nonce> --expiry-min <N>`; if a lease is still
-`provisional` (never enriched — e.g. a recovered/adopted orphan) but you've confirmed SSH reachability, `enrich`
-it instead (`--ssh <host:port> --expiry-min <N>`) so it stops carrying its short intent-window deadline. A tick
-that instead reads hung/BLOCKED does **not** refresh — the lease's existing expiry (or the reaper) stays the
-backstop for a genuinely wedged/abandoned pod, exactly as before.
+above, gated on **that same progress principle, not raw compute activity** — a wedged hot-loop is busy without
+producing, and gating on "busy" alone would refresh it forever, defeating the expiry backstop (#428 review). For
+every pod id in the run-supervision record's `lease_pod_ids` (`run_supervision_record.sh status <run-id>`),
+first resolve the pod id to its lease nonce — leases are addressed by nonce, never by pod id directly —
+`bash pod_lease.sh find-by-pod <pod-id>` (empty output means no matching non-terminal lease; skip it, don't guess
+a nonce), then:
+- **positive-progress evidence this tick** (the stage-advancing / bytes-growing / log-heartbeat signal above,
+  actually observed — not merely busy) → `bash pod_lease.sh refresh <nonce> --expiry-min <N>`; if the lease is
+  still `provisional` (never enriched — e.g. a recovered/adopted orphan) and you've confirmed SSH reachability,
+  `enrich` it instead (`--ssh <host:port> --expiry-min <N>`) so it stops carrying its short intent-window
+  deadline.
+- **no progress this tick, but an active operator-declared long-quiet-phase marker** — a `QUIET_PHASE.md`
+  (`reason` + a bounded `quiet_until` horizon, same shape as `LOOK_AGAIN.md` below) written only because the
+  brief or a human explicitly told you to expect an extended silent stretch (e.g. a known long non-logging
+  compile/index stage); never self-declare one just because a tick came up empty, that's the over-strict-gating
+  failure re-created through the back door. A marker whose `quiet_until` has passed counts as absent → refresh/
+  enrich the same as the progress case above.
+- **neither** (busy-but-not-progressing, hung, BLOCKED, or simply quiet with no active marker) → do **NOT**
+  refresh. Don't let this pass silently: treat it like a look-again-deadline miss — surface it loudly on the
+  next wake (diagnose, notify the human) instead of quietly trusting the lease's existing expiry to eventually
+  reap it unattended.
 
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the

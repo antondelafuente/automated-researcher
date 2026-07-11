@@ -4,12 +4,17 @@
   short, never-enriched acquire-window expiry (reaped ~1.5h in), and the eval pod's watchdog-era keepalive,
   set once at deploy and never refreshed (deleted mid-eval; the per-pod watchdog itself is separately retired,
   #266/#284). `run-experiment` SKILL.md's self-wake section now folds the lease refresh into the SAME tick that
-  already reads each job's liveness + progress signal: for every pod id in the run-supervision record's
-  `lease_pod_ids`, a healthy (busy/progressing) tick calls `pod_lease.sh refresh`, or `enrich` first if the
-  lease is still `provisional` (the recovered-orphan case) — a hung/BLOCKED tick does not refresh, leaving the
-  lease/reaper as the backstop for a genuinely abandoned pod. `gpu-job` SKILL.md's lease section now points at
-  `run-experiment`'s tick as the concrete owner of that refresh, and `design-experiment`'s `CHECKLIST_TEMPLATE.md`
-  self-wake / resume-contract gates name the heartbeat as part of their evidence bar.
+  already reads each job's liveness + progress signal, gated on that **progress** evidence, not raw busy/liveness
+  (a wedged hot-loop is busy without producing, and gating on "busy" alone would refresh it forever): for every
+  pod id in the run-supervision record's `lease_pod_ids`, resolve it to its lease nonce first (`pod_lease.sh
+  find-by-pod <pod-id>` — leases are addressed by nonce, never by pod id), then a tick with actual positive-
+  progress evidence calls `pod_lease.sh refresh`, or `enrich` first if the lease is still `provisional` (the
+  recovered-orphan case); a tick with no progress but an active operator-declared `QUIET_PHASE.md` (reason +
+  bounded horizon) refreshes the same way; a tick with neither — including hung/BLOCKED — does not refresh, and
+  surfaces that loudly on the next wake instead of silently trusting the lease/reaper to eventually catch it.
+  `gpu-job` SKILL.md's lease section now points at `run-experiment`'s tick as the concrete owner of that refresh,
+  and `design-experiment`'s `CHECKLIST_TEMPLATE.md` self-wake / resume-contract gates name the heartbeat as part
+  of their evidence bar.
 - experiment-lifecycle 0.3.35 (2026-07-11): block `log-experiment.sh` on a silently gitignored pinned file
   (#340). Incident: `log-experiment.sh` staged a registry dir with a plain `git add`, which silently honors
   the research repo's `.gitignore`; a small pinned file (e.g. an instrument the DESIGN.md declares
