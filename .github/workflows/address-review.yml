@@ -10,10 +10,6 @@ on:
   issue_comment:
     types: [created]
 
-concurrency:
-  group: address-pr-${{ github.event.issue.number }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   issues: read
@@ -23,18 +19,28 @@ jobs:
   address:
     name: address
     runs-on: ubuntu-latest
+    # Job-level (not workflow-level) concurrency, deliberately (automated-researcher#400): a job whose
+    # `if:` evaluates false is skipped and never enters its concurrency group, so a non-matching comment
+    # (no mention, wrong author, etc.) can't cancel an in-flight addressing round on the same PR. Workflow-
+    # level concurrency joins the group as soon as the run is triggered, before any job `if:` is evaluated,
+    # which is exactly the bug this replaces.
+    concurrency:
+      group: address-pr-${{ github.event.issue.number }}
+      cancel-in-progress: true
     # Coarse pre-filter only (mirrors implement-on-ready.yml automated-researcher#381): the authoritative
     # gate is the "Resolve + authorize PR" step below, which re-fetches the PR fresh (same-repo, real
     # author, open state) via the shared canonical-login helper before any token is minted. `issue_comment`
     # fires for comments on plain Issues too, not just PRs — `github.event.issue.pull_request` is only
     # present when the comment is on a PR, which is what restricts this to PR comments at all. The
-    # allowlist (researcher + the two engineer bots, both login representations) is hard-coded here for
-    # the same reason as implement-on-ready.yml's own allowlist: a compromised in-repo file must not be
-    # able to widen who can trigger a privileged run.
+    # allowlist (researcher + the codex bot, both login representations) is hard-coded here for the same
+    # reason as implement-on-ready.yml's own allowlist: a compromised in-repo file must not be able to
+    # widen who can trigger a privileged run. The claude engineer bot itself is deliberately EXCLUDED
+    # (automated-researcher#400): the implementor never needs to dispatch itself, and its own completion
+    # comments can contain the literal mention string, which would otherwise self-retrigger a round.
     if: |
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@claude-code-engineer') &&
-      contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.event.comment.user.login)
+      contains(fromJSON('["antondelafuente","codex-engineer[bot]","app/codex-engineer"]'), github.event.comment.user.login)
     steps:
       # Checkout runs FIRST (same rationale as implement-on-ready#381): the authorize step below sources a
       # helper script from the working tree, which must exist before it's sourced. This is a control-plane
