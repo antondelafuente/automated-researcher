@@ -199,9 +199,37 @@ never raw `pkill -f` / `pgrep -f` in an ssh one-liner (it self-matches your own 
 helper); never end a driver in a bare `wait` when `exec > >(tee …)` is in play (the tee child is a job; `wait` never
 returns and the done-marker never fires — wait on explicit PIDs, or touch the marker first).
 
+**Sibling footgun, same failure class — `disown` and ANY `wait` on the SAME jobs are mutually exclusive, bare
+or by PID.** A sample-fanout driver that launches each job with `nohup ... & disown` and then closes with a bare
+`wait` (no PID args) does NOT block until those jobs finish: `disown` removes the job from the shell's OWN job
+table, so the bare `wait` returns as soon as the launch loop itself finishes, and any done-marker written right
+after fires early while the jobs are still running (caught once via `ps` / growing row counts: a "DONE" marker
+landed with 11 of 19 subjects still mid-sample). Collecting PIDs does not rescue this: bash cannot `wait` on a
+disowned PID at all — `wait "${pids[@]}"` on disowned jobs returns immediately too, same false-early marker.
+Two actually-correct patterns, pick by whether the driver itself is the thing that needs to block: **the driver
+waits → don't disown** (a detached driver that stays up polling until its own `wait`/`wait "${pids[@]}"` returns
+needs the jobs to stay in its job table — that's the common case, and `nohup` alone already protects them from a
+dropped SSH session); **the jobs must outlive the driver for some other reason → disown, and replace `wait` with
+a `kill -0` liveness poll loop on the collected PIDs** (`while kill -0 "$pid" 2>/dev/null; do sleep …; done`,
+per PID or over the array) instead of `wait` — never `wait`, bare or by PID, on a disowned job.
+
 **Train/eval overlap (free wall-clock for adapter arms):** when the train artifact is a small adapter (hops via the
 store in seconds), run eval cells on a SECOND unit *during* training — eval does the base-anchor cells first, then waits
 for the adapter and poll-resumes into arm cells.
+
+**Small-model LoRA generation: default to direct Tinker-side sampling over download-to-vLLM, not only as a
+congestion fallback (#353).** Tinker's checkpoint-archive-export step (pulling a trained LoRA adapter local for
+vLLM serving) shares one account-level export queue across every session on the same `TINKER_API_KEY` — two
+concurrent sessions exporting around the same time can each stall 20-40+ min on a step that normally finishes in
+minutes, with neither script at fault (confirmed independently by two sessions hitting the identical symptom on
+their own unrelated adapters). `tinker.ServiceClient().create_sampling_client(model_path=<tinker:// sampler
+path>)` samples straight from Tinker's hosted model state and never touches the export queue at all — for a
+3600-rollout subject on Llama-3.2-3B, direct sampling took ~5-10 min total versus the export step alone costing
+20-40+ min before generation could even start. For single-digit-B-parameter LoRA fine-tunes trained via Tinker,
+default to direct sampling rather than reaching for it only once congestion is already observed. Before trusting
+either serving stack (a mid-run switch or a from-the-start default), run an anchor-reproduction guard: re-generate
+a known-reference subject with byte-identical decoding config on the stack you're about to use, and confirm its
+rollouts CI-overlap historical values before trusting it for the real run.
 
 **On-compute agent delegate (RARE):** drive a named agent in the compute's tmux via the send-keys protocol (clear input
 first, send text, separate Enter; long msgs via a literal heredoc). If it loses auth, finish auth-free with a shell
