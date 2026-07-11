@@ -1,0 +1,43 @@
+name: checks
+
+# Trusted required-status gate (automated-researcher#378 design review, Finding 3): this repo had no
+# Actions CI at all before #378, so nothing ran .aar-ci/checks.sh as a trusted gate — the implement-on-ready
+# workflow's auto-merge could otherwise merge a PR that never ran the deterministic check suite. This
+# workflow only CALLS checks.sh (unmodified); it does not change what the checks do. Runs for every PR,
+# human or agent authored — the same deterministic gate every PR should pass. No secrets, no App token, no
+# write permissions: ambient read-only GITHUB_TOKEN only.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: checks-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Run .aar-ci/checks.sh on changed paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mapfile -t changed_paths < <(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          if [ "${#changed_paths[@]}" -eq 0 ]; then
+            echo "no changed paths detected; nothing to check"
+            exit 0
+          fi
+          bash .aar-ci/checks.sh "${changed_paths[@]}"
