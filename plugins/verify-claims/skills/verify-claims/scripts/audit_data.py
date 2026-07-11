@@ -17,6 +17,14 @@ Usage:
       [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — auditing an added/edited subset within a larger unchanged base (ablations, add-back
+waves, targeted edits): ALWAYS pass --label-field pointing at whatever column distinguishes the
+subset (e.g. an arm/added-vs-base flag). Without it, the per-source/per-label strata and the evenly-
+spaced random pass are the only things pulling non-extreme rows into the sample, and on a small
+minority inside a much larger majority they can miss the minority entirely — you can end up auditing
+a "clean" sample that is 100% base rows and 0% added rows. --label-field guarantees per-label
+coverage regardless of how small the minority is.
 """
 import argparse, hashlib, json, statistics, sys
 
@@ -57,7 +65,9 @@ def main():
     ap.add_argument("--cot", action="store_true", help="CoT invariants: finish_reason==stop when present, closed </think>, non-empty answer")
     ap.add_argument("--require-finish-reason", action="store_true", help="In --cot mode, hard-fail rows missing finish_reason")
     ap.add_argument("--source-field", default="source")
-    ap.add_argument("--label-field", default=None, help="arm/label field for balance + per-arm sampling")
+    ap.add_argument("--label-field", default=None, help="arm/label field for balance + per-arm sampling — "
+                     "always pass this when auditing an added/edited subset within a larger unchanged base, "
+                     "or the default sample can oversample the unchanged majority and miss the subset entirely")
     ap.add_argument("--text-field", default=None)
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
@@ -104,6 +114,12 @@ def main():
     rep["source_balance"] = balance(a.source_field)
     if a.label_field:
         rep["label_balance"] = balance(a.label_field)
+    else:
+        rep["warnings"].append(
+            "no --label-field set: if this file has an added/edited minority subset inside a larger "
+            "unchanged base (ablation, add-back wave, targeted edit), the default sample can miss it "
+            "entirely — pass --label-field pointing at whatever column distinguishes the subset"
+        )
 
     open_think = []
     if a.cot:
@@ -146,29 +162,74 @@ def main():
 
     # ---- stratified HIGH-RISK sample (not just random) ----
     order = sorted(range(n), key=lambda i: lens[i])
-    picks = set()
-    picks.update(order[: a.sample_k])              # shortest
-    picks.update(order[-a.sample_k:])              # longest
-    picks.update(near_cap[: a.sample_k])           # near cap
-    picks.update(open_think[: a.sample_k])         # truncated (CoT)
-    picks.update(parse_errs[: a.sample_k])         # parser failures
-    picks.update(empties[: a.sample_k])            # empties
-    # one per source + per label/arm
-    seen_s = {}
-    for i, r in enumerate(rows):
-        s = str(r.get(a.source_field))
-        if seen_s.get(s, 0) < 2:
-            picks.add(i); seen_s[s] = seen_s.get(s, 0) + 1
-    if a.label_field:
-        seen_l = {}
+    cap = max(40, a.sample_k * 8)
+
+    def group_by(field):
+        g = {}
         for i, r in enumerate(rows):
-            l = str(r.get(a.label_field))
-            if seen_l.get(l, 0) < 2:
-                picks.add(i); seen_l[l] = seen_l.get(l, 0) + 1
-    # some random (deterministic: evenly spaced)
+            g.setdefault(str(r.get(field)), []).append(i)
+        return g
+
+    def allocate_coverage(groups, budget, picks, kind):
+        """Spend at most `budget` new picks covering every group: minimum 1 per group (deterministic
+        group order), then proportional fill of any leftover budget favoring larger groups. Never adds
+        more than `budget` rows, so callers compose without ever exceeding the overall sample cap."""
+        keys = sorted(groups)
+        added = []
+        if not keys or budget <= 0:
+            if keys:
+                rep["warnings"].append(
+                    f"{len(keys)} distinct {kind} values but 0 sample slots remain (cap={cap}): "
+                    f"{kind} coverage is PARTIAL"
+                )
+            return added
+        covered = keys[:budget]
+        if len(keys) > budget:
+            rep["warnings"].append(
+                f"{len(keys)} distinct {kind} values exceed the {budget}-row sample budget (cap={cap}): "
+                f"only {budget} {kind} values are represented in the sample — coverage is PARTIAL"
+            )
+        remaining = budget
+        for k in covered:
+            if remaining <= 0:
+                break
+            row = next((i for i in groups[k] if i not in picks and i not in added), None)
+            if row is None:
+                continue
+            added.append(row); remaining -= 1
+        if remaining > 0:
+            fill_order = sorted(covered, key=lambda k: (-len(groups[k]), k))
+            progress = True
+            while remaining > 0 and progress:
+                progress = False
+                for k in fill_order:
+                    if remaining <= 0:
+                        break
+                    row = next((i for i in groups[k] if i not in picks and i not in added), None)
+                    if row is None:
+                        continue
+                    added.append(row); remaining -= 1; progress = True
+        return added
+
+    # Every stage below only spends whatever budget (cap - len(picks)) remains, so the sample never
+    # exceeds `cap` regardless of source/label cardinality. Per-label coverage goes FIRST, with the
+    # full cap as its budget — that's the guarantee --label-field exists to make (every distinct label
+    # represented whenever label-count <= cap), so it gets first claim rather than being squeezed out
+    # by the other (lower-stakes) risk strata.
+    picks = set()
+    if a.label_field:
+        picks.update(allocate_coverage(group_by(a.label_field), cap - len(picks), picks, "label"))
+    for stratum in (order[: a.sample_k], order[-a.sample_k:], near_cap[: a.sample_k],
+                    open_think[: a.sample_k], parse_errs[: a.sample_k], empties[: a.sample_k]):
+        for i in stratum:
+            if len(picks) >= cap:
+                break
+            picks.add(i)
+    picks.update(allocate_coverage(group_by(a.source_field), cap - len(picks), picks, "source"))
     step = max(1, n // a.sample_k)
-    picks.update(range(0, n, step))
-    picks = sorted(picks)[: max(40, a.sample_k * 8)]   # cap the sample size
+    spread = [i for i in range(0, n, step) if i not in picks]
+    picks.update(spread[: max(0, cap - len(picks))])
+    picks = sorted(picks)
 
     with open(a.sample, "w") as f:
         for i in picks:
@@ -176,7 +237,7 @@ def main():
             f.write(json.dumps(row) + "\n")
     rep["sample_file"] = a.sample
     rep["sample_n"] = len(picks)
-    rep["sample_strata"] = "shortest|longest|near_cap|open_think|parse_err|empty|per_source|per_label|spread"
+    rep["sample_strata"] = "per_label|shortest|longest|near_cap|open_think|parse_err|empty|per_source|spread"
 
     json.dump(rep, open(a.out, "w"), indent=2)
     status = "HARD FAIL" if rep["HARD_FAILS"] else "ok"

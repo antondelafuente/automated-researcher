@@ -386,7 +386,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   rollouts are where parse/truncation/empty-`<think>`/grader-failure bugs live): the **`verify-claims`** deterministic
   `audit_data.py` (full pool + a stratified high-risk sample) on each surface ALWAYS, **then** its cross-family `--data`
   on each surface vs the design intent — **always, no N.A.; the rollouts every run** (generated fresh). A 2-sample
-  self-smoke is exactly what misses a truncation bug.
+  self-smoke is exactly what misses a truncation bug. **Always pass `--label-field`** when auditing a surface where
+  an added/edited subset sits inside a much larger unchanged base (ablations, add-back waves, targeted edits) — the
+  default sample can otherwise oversample the unchanged majority and miss the subset the gate actually cares about.
 - **Cheap proxy in, full-scale out.** Search on small model / small-n / cheap grader; validate finalists at full scale.
   **Re-run finalists once** before believing them (best-of-N from noise fakes ≈ SE·√(2 ln N) — often bigger than the
   gaps you chase).
