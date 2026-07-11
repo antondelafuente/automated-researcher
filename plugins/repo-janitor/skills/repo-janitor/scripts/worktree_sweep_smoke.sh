@@ -13,6 +13,10 @@
 #   - silent cases: unmerged-but-fresh, merged-clean-but-fresh — appear in neither tier
 #   - --reap-tier1 --dry-run deletes nothing; --reap-tier1 deletes ONLY tier-1 entries
 #   - --json shape, and CLI argument validation (missing --repo, --dry-run without --reap-tier1, bad depth)
+#   - default-ref resolution never falls back to an unverified branch name (merge-gate final-review MED):
+#     an unresolvable --default-branch reads as UNKNOWN (inspection needed), not silently merged/unmerged
+#   - a worktree with an INITIALIZED submodule is excluded from tier1 even when merged+clean+old, since
+#     `git worktree remove` unconditionally refuses it (merge-gate final-review MED)
 # -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
 # `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
 # vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
@@ -247,6 +251,48 @@ g "$DB_REPO" worktree add -q "$TMP/wt-on-main" main   # a LINKED worktree checke
 python3 "$SWEEP" --repo "$DB_REPO" --reap-tier1 >/dev/null 2>&1
 if [ -d "$TMP/wt-on-main" ]; then no "linked worktree on the default branch was not reaped (expected removal of the WORKTREE, just not the branch)"; else ok "linked worktree on the default branch was removed"; fi
 if git -C "$DB_REPO" rev-parse --verify -q refs/heads/main >/dev/null; then ok "default branch ref 'main' preserved after reap"; else no "default branch ref 'main' was WRONGLY deleted"; fi
+
+# 3d. merge-gate final-review MED finding: default-ref resolution must not silently fall back to an
+#     unverified branch name when neither the remote-tracking ref nor the local branch exists for the
+#     configured --default-branch. A genuinely-merged worktree compared against a bogus name must read
+#     UNKNOWN (inspection needed), never silently "merged" or silently "not merged".
+J_BADDEFAULT=$(python3 "$SWEEP" --json --repo "$REPO" --default-branch "does-not-exist" 2>/dev/null)
+if echo "$J_BADDEFAULT" | has_path_in "d['tier1']" "$TMP/wt-merged"; then no "unresolvable --default-branch: wt-merged falsely reached tier1"; else ok "unresolvable --default-branch: wt-merged excluded from tier1"; fi
+if echo "$J_BADDEFAULT" | reason_has "d['tier3']" "$TMP/wt-merged" "inspection needed"; then ok "unresolvable --default-branch: wt-merged reads as UNKNOWN (inspection needed)"; else no "unresolvable --default-branch: wt-merged missing its UNKNOWN/inspection-needed reason"; fi
+
+# 3e. merge-gate final-review MED finding: a worktree with an INITIALIZED submodule reads merged+clean+old
+#     but `git worktree remove` unconditionally refuses submodule-bearing worktrees regardless of the
+#     submodule's own cleanliness — must be excluded from tier1 (never silently reaped, which would always
+#     fail) and flagged with a reason naming the submodule, not silently skipped like ignored content.
+SM_SUBORIGIN="$TMP/sm-sub-origin.git"; SM_SUBREPO="$TMP/sm-sub"
+git init -q --bare -b main "$SM_SUBORIGIN"
+git init -q -b main "$SM_SUBREPO"
+g "$SM_SUBREPO" config user.email t@example.com; g "$SM_SUBREPO" config user.name smoke
+echo subfile > "$SM_SUBREPO/s.txt"; g "$SM_SUBREPO" add s.txt; g "$SM_SUBREPO" commit -q -m subinit
+g "$SM_SUBREPO" remote add origin "$SM_SUBORIGIN"; g "$SM_SUBREPO" push -q origin main
+
+SM_ORIGIN="$TMP/sm-origin.git"; SM_REPO="$TMP/sm-repo"
+git init -q --bare -b main "$SM_ORIGIN"
+git init -q -b main "$SM_REPO"
+g "$SM_REPO" config user.email t@example.com; g "$SM_REPO" config user.name smoke
+echo hello > "$SM_REPO/f.txt"; g "$SM_REPO" add f.txt; g "$SM_REPO" commit -q -m init
+g "$SM_REPO" remote add origin "$SM_ORIGIN"; g "$SM_REPO" push -q origin main
+g "$SM_REPO" -c protocol.file.allow=always submodule add -q "$SM_SUBORIGIN" subm
+g "$SM_REPO" commit -q -m addsubmodule
+g "$SM_REPO" push -q origin main
+
+g "$SM_REPO" worktree add -q -b feat-with-submodule "$TMP/wt-submodule" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-submodule" commit -q --allow-empty -m oldsubm --date="$OLD_DATE"
+g "$TMP/wt-submodule" -c protocol.file.allow=always submodule update --init -q
+g "$SM_REPO" merge -q --no-edit feat-with-submodule
+g "$SM_REPO" push -q origin main
+
+J_SUBM=$(python3 "$SWEEP" --json --repo "$SM_REPO" 2>/dev/null)
+if echo "$J_SUBM" | has_path_in "d['tier1']" "$TMP/wt-submodule"; then no "submodule-bearing worktree reached tier1 (git worktree remove would refuse it)"; else ok "submodule-bearing worktree excluded from tier1"; fi
+if echo "$J_SUBM" | reason_has "d['tier3']" "$TMP/wt-submodule" "submodule"; then ok "tier3 reason names the initialized submodule"; else no "tier3 reason for submodule-bearing worktree missing the submodule note"; fi
+
+python3 "$SWEEP" --repo "$SM_REPO" --reap-tier1 >/dev/null 2>&1
+if [ -d "$TMP/wt-submodule" ]; then ok "submodule-bearing worktree not removed by --reap-tier1"; else no "submodule-bearing worktree was WRONGLY removed (or removal was wrongly attempted/succeeded)"; fi
 
 # 4. --reap-tier1 --dry-run touches nothing
 COUNT_BEFORE=$(git -C "$REPO" worktree list | wc -l)

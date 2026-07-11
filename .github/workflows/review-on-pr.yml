@@ -17,6 +17,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  issues: read
 
 jobs:
   review:
@@ -67,6 +68,112 @@ jobs:
             echo "GUIDANCE_EOF"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Fetch prior review history
+        # GitHub-native disposition state (#380): prior codex review rounds + the author's issue-comment
+        # responses, so the reviewer can adjudicate rather than re-litigating findings the author already
+        # fixed or disputed. Read-only `gh api` calls against this same PR — the job's read token suffices.
+        # automated-researcher#389 review: restricted to the pipeline's own trusted identities (same
+        # allowlist as implement-on-ready.yml's ALLOWLIST) — an unrelated or adversarial review/comment must
+        # not be able to inject or crowd out disposition context.
+        # automated-researcher#389 round 2: reviews and comments are two distinct streams and are capped
+        # INDEPENDENTLY, then merged only for rendering. Capping a single merged stream let a burst of
+        # trusted-but-routine comments (e.g. the automerge-status notice, owner check-ins) push actual prior
+        # codex-engineer[bot] review rounds out of the window even though nothing adversarial happened. The
+        # `reviews` stream is also narrowed to codex-engineer[bot] only: it is the sole identity that ever
+        # produces genuine prior-review disposition content in this pipeline (submit-verdict's minted app
+        # token), so a review submitted under any other identity is never mislabeled as a past Codex verdict.
+        # automated-researcher#389 round 3: within the comments stream, a fixed, zero-disposition-content
+        # notice (implement-on-ready.yml's "Auto-merge could not be enabled..." message, emitted verbatim by
+        # automation with no relation to any finding) is now filtered out before capping, since it is the one
+        # deterministically identifiable source of "routine noise" in this pipeline. Beyond that one known
+        # pattern, we accept as a residual risk that arbitrary free-text chatter from the two trusted
+        # identities (owner, this bot) can still occupy a slot ahead of an older genuine disposition once
+        # more than MAX_ROUNDS comments accumulate. This is deliberately best-effort, not exhaustive:
+        # (1) the comments stream is restricted to two fully-trusted, human-supervised identities by the
+        # round-1 allowlist, so this is a volume/ordering question among trusted parties, never an
+        # adversarial-injection one; (2) a keyword/regex classifier for "is this a disposition" would be
+        # brittle and risks silently dropping a genuine response phrased without its expected vocabulary,
+        # which is worse than best-effort retention; (3) the full comment thread stays visible to a human on
+        # the PR page regardless of what's fed to the reviewer; and (4) the prompt's adjudicate-not-suppress
+        # instruction means a missing disposition just causes the finding to be judged fresh again, not
+        # wrongly suppressed — the safe failure direction. MAX_ROUNDS=6 also comfortably covers this PR's own
+        # 3-round history to date.
+        id: history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          MAX_ROUNDS=6
+          MAX_CHARS=20000
+          REVIEW_ALLOW='["codex-engineer[bot]"]'
+          COMMENT_ALLOW='["antondelafuente","claude-code-engineer[bot]"]'
+          # The only comment this pipeline's automation emits itself with no disposition content of its own
+          # (implement-on-ready.yml's enable-automerge step, verbatim) — excluded before capping so it can
+          # never occupy a slot ahead of a real prior-round response.
+          NOISE_PREFIXES='["Auto-merge could not be enabled automatically"]'
+
+          # canon_login mirrors .github/scripts/canonical-login.sh's remap (a jq filter can't source that
+          # bash helper, so the same "app/<slug>" -> "<slug>[bot]" logic is duplicated here) so a review or
+          # comment authored by the trusted identities is recognized under either login form the API uses.
+          # --paginate emits one JSON array per page; `jq -s add` slurps and flattens them into one array
+          # regardless of page count.
+          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s --argjson allow "$REVIEW_ALLOW" '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select((.body // "") != "" and ((.user.login | canon_login) as $c | ($allow | index($c)) != null)))
+              | map({ts: .submitted_at, kind: "review", user: .user.login, state, body})
+          ')
+          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --argjson allow "$COMMENT_ALLOW" --argjson noise "$NOISE_PREFIXES" '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select((.user.login | canon_login) as $c | ($allow | index($c)) != null))
+              | map(select(((.body // "") as $body | $noise | any(. as $prefix | $body | startswith($prefix))) | not))
+              | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
+          ')
+
+          reviews_total=$(jq 'length' <<<"$reviews")
+          comments_total=$(jq 'length' <<<"$comments")
+          reviews_capped=$(jq --argjson n "$MAX_ROUNDS" 'sort_by(.ts) | reverse | .[0:$n]' <<<"$reviews")
+          comments_capped=$(jq --argjson n "$MAX_ROUNDS" 'sort_by(.ts) | reverse | .[0:$n]' <<<"$comments")
+          reviews_capped_count=$(jq 'length' <<<"$reviews_capped")
+          comments_capped_count=$(jq 'length' <<<"$comments_capped")
+
+          combined=$(jq -n --argjson r "$reviews_capped" --argjson c "$comments_capped" '($r + $c) | sort_by(.ts) | reverse')
+          capped_count=$(jq 'length' <<<"$combined")
+
+          rendered=$(jq -r '
+            .[] | (if .kind == "review" then "### Review (" + .state + ") by " + .user + " at " + .ts
+                   else "### Comment by " + .user + " at " + .ts end)
+              + "\n" + .body + "\n"
+          ' <<<"$combined")
+
+          note=""
+          if [ "$reviews_capped_count" -lt "$reviews_total" ] || [ "$comments_capped_count" -lt "$comments_total" ]; then
+            note="showing the $reviews_capped_count most recent of $reviews_total trusted review rounds and the $comments_capped_count most recent of $comments_total trusted comments; older entries omitted"
+          fi
+
+          if [ "${#rendered}" -gt "$MAX_CHARS" ]; then
+            rendered="${rendered:0:$MAX_CHARS}
+          [...truncated to fit a ${MAX_CHARS}-character cap...]"
+            if [ -n "$note" ]; then
+              note="$note; additionally truncated to fit a ${MAX_CHARS}-character cap"
+            else
+              note="truncated to fit a ${MAX_CHARS}-character cap; some older entries omitted"
+            fi
+          fi
+
+          # automated-researcher#389 review: $rendered embeds review/comment BODIES verbatim, so a fixed
+          # delimiter (previously "HISTORY_EOF") could be matched by a body line and used to inject extra
+          # keys into $GITHUB_OUTPUT. A per-run random delimiter closes that off.
+          delim="history_$(openssl rand -hex 20)"
+          {
+            echo "count=$capped_count"
+            echo "note=$note"
+            echo "rendered<<$delim"
+            printf '%s\n' "$rendered"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Render review prompt
         id: render_prompt
         env:
@@ -75,11 +182,28 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GUIDANCE: ${{ steps.guidance.outputs.guidance }}
+          HISTORY_COUNT: ${{ steps.history.outputs.count }}
+          HISTORY_NOTE: ${{ steps.history.outputs.note }}
+          HISTORY_RENDERED: ${{ steps.history.outputs.rendered }}
         run: |
           set -euo pipefail
-          {
-            echo "prompt<<PROMPT_EOF"
-            cat <<PROMPT
+
+          if [ "$HISTORY_COUNT" -gt 0 ]; then
+            note_suffix=""
+            [ -n "$HISTORY_NOTE" ] && note_suffix=" ($HISTORY_NOTE)"
+            history_section="Prior review rounds and the author's responses follow, most recent first$note_suffix.
+          Treat an author response that fixed a finding (commit referenced) or disputed it with cited
+          evidence as that finding's DISPOSITION. Do not re-raise a finding whose disposition you judge
+          sound — adjudicate it, don't merely trust it: if a disposition is unsound, re-raise the finding
+          and say precisely why the response fails. Findings not previously raised are judged fresh, as
+          usual. Your P0/approve bar is unchanged.
+
+          $HISTORY_RENDERED"
+          else
+            history_section="This is the first review of this PR; there is no prior review history to consider."
+          fi
+
+          prompt=$(cat <<PROMPT
           This is PR #$PR_NUMBER for $REPO.
 
           Review ONLY the changes introduced by this PR. From the checked-out repository root:
@@ -91,12 +215,24 @@ jobs:
 
           $GUIDANCE
 
+          $history_section
+
           Be concise and specific: cite the exact file and evidence for each finding. Set "verdict" to
           "approve" only if you find zero P0 findings; otherwise "changes_requested". List every finding
           you have, P0 and P1 alike, in the findings array — non-blocking P1 findings are still recorded
           for a later human pass, never omitted.
           PROMPT
-            echo "PROMPT_EOF"
+          )
+
+          # automated-researcher#389 review: $prompt embeds prior review/comment bodies (via
+          # $history_section), so a fixed delimiter (previously "PROMPT_EOF") could be matched by a body
+          # line and used to inject extra keys into $GITHUB_OUTPUT. A per-run random delimiter closes that
+          # off.
+          delim="prompt_$(openssl rand -hex 20)"
+          {
+            echo "prompt<<$delim"
+            printf '%s\n' "$prompt"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Run codex-action (review)
@@ -105,6 +241,11 @@ jobs:
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           permission-profile: ":read-only"
+          # Pinned deliberately (automated-researcher#394) so the reviewer model/effort are a conscious
+          # choice, not whatever the codex-action/CLI pin defaults to. Bump here when moving to a newer
+          # model or effort.
+          model: gpt-5.6-sol
+          effort: medium
           # The triggering actor for this pull_request run is whoever opened/pushed the PR — the claude
           # engineer bot — and openai/codex-action denies bot actors by default (docs/security.md) even
           # though this job's own `if:` already restricts the run to that exact identity.
