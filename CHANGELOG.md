@@ -1,3 +1,15 @@
+- experiment-lifecycle 0.3.31 (2026-07-11): clarify that "concurrency is free" is a REMOTE/provider-side
+  billing statement only, and add a reusable throttled-launch helper for LOCAL driver concurrency (#402).
+  Incident: a 40-way Tinker LoRA train fan-out followed run-experiment's "concurrency is free" guidance and
+  launched all 40 `train_ccp.py` drivers at once; each driver holds ~1.5-2GB RAM on the CONTROLLER box while
+  building/holding its rendered datums even though the actual training runs on Tinker's servers, so the
+  naive full fan-out hit the controller's local RAM ceiling well before any remote concurrency cap and
+  silently OOM-killed 21/40 processes with zero log output. `run-experiment` SKILL.md's Execution discipline
+  section gains a bullet distinguishing remote/provider-side billing concurrency from LOCAL controller-box
+  concurrency, and a new `local_job_queue.sh` (+ smoke) in the skill's `scripts/` gives executors a
+  reusable, memory-aware throttled-launch queue (bounded by the shell's own job table via `jobs -rp`, not
+  `pgrep`, so a wrapping session/driver whose own command line names the same job pattern can never
+  self-match and stall the queue) instead of re-deriving the fix from scratch each time.
 - experiment-lifecycle 0.3.30 (2026-07-10): define ledger terminal status as OPERATIONAL run health, never a
   scientific verdict (#376). Incident: an executor closed two correctly-executed Helena evaluations with
   ledger `failed` because an instrument-calibration gate and a parse-coverage gate did not pass — a planned,
