@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306)
-# and its ignored-file guard (#340).
+# log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306),
+# symlink_scan (#416), and its ignored-file guard (#340).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
-# runs the secret scan on the STAGED set, then stops BEFORE any push/token/network), against throwaway git
-# fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
+# runs the secret + symlink scans on the STAGED set, then stops BEFORE any push/token/network), against
+# throwaway git fixtures. No engineer identity or network needed. Asserts the two #306 fixes end-to-end:
 #   - staged-set scoping: a pre-existing merged file (even one that trips a pattern) does NOT block a log that
 #     leaves it unchanged (it stages nothing); a NEWLY added / MODIFIED file carrying a real key DOES block.
 #   - sk- boundary guard: a long hyphenated identifier merely CONTAINING `sk-` is not a false-positive, while
 #     a genuine `sk-…` key (after a non-word char) still blocks.
 # Plus: a non-ASCII staged path is scanned (NUL-delimited), a missing base ref fails CLOSED (refuse to log,
-# no scan bypass), and an empty delta fails on "nothing to commit". Also covers #340: a non-trivial file the
-# BASE tree's .gitignore silently excludes from staging (even alongside other content that stages fine) BLOCKS
-# and is listed; --skip-ignored explicitly acknowledges and proceeds; well-known junk (e.g. .DS_Store) never
-# blocks on its own.
+# no scan bypass), and an empty delta fails on "nothing to commit".
+#
+# #416: also asserts symlink_scan blocks ANY staged symlink — one pointing outside the repo (the original
+# incident: a design-stage PR committing a git symlink into another session's /tmp scratchpad) AND one whose
+# relative target happens to resolve inside the repo (wholesale rejection, not a resolve-and-judge heuristic)
+# — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
+#
+# #340: also covers a non-trivial file the BASE tree's .gitignore silently excludes from staging (even
+# alongside other content that stages fine) BLOCKS and is listed; --skip-ignored explicitly acknowledges and
+# proceeds; well-known junk (e.g. .DS_Store) never blocks on its own.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -116,25 +122,43 @@ if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NO
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 8: a pinned .jsonl silently gitignored alongside other content that stages fine -> BLOCK (#340)"
+echo "[smoke] case 8: NEW staged symlink pointing OUTSIDE the repo -> BLOCK (the #416 incident)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note8.md"
+ln -s /etc/passwd "$T/reg/note/bad_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink pointing outside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "symlink outside the repo blocked";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 9: NEW staged symlink whose RELATIVE target resolves INSIDE the repo -> still BLOCK (wholesale reject, not resolve-and-judge)"
+T=$(mktemp -d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note9.md"
+ln -s note9.md "$T/reg/note/rel_link"
+git -C "$T" add -A
+if run_dry "$T/reg/note"; then fail "symlink resolving inside the repo was NOT blocked"; else
+  case "$LAST_ERR" in *"staged symlink"*) pass "in-repo-resolving symlink still blocked (wholesale reject)";; *) fail "blocked but not on the symlink scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 10: a pinned .jsonl silently gitignored alongside other content that stages fine -> BLOCK (#340)"
 T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
-printf 'notes\n' > "$T/reg/note/note8.md"                       # a normal new file — stages fine
+printf 'notes\n' > "$T/reg/note/note10.md"                      # a normal new file — stages fine
 printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"      # pinned instrument file — silently gitignored
 if run_dry "$T/reg/note"; then fail "gitignored pinned file was NOT blocked (#340 regression) — record looked complete but dropped battery.jsonl"; else
   case "$LAST_ERR" in *"gitignored file"*"battery.jsonl"*) pass "gitignored pinned file blocked and listed, even though other content staged fine";; *) fail "blocked but not on the ignored-file guard: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 9: same gitignored pinned file, but with --skip-ignored -> PASS (explicit acknowledgment)"
+echo "[smoke] case 11: same gitignored pinned file, but with --skip-ignored -> PASS (explicit acknowledgment)"
 T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
-printf 'notes\n' > "$T/reg/note/note9.md"
+printf 'notes\n' > "$T/reg/note/note11.md"
 printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"
 if run_dry "$T/reg/note" --skip-ignored; then pass "--skip-ignored proceeds past the ignored-file guard"; else
   fail "--skip-ignored did NOT bypass the guard: $LAST_ERR"; fi
 rm -rf "$T"
 
-echo "[smoke] case 10: only a trivial ignored file (.DS_Store) -> PASS, no block (junk filter)"
+echo "[smoke] case 12: only a trivial ignored file (.DS_Store) -> PASS, no block (junk filter)"
 T=$(mktemp -d); make_repo_with_gitignore "$T" '.DS_Store'
-printf 'notes\n' > "$T/reg/note/note10.md"
+printf 'notes\n' > "$T/reg/note/note12.md"
 touch "$T/reg/note/.DS_Store"
 if run_dry "$T/reg/note"; then pass "trivial .DS_Store ignore does not block"; else
   fail "trivial-only ignore blocked (should not): $LAST_ERR"; fi
