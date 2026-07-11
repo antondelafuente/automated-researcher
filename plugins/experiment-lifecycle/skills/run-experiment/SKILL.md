@@ -362,6 +362,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   serialization-justification requirement (`design-experiment` Step 1). **Saturate the hardware:** when GPU utilization
   is low during a long-running step, raise the bottleneck knob (batch size, concurrent requests, whatever's actually
   limiting) and note what you changed in the run log — don't let a rented GPU idle at 15%. (Runtime backstop for #311.)
+- **"Concurrency is free" is a REMOTE/provider-side billing statement only (#402).** It (and `design-experiment`'s
+  per-compute-billing note) means N parallel Tinker/API-hosted runs cost the same as N serial ones — it says nothing
+  about the LOCAL controller box. A driver process that renders/holds data in-process before handing the actual
+  compute off to a remote provider (e.g. a Tinker train driver building its rendered datums) still holds real RAM on
+  the controller while it runs. A naive "launch all N at once" fan-out can hit the controller's own RAM ceiling well
+  before any remote/provider concurrency cap — and a controller-box OOM silently kills the LOCAL driver process with
+  ZERO output in its log (indistinguishable from "hasn't started yet"; same signature as a peer-session OOM, but here
+  self-inflicted by your own fan-out). Cap LOCAL launch concurrency independently of the remote/provider limit —
+  `local_job_queue.sh` in this skill's `scripts/` is a reusable throttled-launch queue (poll a running-process count
+  against a cap, launch the next queued command as a slot frees) so this doesn't get re-derived from scratch per run.
 - **Utilization is judged as a series, in context — and YOU own that judgment, not the designer (#323, relocated by
   #342).** A single `nvidia-smi` read is one-sample noise (cf. the DATA AUDIT gate's distrust of a 2-sample
   self-smoke): during a long-running GPU-bound step, sample `nvidia-smi

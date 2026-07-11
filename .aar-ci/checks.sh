@@ -410,4 +410,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/canonical(-login|_
   fi
 fi
 
+# 16. local-job-queue smoke (#402): argument validation, comment/blank-line skipping, and real CAP
+#     enforcement (never more than <cap> launched jobs running at once, using REAL background processes —
+#     no stub) for the reusable concurrency-capped LOCAL job queue that fixes the "concurrency is free"
+#     footgun (remote/provider-side billing concurrency vs a LOCAL controller-box RAM ceiling). Runs when
+#     the helper or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/local_job_queue(_smoke)?\.sh$'; then
+  LJQ_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/local_job_queue_smoke.sh"
+  if [ -f "$LJQ_SMOKE" ]; then
+    echo "[checks] local-job-queue smoke" >&2
+    bash "$LJQ_SMOKE" >&2 && ok "local_job_queue smoke" || err "local_job_queue smoke FAILED"
+  else
+    err "local_job_queue.sh changed but local_job_queue_smoke.sh missing — cannot verify the queue helper"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
