@@ -1,0 +1,183 @@
+name: implement-on-ready
+
+# GitHub-native SWE pipeline, implement leg (automated-researcher#378 / agentic-engineering#43).
+# A `ready` label on an Issue launches an execution-tier Claude implementor that opens a PR; a separate
+# workflow (review-on-pr.yml) runs the cross-family Codex review and approves/requests-changes; existing
+# branch protection + this workflow's auto-merge step close the loop. See AGENTS.md "GitHub-native SWE
+# pipeline (BYOK)" for the full trust model this implements.
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to (re-)dispatch (label events don't fire retroactively)"
+        required: true
+        type: number
+
+concurrency:
+  group: implement-issue-${{ github.event.inputs.issue_number || github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+env:
+  # Allowlist for the authorization predicate: the researcher + the two engineer GitHub Apps. Hard-coded
+  # deliberately (per the issue's explicit trust model) rather than sourced from repo config, so a
+  # compromised in-repo file can't widen who can trigger a privileged run.
+  ALLOWLIST: "antondelafuente claude-code-engineer[bot] codex-engineer[bot]"
+
+jobs:
+  implement:
+    name: implement
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'ready'
+        && contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]"]'), github.event.sender.login))
+      || (github.event_name == 'workflow_dispatch'
+        && contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]"]'), github.actor))
+    outputs:
+      pr_number: ${{ steps.resolve_outputs.outputs.pr_number }}
+      status: ${{ steps.resolve_outputs.outputs.status }}
+    steps:
+      # Re-verify BEFORE minting any token: the job-level `if:` above is a coarse pre-filter on the
+      # triggering actor; this step re-fetches the issue's CURRENT state (author + labels) with the
+      # ambient read-only GITHUB_TOKEN and is the actual authorization gate. This closes the
+      # workflow_dispatch gap where dispatch alone (without a fresh `ready` check) could implement a
+      # not-ready issue, and re-confirms freshness for the labeled path too.
+      - name: Resolve + authorize issue
+        id: resolve_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_EVENT_ISSUE: ${{ github.event.issue.number }}
+          DISPATCH_ISSUE: ${{ github.event.inputs.issue_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            ISSUE_NUMBER="$DISPATCH_ISSUE"
+          else
+            ISSUE_NUMBER="$LABEL_EVENT_ISSUE"
+          fi
+          [ -n "$ISSUE_NUMBER" ] || { echo "::error::no issue number resolved for this event"; exit 1; }
+
+          AUTHOR=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json author --jq '.author.login')
+          LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')
+
+          ok=0
+          for a in $ALLOWLIST; do [ "$a" = "$AUTHOR" ] && ok=1; done
+          if [ "$ok" != 1 ]; then
+            echo "::error::issue #$ISSUE_NUMBER author '$AUTHOR' is not allowlisted; refusing to implement"
+            exit 1
+          fi
+          case ",$LABELS," in
+            *,ready,*) : ;;
+            *) echo "::error::issue #$ISSUE_NUMBER does not currently carry the 'ready' label (labels: $LABELS); refusing to implement"; exit 1 ;;
+          esac
+
+          echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Render implementor prompt
+        id: render_prompt
+        env:
+          ISSUE_NUMBER: ${{ steps.resolve_issue.outputs.issue_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          body="$(cat .github/prompts/implement.md)"
+          body="${body//\{\{ISSUE_NUMBER\}\}/$ISSUE_NUMBER}"
+          body="${body//\{\{REPO\}\}/$REPO}"
+          {
+            echo "prompt<<PROMPT_EOF"
+            echo "$body"
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Run claude-code-action (implementor)
+        id: run_claude
+        uses: anthropics/claude-code-action@536f2c32a39763739000b0e1ac69ca2647d97ce9 # anthropics/claude-code-action v1.0.170
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.mint_claude_token.outputs.token }}
+          prompt: ${{ steps.render_prompt.outputs.prompt }}
+          base_branch: main
+          branch_prefix: "agent/"
+          # Default template is '{{prefix}}{{entityType}}-{{entityNumber}}-{{timestamp}}' (e.g.
+          # agent/issue-378-20260711153000) — pin it to the exact agent/issue-<n> shape AGENTS.md and the
+          # implementor prompt both promise.
+          branch_name_template: "{{prefix}}issue-{{entityNumber}}"
+          # Re-dispatch (AGENTS.md "remove and re-add ready") can be done by either engineer bot, and the
+          # action denies bot actors by default (see docs/security.md) even though our own job-level `if:`
+          # already allowlisted them.
+          allowed_bots: "claude-code-engineer[bot],codex-engineer[bot]"
+          # Without these, the action's git-operation identity defaults to its own generic "claude[bot]"
+          # (id 41898282) regardless of which token pushes -- commits would be attributed to the wrong App.
+          # id is the numeric prefix from the bot's own noreply commit email (confirmed from this repo's
+          # git log: claude-code-engineer[bot] <294932622+claude-code-engineer[bot]@users.noreply.github.com>).
+          bot_id: "294932622"
+          bot_name: "claude-code-engineer[bot]"
+          claude_args: |
+            --model claude-sonnet-5
+            --allowedTools Bash,Edit,Write,Read,Grep,Glob
+            --json-schema {"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}},"allOf":[{"if":{"properties":{"status":{"const":"opened"}}},"then":{"required":["pr_number"],"properties":{"pr_number":{"type":"integer"}}}},{"if":{"properties":{"status":{"const":"blocked"}}},"then":{"properties":{"pr_number":{"type":"null"}}}}]}
+
+      - name: Resolve job outputs
+        id: resolve_outputs
+        env:
+          STRUCTURED: ${{ steps.run_claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          pr_number=$(echo "$STRUCTURED" | jq -r '.pr_number // empty')
+          status=$(echo "$STRUCTURED" | jq -r '.status // "blocked"')
+          echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+  enable-automerge:
+    name: enable-automerge
+    needs: implement
+    if: needs.implement.outputs.pr_number != ''
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      # Fresh runner, no repo checkout, no exposure to whatever the implementor job's host state ended up
+      # as — mints its own token and only ever talks to the GitHub API. Mirrors openai/codex-action's own
+      # security guidance (run the agent as the last step in ITS job; do control-plane work in a new job).
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.implement.outputs.pr_number }}
+        run: |
+          set -uo pipefail
+          if ! gh pr merge "$PR_NUMBER" --repo "$REPO" --auto --squash; then
+            echo "::warning::could not enable auto-merge on PR #$PR_NUMBER (disabled repo-wide, or missing permission) — commenting instead of failing"
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Auto-merge could not be enabled automatically (repo setting or permissions). Enable it manually, or merge once the codex review approves." || true
+          fi

@@ -1,0 +1,195 @@
+name: review-on-pr
+
+# GitHub-native SWE pipeline, review leg (automated-researcher#378 / agentic-engineering#43). Runs the
+# cross-family Codex review on PRs opened by the claude engineer bot, and submits a native APPROVE (clean)
+# or REQUEST_CHANGES (findings) review as the codex engineer bot. Human PRs and fork PRs are skipped — they
+# keep the existing manual review path. See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust
+# model and the P0/P1 review-guidance convention this reads from the PR's base ref.
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+
+concurrency:
+  group: review-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    # Agent-PR predicate (spoof-resistant): the App actor identity, not a title/label/branch-prefix match.
+    # Fork PRs never run this job — same-repo `pull_request` only, no secrets ever reach a fork's code.
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'claude-code-engineer[bot]'
+    outputs:
+      head_sha: ${{ steps.capture.outputs.head_sha }}
+    steps:
+      - name: Capture PR head SHA
+        id: capture
+        run: echo "head_sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout PR head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base ref
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: git fetch --no-tags origin "$BASE_REF"
+
+      - name: Extract review guidance from base AGENTS.md
+        id: guidance
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          # Deliberately read AGENTS.md from origin/<base>, NOT the checked-out PR head: a PR that edits
+          # this section in the same diff must not be able to weaken the criteria it's reviewed against.
+          guidance=$(git show "origin/$BASE_REF:AGENTS.md" \
+            | sed -n '/<!-- CODEX-REVIEW-GUIDANCE:BEGIN -->/,/<!-- CODEX-REVIEW-GUIDANCE:END -->/p')
+          [ -n "$guidance" ] || { echo "::error::could not extract CODEX-REVIEW-GUIDANCE markers from base AGENTS.md"; exit 1; }
+          {
+            echo "guidance<<GUIDANCE_EOF"
+            echo "$guidance"
+            echo "GUIDANCE_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Render review prompt
+        id: render_prompt
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GUIDANCE: ${{ steps.guidance.outputs.guidance }}
+        run: |
+          set -euo pipefail
+          {
+            echo "prompt<<PROMPT_EOF"
+            cat <<PROMPT
+          This is PR #$PR_NUMBER for $REPO.
+
+          Review ONLY the changes introduced by this PR. From the checked-out repository root:
+            git log --oneline $BASE_SHA...$HEAD_SHA
+            git diff $BASE_SHA...$HEAD_SHA
+
+          Apply exactly this severity convention (pulled from the PR's BASE branch, not this PR's own copy,
+          so the PR cannot weaken the criteria it is judged by, even if this diff itself edits AGENTS.md):
+
+          $GUIDANCE
+
+          Be concise and specific: cite the exact file and evidence for each finding. Set "verdict" to
+          "approve" only if you find zero P0 findings; otherwise "changes_requested". List every finding
+          you have, P0 and P1 alike, in the findings array — non-blocking P1 findings are still recorded
+          for a later human pass, never omitted.
+          PROMPT
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run codex-action (review)
+        id: run_codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # openai/codex-action v1.11
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          # The triggering actor for this pull_request run is whoever opened/pushed the PR — the claude
+          # engineer bot — and openai/codex-action denies bot actors by default (docs/security.md) even
+          # though this job's own `if:` already restricts the run to that exact identity.
+          allow-bot-users: "claude-code-engineer[bot]"
+          prompt: ${{ steps.render_prompt.outputs.prompt }}
+          output-file: codex-review.json
+          output-schema: |
+            {
+              "type": "object",
+              "required": ["verdict", "findings"],
+              "properties": {
+                "verdict": { "enum": ["approve", "changes_requested"] },
+                "findings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["severity", "summary"],
+                    "properties": {
+                      "severity": { "enum": ["P0", "P1"] },
+                      "summary": { "type": "string" },
+                      "evidence": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+
+      - name: Upload review verdict
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: codex-review-${{ github.event.pull_request.number }}
+          path: codex-review.json
+          retention-days: 1
+
+  submit-verdict:
+    name: submit-verdict
+    # Fresh runner, no repo checkout, only the downloaded verdict artifact + gh api — never trusts whatever
+    # host state the `review` job's runner ended up in after running the agent (same rationale as
+    # implement-on-ready's enable-automerge job; from openai/codex-action's own security guidance).
+    needs: review
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Download review verdict
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: codex-review-${{ github.event.pull_request.number }}
+
+      - name: Mint codex engineer App token
+        id: mint_codex_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CODEX_APP_ID }}
+          private-key: ${{ secrets.CODEX_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Submit verdict as native review
+        env:
+          GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CAPTURED_HEAD_SHA: ${{ needs.review.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          p0_count=$(jq '[.findings[] | select(.severity == "P0")] | length' codex-review.json)
+          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+
+          # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
+          # review start and this approval): a stale review must never approve new, unreviewed commits.
+          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
+            echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — requesting changes instead of a stale approve"
+            event="REQUEST_CHANGES"
+          elif [ "$p0_count" -eq 0 ]; then
+            event="APPROVE"
+          else
+            event="REQUEST_CHANGES"
+          fi
+
+          body=$(jq -r '
+            "## Codex review\n\n" +
+            (if (.findings | length) == 0 then "No findings.\n" else
+              (.findings | map("- **" + .severity + "**: " + .summary +
+                (if .evidence and (.evidence | length) > 0 then "\n  evidence: " + .evidence else "" end))
+                | join("\n"))
+            end)
+          ' codex-review.json)
+
+          gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            -f "commit_id=$current_head_sha" \
+            -f "event=$event" \
+            -f "body=$body"

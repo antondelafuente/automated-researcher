@@ -37,6 +37,60 @@ design review + `--code` PR review) live with the engineering tooling in **agent
 So the product carries only what experiments need, and the engineering team owns its own reviewer — one
 canonical home per side.
 
+## GitHub-native SWE pipeline (BYOK) — event-driven `ready` → merged PR
+
+For this repo specifically, the `ship-change` lifecycle above can run **without a session dispatching
+it**: a `ready` label launches an execution-tier Claude implementor via GitHub Actions, and PR events run
+the cross-family Codex review natively. This is proven here first; a copy for `agentic-engineering` is
+explicit follow-up work, not part of this capability (see automated-researcher#378 /
+agentic-engineering#43).
+
+- **Flow:** researcher (or an engineer bot) labels an Issue `ready` → `implement-on-ready.yml` runs
+  `anthropics/claude-code-action` (execution-tier `claude-sonnet-5`) against the issue, working on
+  `agent/issue-<n>`, and opens a PR with `Closes #<n>` → `review-on-pr.yml` runs `openai/codex-action`
+  against the diff and submits a native APPROVE/REQUEST_CHANGES review as the codex engineer bot →
+  existing branch protection (required opposite-family approval) + this workflow's auto-merge step close
+  the loop. `checks.yml` runs `.aar-ci/checks.sh` as a required status check on every PR, agent or human
+  authored — this is the same deterministic gate `ship-change`'s `wf.sh finish` runs by hand, now wired as
+  a trusted GitHub check instead of relying on the implementor's own honor.
+- **Authorization predicate:** a privileged implement run requires `issues: labeled` with
+  `label.name == 'ready'` AND the labeling actor allowlisted AND (re-verified fresh, before any token is
+  minted) the issue's current author AND label state — allowlist = the researcher (`antondelafuente`) +
+  the two engineer bots (`claude-code-engineer[bot]`, `codex-engineer[bot]`), hard-coded in the workflow.
+  `workflow_dispatch` (issue-number input, actor allowlisted, same fresh re-verification) is the only other
+  entry path — needed because label events don't fire retroactively.
+- **Concurrency is per-issue dedup, not a worker pool.** `implement-on-ready.yml`'s
+  `concurrency: group: implement-issue-<n>` only prevents a duplicate run on the *same* issue. There is
+  **no global cap** in v1 — GitHub Actions `concurrency` groups don't provide one. The spend guard is the
+  researcher's deliberate one-at-a-time `ready` flip; don't build a queue to work around this without a
+  deliberate follow-up decision to do so.
+- **Codex review guidance (P0/P1 convention)** — the criteria `review-on-pr.yml` gives the Codex reviewer,
+  pulled from this section at the PR's **base** ref (never the PR's own head, so a PR cannot weaken its own
+  review criteria by editing this section in the same diff it's being reviewed for):
+  <!-- CODEX-REVIEW-GUIDANCE:BEGIN -->
+  - **P0 (blocking):** a correctness bug that breaks the change's stated purpose; a security issue (secret
+    exposure, injection, privilege escalation, a trust-boundary violation); or a violation of one of this
+    file's `Rules`. Blocks `APPROVE` — the PR gets `REQUEST_CHANGES` instead.
+  - **P1 (non-blocking):** style, minor edge cases, suggestions, simplification opportunities. Recorded in
+    the review body for a later human pass; never blocks merge on its own.
+  <!-- CODEX-REVIEW-GUIDANCE:END -->
+- **Accepted residual risk:** the implementor agent executes repo-controlled code (tests, hooks) while
+  holding its API key and a short-lived write-scoped GitHub token. Acceptable on this private,
+  single-author repo; revisit before adding outside collaborators.
+- **Re-entry / retry:** re-dispatch an issue by removing and re-adding `ready`, or via
+  `workflow_dispatch`. Post-review fixes ride the standard `claude-code-action` `@claude`-mention flow on
+  the PR (already allowlist-gated by the action itself), not a separate workflow.
+- **Escalation (`needs-dispatcher`):** if the implementor is blocked, or a review finding conflicts with
+  what the issue specifies, it labels the PR (or the issue, if no PR yet) `needs-dispatcher` and comments
+  what's needed, then stops that thread of work. This defines only the label convention — the notifier
+  that surfaces `needs-dispatcher` to a session or the researcher is instance wiring, not part of this
+  product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
+  the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
+- **Secrets this flow needs** (instance-provisioned, never checked in): `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `CLAUDE_APP_ID`, `CLAUDE_APP_PRIVATE_KEY`, `CODEX_APP_ID`, `CODEX_APP_PRIVATE_KEY`.
+  Until all six are set, `ready` events fail loudly in the Actions tab (a missing-secret error at
+  token-mint) rather than silently doing something else.
+
 **Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs any consuming deployment that uses
 it) and *product vs SWE pipeline* (the shipped research plugins HERE vs the `aar-engineering` / `ship-change`
 tooling in `agentic-engineering` that builds them).
