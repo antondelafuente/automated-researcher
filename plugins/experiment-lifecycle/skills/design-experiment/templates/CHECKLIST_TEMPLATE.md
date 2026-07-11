@@ -36,7 +36,11 @@
       idle-cost teardown backstop; controller-supervised detached probes MUST name the supervising watcher/driver.
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
-      (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).  ev:
+      (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).
+      Same tick also owns the pod-lease refresh heartbeat for every live pod, gated on POSITIVE-PROGRESS
+      evidence (or an active operator-declared `QUIET_PHASE.md`) — never raw busy/liveness alone, or a wedged
+      hot-loop refreshes forever — with no-progress-and-no-marker surfaced loudly on the next wake rather than
+      silently skipped; a healthy long run must never silently outlive its lease expiry (#293).      ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
       bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
@@ -44,7 +48,8 @@
       unit, pid-file path), NOT left as the literal placeholder, so the supervisor can find this run's session;
       live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
       and EACH live pod registered for reaping via the `gpu-job` pod lease (the sole backstop since the
-      per-pod watchdog was retired, #266).                                                     ev: run_supervision_record.sh status <run-id>
+      per-pod watchdog was retired, #266) AND kept fresh by the self-wake heartbeat above for as long as the run
+      is actively driven.                                                                      ev: run_supervision_record.sh status <run-id>
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample

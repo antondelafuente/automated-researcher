@@ -133,7 +133,8 @@ safely, and it is the **sole** backstop — the old per-pod `watchdog.sh` is ret
   long expiry up front via `GPU_JOB_LEASE_EXPIRY_MIN` (default 720 = 12h). A `refresh` takes the same
   per-lease lock the reaper's delete takes, so it can never be raced into a wrongful reap. **A
   standalone `gpu-job` caller (no run-experiment wrapper) is responsible for this refresh itself**, or
-  the reaper will reap the pod at expiry.
+  the reaper will reap the pod at expiry. (`run-experiment`'s self-wake tick owns this refresh
+  automatically for the pods it drives — see that skill's "Arm your self-wake" section, #293.)
 - **The reaper is a product operation, not instance wiring.** `pod_reaper.sh` resolves each lease's
   key reference through the same `API_KEY_ENV` seam, lists pods per key, and does the matched-key
   delete-and-verify. The instance supplies only the secret values (`~/.config/gpu-job/env`) and the
