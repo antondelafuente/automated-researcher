@@ -75,6 +75,13 @@ jobs:
         # automated-researcher#389 review: restricted to the pipeline's own trusted identities (same
         # allowlist as implement-on-ready.yml's ALLOWLIST) — an unrelated or adversarial review/comment must
         # not be able to inject or crowd out disposition context.
+        # automated-researcher#389 round 2: reviews and comments are two distinct streams and are capped
+        # INDEPENDENTLY, then merged only for rendering. Capping a single merged stream let a burst of
+        # trusted-but-routine comments (e.g. the automerge-status notice, owner check-ins) push actual prior
+        # codex-engineer[bot] review rounds out of the window even though nothing adversarial happened. The
+        # `reviews` stream is also narrowed to codex-engineer[bot] only: it is the sole identity that ever
+        # produces genuine prior-review disposition content in this pipeline (submit-verdict's minted app
+        # token), so a review submitted under any other identity is never mislabeled as a past Codex verdict.
         id: history
         env:
           GH_TOKEN: ${{ github.token }}
@@ -84,38 +91,44 @@ jobs:
           set -euo pipefail
           MAX_ROUNDS=6
           MAX_CHARS=20000
-          ALLOW='["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]"]'
+          REVIEW_ALLOW='["codex-engineer[bot]"]'
+          COMMENT_ALLOW='["antondelafuente","claude-code-engineer[bot]"]'
 
           # canon_login mirrors .github/scripts/canonical-login.sh's remap (a jq filter can't source that
           # bash helper, so the same "app/<slug>" -> "<slug>[bot]" logic is duplicated here) so a review or
           # comment authored by the trusted identities is recognized under either login form the API uses.
           # --paginate emits one JSON array per page; `jq -s add` slurps and flattens them into one array
           # regardless of page count.
-          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s --argjson allow "$ALLOW" '
+          reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s --argjson allow "$REVIEW_ALLOW" '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
             add // [] | map(select((.body // "") != "" and ((.user.login | canon_login) as $c | ($allow | index($c)) != null)))
               | map({ts: .submitted_at, kind: "review", user: .user.login, state, body})
           ')
-          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --argjson allow "$ALLOW" '
+          comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --argjson allow "$COMMENT_ALLOW" '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
             add // [] | map(select((.user.login | canon_login) as $c | ($allow | index($c)) != null))
               | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
           ')
 
-          combined=$(jq -n --argjson r "$reviews" --argjson c "$comments" '($r + $c) | sort_by(.ts) | reverse')
-          total=$(jq 'length' <<<"$combined")
-          capped=$(jq --argjson n "$MAX_ROUNDS" '.[0:$n]' <<<"$combined")
-          capped_count=$(jq 'length' <<<"$capped")
+          reviews_total=$(jq 'length' <<<"$reviews")
+          comments_total=$(jq 'length' <<<"$comments")
+          reviews_capped=$(jq --argjson n "$MAX_ROUNDS" 'sort_by(.ts) | reverse | .[0:$n]' <<<"$reviews")
+          comments_capped=$(jq --argjson n "$MAX_ROUNDS" 'sort_by(.ts) | reverse | .[0:$n]' <<<"$comments")
+          reviews_capped_count=$(jq 'length' <<<"$reviews_capped")
+          comments_capped_count=$(jq 'length' <<<"$comments_capped")
+
+          combined=$(jq -n --argjson r "$reviews_capped" --argjson c "$comments_capped" '($r + $c) | sort_by(.ts) | reverse')
+          capped_count=$(jq 'length' <<<"$combined")
 
           rendered=$(jq -r '
             .[] | (if .kind == "review" then "### Review (" + .state + ") by " + .user + " at " + .ts
                    else "### Comment by " + .user + " at " + .ts end)
               + "\n" + .body + "\n"
-          ' <<<"$capped")
+          ' <<<"$combined")
 
           note=""
-          if [ "$capped_count" -lt "$total" ]; then
-            note="showing the $capped_count most recent of $total trusted prior review entries; older entries omitted"
+          if [ "$reviews_capped_count" -lt "$reviews_total" ] || [ "$comments_capped_count" -lt "$comments_total" ]; then
+            note="showing the $reviews_capped_count most recent of $reviews_total trusted review rounds and the $comments_capped_count most recent of $comments_total trusted comments; older entries omitted"
           fi
 
           if [ "${#rendered}" -gt "$MAX_CHARS" ]; then
