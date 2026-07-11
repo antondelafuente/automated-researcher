@@ -94,10 +94,26 @@ def owner_live_status(owner, live, seam_failed):
 
 
 def resolve_default_ref(repo, default_branch):
-    rc, _, _ = run_git(["rev-parse", "-q", "--verify", f"refs/remotes/origin/{default_branch}"], cwd=repo)
+    """Returns the ref to compare against (remote-tracking preferred, local branch as fallback), or None
+    (UNKNOWN) if neither can be verified to exist. The old version treated ANY non-zero rev-parse — a
+    confirmed "ref absent" (rc==1) and an unrelated lookup failure (timeout, git missing, ...) alike — as
+    "remote ref absent" and fell back to the bare `default_branch` string unverified. That bare name could
+    resolve to a same-named TAG (`refs/tags/<name>` is checked before `refs/heads/<name>` in git's revision
+    lookup order) or to nothing at all, silently corrupting every merged/behind/ahead fact derived from it.
+    Each candidate ref is now verified fully-qualified and independently; a lookup error on either one
+    propagates as UNKNOWN rather than being read as "try the next candidate"."""
+    remote_ref = f"refs/remotes/origin/{default_branch}"
+    rc, _, _ = run_git(["rev-parse", "-q", "--verify", remote_ref], cwd=repo)
     if rc == 0:
         return f"origin/{default_branch}"
-    return default_branch
+    if rc != 1:
+        return None  # lookup error, not a confirmed "absent" — never guess
+
+    local_ref = f"refs/heads/{default_branch}"
+    rc, _, _ = run_git(["rev-parse", "-q", "--verify", local_ref], cwd=repo)
+    if rc == 0:
+        return local_ref
+    return None  # confirmed absent (rc==1) or a lookup error (any other rc) — either way, UNKNOWN
 
 
 def parse_worktrees(repo):
@@ -167,7 +183,7 @@ def age_days_fact(path, now_ts):
 
 
 def merged_fact(repo, head, default_ref):
-    if not head:
+    if not head or not default_ref:
         return None
     rc, _, _ = run_git(["merge-base", "--is-ancestor", head, default_ref], cwd=repo)
     if rc == 0:
@@ -178,12 +194,32 @@ def merged_fact(repo, head, default_ref):
 
 
 def behind_ahead_facts(repo, default_ref):
+    if not default_ref:
+        return None, None
     rc, out, _ = run_git(["rev-list", "--left-right", "--count", f"{default_ref}...HEAD"], cwd=repo)
     if rc == 0:
         parts = out.split()
         if len(parts) == 2 and all(p.isdigit() for p in parts):
             return int(parts[0]), int(parts[1])
     return None, None
+
+
+def submodule_fact(path):
+    """True if `path` contains at least one INITIALIZED (checked-out) submodule, False if it has none or
+    only uninitialized ones, None (UNKNOWN) if the check itself fails.
+
+    Verified empirically: `git worktree remove` unconditionally refuses ("fatal: working trees containing
+    submodules cannot be moved or removed") once ANY submodule is initialized, regardless of whether that
+    submodule is itself clean — so merged+clean+old is NOT actually safe-to-reap when a submodule is
+    checked out; every reap attempt would fail. An UNINITIALIZED submodule (present in .gitmodules/the
+    index but never checked out — an empty directory) does NOT trigger this refusal.
+    `git submodule status` prefixes an uninitialized submodule with '-'; any other prefix (' ' up to date,
+    '+' out of sync with the index, 'U' conflicted) means it's checked out.
+    """
+    rc, out, _ = run_git(["submodule", "status"], cwd=path)
+    if rc != 0:
+        return None
+    return any(line and not line.startswith("-") for line in out.splitlines())
 
 
 def owner_of(path, root, depth):
@@ -271,6 +307,10 @@ def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
         if not fetch_ok:
             log(f"--fetch requested but failed for {main_repo} — origin drift for its main worktree is UNKNOWN this sweep")
     default_ref = resolve_default_ref(main_repo, args.default_branch)
+    if default_ref is None:
+        log(f"could not resolve default ref '{args.default_branch}' for {main_repo} "
+            f"(neither origin/{args.default_branch} nor refs/heads/{args.default_branch} verified) "
+            "— merged/drift facts UNKNOWN this sweep")
 
     for e in entries:
         if e.get("bare"):
@@ -330,7 +370,9 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # linked worktree, not prunable
     merged = merged_fact(repo, head, default_ref)
     age_days = age_days_fact(path, now_ts)
-    unknown = dirty is None or untracked is None or ignored is None or merged is None or age_days is None
+    has_submodule = submodule_fact(path)
+    unknown = (dirty is None or untracked is None or ignored is None or merged is None or age_days is None
+               or has_submodule is None)
 
     if unknown:
         reason = "inspection needed: a status/log/merge-base check failed for this worktree"
@@ -349,8 +391,14 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # deletion, since `git worktree remove` deletes ignored content right along with everything else.
     # merged+clean(tracked)+zero-untracked+old+has-ignored-content therefore falls through to SILENT
     # (nothing unsafe happens, nothing noisy is reported) rather than either tier.
-    det_safe = merged and not dirty and untracked == 0 and ignored == 0 and is_old
-    stray_or_stale = dirty or untracked > 0 or (not merged and is_old)
+    # not has_submodule is likewise part of the tier-1 bar (merge-gate final-review MED finding): unlike
+    # ignored content, an otherwise-safe worktree carrying an INITIALIZED submodule can't be silently left
+    # alone — `git worktree remove` unconditionally refuses it, so it must be flagged (not silently
+    # skipped) for a human to remove manually or with --force.
+    det_safe = merged and not dirty and untracked == 0 and ignored == 0 and is_old and not has_submodule
+    submodule_blocks_reap = (merged and not dirty and untracked == 0 and ignored == 0 and is_old
+                              and has_submodule)
+    stray_or_stale = dirty or untracked > 0 or (not merged and is_old) or submodule_blocks_reap
 
     if not (det_safe or stray_or_stale):
         return  # in-progress (unmerged+fresh), just-merged-and-fresh, or merged+clean+old-but-ignored-content
@@ -377,6 +425,9 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
             bits.append(f"{untracked} untracked")
         if not merged and is_old:
             bits.append(f"unmerged, {age_days}d old, no one continuing it")
+        if submodule_blocks_reap:
+            bits.append(f"merged, clean, {age_days}d old, but contains an initialized submodule "
+                        "(`git worktree remove` refuses these — needs manual or forced removal)")
         reason = "; ".join(bits)
         if liveness == "unknown":
             reason += f" (owner '{owner}' liveness could not be verified this sweep)"
