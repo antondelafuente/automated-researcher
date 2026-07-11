@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.38 (2026-07-11) / gpu-job 0.2.10 (2026-07-11): make the `gpu-job` pod-lease refresh an
+- experiment-lifecycle 0.3.39 (2026-07-11) / gpu-job 0.2.10 (2026-07-11): make the `gpu-job` pod-lease refresh an
   automatic self-wake heartbeat instead of an operator-remembered step (#293). Incident: a ~15h experiment lost
   two GPU pods mid-work to their own set-once deadlines — a recovered-orphan pod whose lease still held its
   short, never-enriched acquire-window expiry (reaped ~1.5h in), and the eval pod's watchdog-era keepalive,
@@ -15,6 +15,15 @@
   `gpu-job` SKILL.md's lease section now points at `run-experiment`'s tick as the concrete owner of that refresh,
   and `design-experiment`'s `CHECKLIST_TEMPLATE.md` self-wake / resume-contract gates name the heartbeat as part
   of their evidence bar.
+- experiment-lifecycle 0.3.38 (2026-07-11): block `log-experiment.sh` from logging a record whose docs
+  falsely claim a gitignore-excluded file is committed, even past `--skip-ignored` (#331). Incident: a
+  curated 67-row judge-spot-check sample was silently dropped by a `registry/**/*.jsonl` ignore rule while
+  the audited `RESULTS.md`/`ARTIFACT_MANIFEST.md` said it was committed — the divergence was caught only a
+  day later, one `--reap` away from permanent data loss. Composed into #340's `check_ignored_files` guard
+  (rather than a second present-vs-staged diff): before that guard's `--skip-ignored` bypass, a new
+  `check_excluded_claim` BLOCKs if an excluded file's basename appears on the same line as a commit-claim
+  word ("committed"/"commit"/"in the registry"/"in this dir") in either doc — an intentional R2-scale
+  exclusion is fine, a doc that still claims the file landed is not.
 - experiment-lifecycle 0.3.37 (2026-07-11): document the Tinker checkpoint-archive-download timeout/concurrency
   footgun in `run-experiment` SKILL.md's Step 3, scoped as guidance for the remaining cases where a local
   adapter file is genuinely needed (vLLM serving of large models, or offline artifact archival) now that #353

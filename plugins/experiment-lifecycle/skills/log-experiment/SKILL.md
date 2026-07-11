@@ -81,7 +81,7 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
 A BLOCK prints the reason; fix the record (add the missing audit, remove the secret) and re-run, or surface
 to the researcher if it needs a human call.
 
-## The ignored-file guard (#340)
+## The ignored-file guard (#340) and the committed-claim check (#331)
 
 A plain `git add` silently drops anything the research repo's `.gitignore` matches — by design for R2-scale
 artifacts (see Composes below), but a small **pinned** file (e.g. a frozen instrument the `DESIGN.md`
@@ -93,6 +93,12 @@ out) is printed and **BLOCKS**. If the exclusion really is an intentional R2-sca
 `--skip-ignored` to acknowledge and proceed; otherwise fix the `.gitignore` or rename/relocate the file so it
 lands, then retry. Applies to every kind (experiment/design-stage/note) — the underlying `git add` behavior
 is generic, not gate-specific.
+
+`--skip-ignored` never bypasses one thing, though: if `RESULTS.md` or `ARTIFACT_MANIFEST.md` verbatim-claims
+(same line as "committed"/"commit"/"in the registry"/"in this dir") that an excluded file *is* committed, the
+driver BLOCKS regardless — the exact silent prose/tree divergence #331 caught a day late (a curated sample
+dropped by an ignore rule while the audited docs said it was committed). An intentional R2-scale exclusion is
+fine; a doc that still claims the file landed is not.
 
 ## Identity / auth
 
