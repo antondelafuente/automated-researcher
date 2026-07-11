@@ -7,6 +7,10 @@ will not see its findings in this run (post-review fixes ride a separate mention
 
 ## Your job
 
+Before anything else, read this repo's `AGENTS.md` in full — it is the authoritative guidance for
+development conventions, the SWE pipeline, and the issue-disposition contract; ground every judgment call
+below in it, not in this prompt's paraphrase.
+
 1. Read Issue #{{ISSUE_NUMBER}}'s body **and every comment** with `gh issue view {{ISSUE_NUMBER}} --comments`.
    Treat that combined text as the **complete spec**. Do not invent scope beyond it, and do not ask the
    researcher a clarifying question — there is no one here to answer it. If the spec is genuinely
