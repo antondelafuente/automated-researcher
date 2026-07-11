@@ -217,6 +217,20 @@ per PID or over the array) instead of `wait` — never `wait`, bare or by PID, o
 store in seconds), run eval cells on a SECOND unit *during* training — eval does the base-anchor cells first, then waits
 for the adapter and poll-resumes into arm cells.
 
+**Tinker checkpoint-archive downloads: timeout AND concurrency guidance differ by code path (#330).** Archive
+creation server-side can take up to ~1hr even for a modest rank-32 LoRA adapter (observed 29-55min for a 3B-base
+adapter) — a plain `tinker.ServiceClient()` in a custom `download_adapter.py`-style script uses the SDK's shorter
+default HTTP timeout and raises `tinker.APITimeoutError` well before archive creation finishes, despite the SDK's
+own poll-loop heartbeat implying long waits are expected. Fix: pass a generous explicit timeout —
+`tinker.ServiceClient(timeout=3600)`. Once that fix is in place, DO parallelize multiple adapter downloads (they
+don't block each other server-side; confirmed 4/4 succeeding concurrently after the fix, and separately 20/20
+small-corpus adapters in ~5-10min total run concurrently — real variance, not evidence the long wait is gone in
+general). The `tinker` CLI's own `checkpoint download` command is a DIFFERENT code path with no equivalent
+override available (no flag/env var): its internal retry loop has a hardcoded 300s cumulative wait budget, and
+launching several `checkpoint download` invocations concurrently reproducibly blew that budget (4/4 timed out,
+twice in a row) while the identical downloads run ONE AT A TIME each succeeded well within it. For the CLI path
+specifically: prefer serial, not concurrent, when fetching more than one adapter.
+
 **On-compute agent delegate (RARE):** drive a named agent in the compute's tmux via the send-keys protocol (clear input
 first, send text, separate Enter; long msgs via a literal heredoc). If it loses auth, finish auth-free with a shell
 driver instead.
