@@ -48,9 +48,7 @@ If an Issue exists, add a recurrence comment instead of duplicating it (check it
 Etiquette). If not, file a new Issue with a type label
 (`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly one disposition label. The default
 disposition for a newly filed Issue is `needs-design` — it enters the same triage funnel as everything
-else and awaits a researcher triage pass. `needs-design` is a tracker label reserved for this filing
-convention; folding it into the canonical taxonomy below is a broader label-scheme consolidation planned
-separately and out of scope here. Self-assign a different disposition (`needs-shaping`, `blocked`,
+else and awaits a researcher triage pass. Self-assign a different disposition (`needs-shaping`, `blocked`,
 `parked`, or `other`) only when it is unambiguous; never self-assign `ready` — that disposition is applied
 by the researcher (or on their explicit instruction) after triage, never by the filing agent. Read
 `references/DISPOSITIONS.md` for the label contract.

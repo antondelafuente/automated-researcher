@@ -205,6 +205,8 @@ guidance. AGENTS.md holds the issue contract, not local workflow paths.
   dispatcher session naming it); the precise boundary of which `ready` Issues get acted on with less
   oversight (especially by blast radius) is undecided, and will be revisited if/when a standing
   auto-handler is actually proposed.
+- **`needs-design`** — default resting state for a newly filed feedback Issue; awaiting a researcher
+  triage pass before it can be flipped to `ready`.
 - **`needs-shaping`** — a direction, too vague to start; needs scoping into `ready` first, through a
   conversation with the researcher (which may produce a few `ready` tickets).
 - **`blocked`** — decided but gated on a prerequisite; carries a `blocked-by: #N` body line. (When the
