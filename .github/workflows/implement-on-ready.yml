@@ -84,7 +84,7 @@ jobs:
           [ -n "$ISSUE_NUMBER" ] || { echo "::error::no issue number resolved for this event"; exit 1; }
 
           AUTHOR=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json author --jq '.author.login')
-          LABELS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')
+          LABELS_JSON=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name]')
           AUTHOR_CANON=$(canonical_login "$AUTHOR")
 
           ok=0
@@ -93,10 +93,14 @@ jobs:
             echo "::error::issue #$ISSUE_NUMBER author '$AUTHOR' is not allowlisted; refusing to implement"
             exit 1
           fi
-          case ",$LABELS," in
-            *,ready,*) : ;;
-            *) echo "::error::issue #$ISSUE_NUMBER does not currently carry the 'ready' label (labels: $LABELS); refusing to implement"; exit 1 ;;
-          esac
+          # Exact-match against the parsed label list (not substring/CSV matching): a label whose name
+          # itself contains a comma could otherwise satisfy a ",$LABELS," CSV match without an actual
+          # "ready" label present (code-review finding).
+          if ! jq -e 'any(.[]; . == "ready")' <<<"$LABELS_JSON" >/dev/null; then
+            LABELS=$(jq -r 'join(", ")' <<<"$LABELS_JSON")
+            echo "::error::issue #$ISSUE_NUMBER does not currently carry the 'ready' label (labels: $LABELS); refusing to implement"
+            exit 1
+          fi
 
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
 
