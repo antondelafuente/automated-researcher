@@ -2,13 +2,19 @@
 """gpu-job: deploy a disposable GPU pod (RunPod backend) and wait for direct SSH.
 
 Config: ~/.config/gpu-job/env (KEY=VAL lines, written by gpu_job_init.sh); process env
-overrides. Required: RUNPOD_API_KEY (or API_KEY_ENV=<var name> to read another), SSH_PUBLIC_KEY. Knobs (env): GPU_TYPE (default
-"NVIDIA H200"), GPU_COUNT (1), DISK_GB (220), POD_NAME ("gpu-job"), POD_NAME_PREFIX ("" —
+overrides. Required: RUNPOD_API_KEY (or API_KEY_ENV=<var name> to read another), SSH_PUBLIC_KEY. Knobs (env): GPU_TYPES
+(comma list, e.g. "NVIDIA L40S,NVIDIA A100 80GB PCIe" — every listed type is offered to RunPod
+together via gpuTypePriority=availability, so ANY one of them satisfies the request; wins over
+GPU_TYPE), GPU_TYPE (single id, back-compat one-item form of GPU_TYPES), GPU_COUNT (1), DISK_GB
+(220), POD_NAME ("gpu-job"), POD_NAME_PREFIX ("" —
 prepended to the pod name for shared-account dashboard visibility, e.g. "anton-"), IMAGE, TEMPLATE_ID,
 DATA_CENTERS (comma list, or "all" = every pod-creatable DC; overrides tiered retry), VOLUME_ID
 (network volume; requires DATA_CENTERS), RETRY_MINUTES (keep retrying ~3-min cycles until
 stock appears or the deadline passes — scarce multi-GPU stock can take an hour; default 0 =
 single pass), PASS_ENV (comma list of extra var names to inject into the pod's env).
+Neither GPU_TYPES nor GPU_TYPE set -> defaults to an ample, non-premium SKU list (L40S / A100 80GB
+PCIe / A40 / RTX 4090-class), never a single scarce premium card like H200 (#351); state the job's
+actual hardware need explicitly via GPU_TYPES/GPU_TYPE instead of relying on this fallback.
 If RCLONE_CONF_B64 is set (by init, from your rclone.conf remote), it is injected so the
 pod can read/write your artifact store.
 
@@ -93,6 +99,29 @@ _TIER_RULES = [
     ("eu",         ("EU-", "EUR-")),
     ("row",        ("CA-", "AP-", "OC-", "SEA-", "SA-", "ME-", "AF-")),
 ]
+
+# #351: the prior single-SKU default (H200) is a chronically scarce, premium card — a generic serving/
+# training job needs any card with enough VRAM, and RunPod has ample supply of these ≥24GB cards at a
+# fraction of the price. Used only when the caller states no hardware need at all (neither GPU_TYPES nor
+# GPU_TYPE); explicitly stating the need is always preferred over relying on this fallback.
+_DEFAULT_GPU_TYPES = ["NVIDIA L40S", "NVIDIA A100 80GB PCIe", "NVIDIA A40", "NVIDIA GeForce RTX 4090"]
+
+
+def resolve_gpu_types(types_csv, type_single):
+    """Pure: (GPU_TYPES csv or None, GPU_TYPE single id or None) -> ordered GPU type id candidate list
+    sent together as one gpuTypeIds batch (gpuTypePriority=availability picks whichever is available,
+    the same pattern dataCenterIds/dataCenterPriority already uses for DCs). GPU_TYPES wins when set;
+    GPU_TYPE is the one-item back-compat form; neither set falls back to _DEFAULT_GPU_TYPES rather than
+    a single scarce premium SKU (#351)."""
+    if types_csv:
+        return [t.strip() for t in types_csv.split(",") if t.strip()]
+    if type_single:
+        return [type_single]
+    return list(_DEFAULT_GPU_TYPES)
+
+
+def gpu_types():
+    return resolve_gpu_types(env("GPU_TYPES"), env("GPU_TYPE"))
 
 
 def listed_dcs(payload):
@@ -251,9 +280,13 @@ def deploy(nonce=None):
     # resolved prefix is passed explicitly to the intent (--name-prefix), which records the EXACT expected
     # name (prefix+nonce); the reaper's find-nonce exact-matches it — deletion authority stays exact-whole-string.
     pod_name = env("POD_NAME_PREFIX", "") + (nonce if (nonce and _LEASE_ON) else env("POD_NAME", "gpu-job"))
+    types = gpu_types()
+    print(f"[deploy] GPU type(s): {types} "
+          f"(source={'GPU_TYPES' if env('GPU_TYPES') else 'GPU_TYPE' if env('GPU_TYPE') else 'default'})",
+          flush=True)
     base = {"computeType": "GPU",
             "gpuCount": int(env("GPU_COUNT", "1")),
-            "gpuTypeIds": [env("GPU_TYPE", "NVIDIA H200")],
+            "gpuTypeIds": types,
             "gpuTypePriority": "availability",
             "containerDiskInGb": int(env("DISK_GB", "220")),
             "volumeInGb": 0, "volumeMountPath": "/workspace",
@@ -316,9 +349,15 @@ def deploy(nonce=None):
                 return pid
             print(f"  no go: {str(resp)[:160]}", flush=True)
         if time.time() >= deadline:
+            # #351: "no stock" for a single requested SKU reads as false platform-wide scarcity — say so
+            # explicitly so an executor doesn't misreport it as "RunPod has no GPUs."
+            narrow = (f" — this asked for exactly one GPU type ({types[0]!r}); that is NOT evidence "
+                      f"RunPod is out of GPUs, only that this one SKU is scarce right now — set "
+                      f"GPU_TYPES to a comma list of acceptable SKUs before concluding no capacity"
+                      if len(types) == 1 else "")
             raise SystemExit("[deploy] no stock in any tier"
                              + (f" after {attempt} attempts" if attempt > 1 else "")
-                             + " (set RETRY_MINUTES=N to keep trying)")
+                             + " (set RETRY_MINUTES=N to keep trying)" + narrow)
         print(f"[deploy] no stock; retrying in 3 min "
               f"({int((deadline - time.time()) / 60)} min left)", flush=True)
         time.sleep(180)
@@ -366,6 +405,15 @@ def _selftest():
     assert select_tiers(None, ids, True) == t, "default -> tiers"
     assert listed_dcs({}) == [] and tiered([]) == [], "empty payload is safe"
     assert _FALLBACK_DCS and all(d == d.strip() and "-" in d for d in _FALLBACK_DCS), "fallback list well-formed"
+    # #351: GPU type resolution — GPU_TYPES (csv) wins, GPU_TYPE is the one-item back-compat form,
+    # and neither set falls back to an ample non-premium list, never a single scarce premium SKU.
+    assert resolve_gpu_types("NVIDIA L40S, NVIDIA A100 80GB PCIe", None) == \
+        ["NVIDIA L40S", "NVIDIA A100 80GB PCIe"], "GPU_TYPES csv parsed and stripped"
+    assert resolve_gpu_types(None, "NVIDIA H200") == ["NVIDIA H200"], "GPU_TYPE -> one-item list"
+    assert resolve_gpu_types("A,B", "NVIDIA H200") == ["A", "B"], "GPU_TYPES takes priority over GPU_TYPE"
+    assert resolve_gpu_types(None, None) == _DEFAULT_GPU_TYPES, "no override -> ample default list"
+    assert len(_DEFAULT_GPU_TYPES) > 1 and "NVIDIA H200" not in _DEFAULT_GPU_TYPES, \
+        "default must be a multi-SKU, non-premium list, not the old single scarce card"
     print(f"deploy_pod selftest OK: {len(ids)} DCs -> {len(t)} tiers")
 
 
