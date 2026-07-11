@@ -12,9 +12,10 @@
 #
 # A null/empty login (e.g. a deleted GitHub user) must fail closed with a clear error rather than
 # canonicalizing to an empty string, which could accidentally match some other empty value downstream.
+# `jq -r` renders a JSON null as the literal string "null" (not empty), so that literal is rejected too.
 canonical_login() {
   local s="$1"
-  if [ -z "$s" ]; then
+  if [ -z "$s" ] || [ "$s" = "null" ]; then
     echo "canonical_login: empty/null login input" >&2
     return 1
   fi

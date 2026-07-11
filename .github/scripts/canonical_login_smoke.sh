@@ -55,6 +55,14 @@ else
   fail "canonical_login('') exited $rc with stdout '$got' — expected non-zero exit and empty stdout"
 fi
 
+echo "[smoke] case 5c: literal string 'null' (jq -r's rendering of JSON null) -> fails closed"
+got=$(canonical_login "null" 2>/dev/null); rc=$?
+if [ "$rc" -ne 0 ] && [ -z "$got" ]; then
+  pass "canonical_login('null') exits non-zero ($rc) and prints nothing to stdout"
+else
+  fail "canonical_login('null') exited $rc with stdout '$got' — expected non-zero exit and empty stdout"
+fi
+
 # --- static reachability check: the helper must be sourced AFTER checkout, from the workflow that needs it ---
 REPO_ROOT="$(cd "$SELF_DIR/../.." && pwd)"
 WORKFLOW="$REPO_ROOT/.github/workflows/implement-on-ready.yml"
