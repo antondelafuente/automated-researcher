@@ -55,17 +55,35 @@ Added `.github/scripts/canonical-login.sh`, a small shared shell function:
 ```sh
 canonical_login() {
   local s="$1"
-  s="${s#app/}"    # strip leading "app/"
-  s="${s%\[bot\]}" # strip trailing "[bot]"
-  printf '%s' "$s"
+  case "$s" in
+    app/*) printf '%s[bot]' "${s#app/}" ;;   # "app/<slug>" -> the canonical "<slug>[bot]" form
+    *) printf '%s' "$s" ;;                    # already-canonical or unrelated: pass through unchanged
+  esac
 }
 ```
 
+This maps ONLY the two GitHub-observed representations of an App identity — `app/<slug>` (CLI/GraphQL)
+and `<slug>[bot]` (REST/event payload) — to the same canonical `<slug>[bot]` string. A **bare** `<slug>`
+(no prefix, no suffix) passes through unchanged and therefore still does **not** match the allowlist's
+`<slug>[bot]` entries: it's a different, untrusted identity (a plain user account, not the App), not a
+third representation of the same one, so it must not be treated as equivalent. (Revised from an earlier
+draft that stripped the `[bot]` suffix unconditionally — design-review correctly flagged that as
+collapsing the trust boundary between the App and a same-named plain user.)
+
 Applied at the one shell-based identity comparison in either workflow — `implement-on-ready.yml`'s
 "Resolve + authorize issue" step — canonicalizing both the fetched `AUTHOR` and each `$ALLOWLIST` entry
-before comparing, so `app/claude-code-engineer`, `claude-code-engineer[bot]`, and
-`claude-code-engineer` all compare equal. Unknown/garbled logins still fail closed (canonicalizing
-doesn't add any new match, it only normalizes the two known suffix/prefix variants).
+before comparing. The step now `source`s `.github/scripts/canonical-login.sh` from the checked-out
+working tree, which requires `Checkout base branch` to run **before** this step; the two steps are
+reordered accordingly (checkout has no dependency on the authorize step's outputs, so this is a
+no-op reorder other than making the file reachable — design-review caught that the original ordering,
+authorize-then-checkout, would have made the sourced file unreachable). Unknown/garbled logins still
+fail closed.
+
+A new smoke, `.github/scripts/canonical_login_smoke.sh`, unit-tests `canonical_login()` against every
+accepted and rejected representation (`app/claude-code-engineer` and `claude-code-engineer[bot]` accepted
+as the canonical form; the bare `claude-code-engineer` slug and unrelated garbage rejected) and statically
+asserts the workflow actually sources the helper AFTER the checkout step (helper reachability from the
+real workflow, not just unit correctness). Wired into `.aar-ci/checks.sh`.
 
 Audited every other identity comparison in both files per the issue's explicit instruction (don't fix
 only the reported site):

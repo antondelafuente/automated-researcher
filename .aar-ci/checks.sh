@@ -395,4 +395,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/repo-janitor/skills/repo-jan
   fi
 fi
 
+# 15. canonical-login smoke (#381): canonical_login() maps exactly the two GitHub-observed App-identity
+#     representations to the same form WITHOUT collapsing a bare (untrusted) slug into matching the App,
+#     plus a static check that implement-on-ready.yml sources the helper AFTER checkout (helper
+#     reachability from the real workflow, not just unit correctness). Runs when the helper, its smoke, or
+#     either SWE-pipeline workflow changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/canonical(-login|_login_smoke)\.sh|\.github/workflows/(implement-on-ready|review-on-pr)\.yml)$'; then
+  CL_SMOKE="$ROOT/.github/scripts/canonical_login_smoke.sh"
+  if [ -f "$CL_SMOKE" ]; then
+    echo "[checks] canonical-login smoke" >&2
+    bash "$CL_SMOKE" >&2 && ok "canonical_login smoke" || err "canonical_login smoke FAILED"
+  else
+    err "canonical-login.sh or a SWE-pipeline workflow changed but canonical_login_smoke.sh missing — cannot verify login canonicalization"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

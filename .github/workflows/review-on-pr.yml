@@ -24,9 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     # Agent-PR predicate (spoof-resistant): the App actor identity, not a title/label/branch-prefix match.
     # Fork PRs never run this job — same-repo `pull_request` only, no secrets ever reach a fork's code.
+    # automated-researcher#381: this is a job-level `if:` (evaluated before any step/shell runs), so it
+    # can't share the canonical_login() shell helper; both known representations of the App identity are
+    # checked explicitly instead (event-payload "<slug>[bot]" and CLI/GraphQL "app/<slug>").
     if: >
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.login == 'claude-code-engineer[bot]'
+      (github.event.pull_request.user.login == 'claude-code-engineer[bot]' ||
+        github.event.pull_request.user.login == 'app/claude-code-engineer')
     outputs:
       head_sha: ${{ steps.capture.outputs.head_sha }}
     steps:
