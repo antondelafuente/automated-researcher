@@ -1,3 +1,17 @@
+- experiment-lifecycle 0.3.33 (2026-07-11): document the `disown`-defeats-trailing-`wait` sample-fanout footgun
+  in `run-experiment` SKILL.md, alongside the two existing kill-rule footguns in the same Step 3 section
+  (#415). Incident: a sample-fanout driver launched each sampling job with `nohup ... & disown`, then closed
+  with a bare `wait` intended to block until every job finished before writing a "DONE" marker. `disown`
+  removes the job from the shell's own job table, so the bare `wait` returned as soon as the launch loop
+  itself finished — NOT when the jobs actually completed — and the "DONE" marker fired while 11 of 19
+  subjects were still mid-sample (caught only because the executor independently verified PIDs/row counts).
+  The new guidance states the rule plainly: `disown` and ANY `wait` on the same jobs are mutually exclusive,
+  bare or by PID — bash cannot wait on a disowned PID at all, so collecting PIDs does not rescue a disowned
+  `wait`. Pick by whether the driver itself needs to block: don't disown when the driver's own `wait` is how
+  it blocks until the jobs finish; disown for survivability past the driver and replace `wait` with a `kill -0`
+  liveness poll loop on the collected PIDs instead. The concrete `sample_fanout_cab1.sh`/cpc1 driver scripts
+  this incident traces to are instance-owned (not present in this repo per the Releasability rule); this
+  change carries the generic, product-owned lesson.
 - experiment-lifecycle 0.3.32 (2026-07-11): make the detached-driver "skip cells whose output exists"
   resume check SUCCESS-aware, not presence-only (#357). Incident: `ld1_driver.py`'s resume check treated
   ANY row present in the output as permanently done regardless of whether the read actually succeeded, so
