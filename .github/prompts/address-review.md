@@ -11,6 +11,10 @@ The triggering comment was:
 
 ## Your job
 
+Before anything else, read this repo's `AGENTS.md` in full — it is the authoritative guidance for
+development conventions, the SWE pipeline, and the issue-disposition contract; ground every judgment call
+below in it, not in this prompt's paraphrase.
+
 1. Read the full picture before changing anything:
    - `gh pr view {{PR_NUMBER}} --repo {{REPO}} --json body,title` for the PR description.
    - `gh api repos/{{REPO}}/pulls/{{PR_NUMBER}}/reviews` for every review round, especially the latest

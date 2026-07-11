@@ -83,6 +83,16 @@ agentic-engineering#43).
   - **P1 (non-blocking):** style, minor edge cases, suggestions, simplification opportunities. Recorded in
     the review body for a later human pass; never blocks merge on its own.
   <!-- CODEX-REVIEW-GUIDANCE:END -->
+- **The scale principle** (researcher-stated policy, quoted verbatim — not agent paraphrase): "~10
+  concurrent agents, a handful of researchers; robustness is priced at that scale; rarity alone never
+  kills a fix, cost does; trust gates stay fail-closed." This is the calibration for both sides of a
+  review: how defensive an author makes code, and which edge cases a reviewer spends a round on.
+- **The dispute norm** (from PR #425's converged round-4/5): when a review finding is disproportionate at
+  the scale above, the implementor should DISPUTE it with rationale — a cost/scale argument, or an
+  existing safeguard that already covers it — rather than iterating indefinitely to satisfy it. A dispute
+  must only cite escape hatches or safeguards that actually exist: the #425 lesson is that the reviewer
+  fact-checked the dispute's claimed `--skip-ignored` escape and it didn't exist, so an invented safeguard
+  undermines the dispute worse than not disputing at all.
 - **Accepted residual risk:** the implementor agent executes repo-controlled code (tests, hooks) while
   holding its API key and a short-lived write-scoped GitHub token. Acceptable on this private,
   single-author repo; revisit before adding outside collaborators. `checks.yml`'s required-status job
