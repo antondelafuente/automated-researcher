@@ -84,6 +84,8 @@ jobs:
 
       - name: Checkout base branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Render implementor prompt
         id: render_prompt
@@ -119,6 +121,14 @@ jobs:
           prompt: ${{ steps.render_prompt.outputs.prompt }}
           base_branch: main
           branch_prefix: "agent/"
+          # Default template is '{{prefix}}{{entityType}}-{{entityNumber}}-{{timestamp}}' (e.g.
+          # agent/issue-378-20260711153000) — pin it to the exact agent/issue-<n> shape AGENTS.md and the
+          # implementor prompt both promise.
+          branch_name_template: "{{prefix}}issue-{{entityNumber}}"
+          # Re-dispatch (AGENTS.md "remove and re-add ready") can be done by either engineer bot, and the
+          # action denies bot actors by default (see docs/security.md) even though our own job-level `if:`
+          # already allowlisted them.
+          allowed_bots: "claude-code-engineer[bot],codex-engineer[bot]"
           claude_args: |
             --model claude-sonnet-5
             --allowedTools Bash,Edit,Write,Read,Grep,Glob
