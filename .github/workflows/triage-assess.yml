@@ -2,10 +2,14 @@ name: triage-assess
 
 # GitHub-native SWE pipeline, triager leg v1 (automated-researcher#437 — the "Triager, v1" stage of the
 # design synthesized on #414). Scheduled + workflow_dispatch: assesses the open `needs-design` backlog and
-# proposes, but writes NOTHING to any assessed issue — v1 deliberately has no label/body permissions. Both
-# blind assessments (Fable, Sol — same cross-family split review-on-pr.yml already uses) are archived as
-# run artifacts for auditability, and the sighted adjudication's full proposal (verdicts + proposed body
-# edits + proposed wave composition + disagreement analysis) is posted as a single digest comment on #414.
+# proposes, but writes NOTHING to any assessed issue — v1 deliberately has no label/body permissions, and
+# creates no Issues of any kind. Both blind assessments (Fable, Sol — same cross-family split
+# review-on-pr.yml already uses) and the sighted adjudication's full proposal (verdicts + proposed body
+# edits + proposed wave composition + disagreement analysis) are archived as run artifacts for
+# auditability; a bounded summary (counts + per-ticket verdict table + a link back to the run artifact),
+# marker-prefixed and chunked into sequential "part k/N" comments if it would ever outgrow one comment, is
+# posted to #414. The adjudicator's returned ticket set is asserted to exactly match the gathered set
+# before any of this is posted — on any mismatch the run fails closed and posts nothing.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for
 # the rubric every assessment/adjudication pass applies. v2 (write actions: body edits, budgeted flips,
 # ASK parking) is a separate ticket, filed only after v1's proposals prove out for a batch or two.
@@ -270,21 +274,28 @@ jobs:
         with:
           name: triage-blind-sol
 
-      # The first run's backfill (issue #437's design): the two 2026-07-11 dry runs' recommendations live
-      # only in #414's comment thread today. Fetching them every run (not just "the first") is simplest and
-      # harmless — a ticket with no matching prior recommendation just gets no backfill influence.
-      - name: Fetch backfill recommendations from #414
+      # The backfill (issue #437's design): the two 2026-07-11 dry runs' recommendations live only in
+      # #414's comment thread. Pinned to those two specific comment IDs — not a fetch of the whole
+      # thread — so this stays constant-size by construction and can never accumulate this same
+      # workflow's own later digest comments on #414 (PR #456 P0: self-accumulating backfill context).
+      - name: Fetch backfill recommendations from #414 (pinned dry-run comments)
         id: backfill
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          # The 2026-07-11 dry-run comments on #414: "Dry-run result: two-model blind triage..." and
+          # "Backlog, explained simply...". Fixed on purpose — this is a one-time backfill input, not a
+          # live feed.
+          BACKFILL_COMMENT_IDS: "4946232374 4948355075"
         run: |
           set -euo pipefail
           {
-            echo "# Prior triage recommendations (from #${DIGEST_ISSUE}'s dry-run comments)"
+            echo "# Prior triage recommendations (pinned dry-run comments on #${DIGEST_ISSUE})"
             echo
-            gh issue view "$DIGEST_ISSUE" --repo "$REPO" --json comments \
-              --jq '.comments[] | "## Comment by " + .author.login + " at " + .createdAt + "\n\n" + .body + "\n"'
+            for id in $BACKFILL_COMMENT_IDS; do
+              gh api "repos/${REPO}/issues/comments/${id}" \
+                --jq '"## Comment by " + .user.login + " at " + .created_at + "\n\n" + .body + "\n"'
+            done
           } > triage-backfill.md
 
       - name: Render adjudication prompt
@@ -336,6 +347,32 @@ jobs:
           path: triage-adjudication.json
           retention-days: 90
 
+      # A confidently incomplete digest is worse than no digest (PR #456 P0): assert the returned
+      # ticket-number set is EXACTLY the gathered set, no omissions/duplicates/invented numbers. On any
+      # mismatch, fail loudly with the diff in the log and post nothing — post-digest is gated on
+      # `needs: adjudicate`, so a failure here already prevents any comment; a scheduled run retries next
+      # cycle.
+      - name: Validate adjudication ticket coverage
+        run: |
+          set -euo pipefail
+          gathered=$(jq -c '[.tickets[].number] | sort' triage-packets.json)
+          returned_sorted=$(jq -c '[.tickets[].number] | sort' triage-adjudication.json)
+          returned_unique=$(jq -c '[.tickets[].number] | unique' triage-adjudication.json)
+
+          if [ "$returned_sorted" != "$returned_unique" ]; then
+            echo "::error::adjudication returned duplicate ticket numbers. returned=${returned_sorted}"
+            exit 1
+          fi
+
+          if [ "$gathered" != "$returned_unique" ]; then
+            missing=$(jq -nc --argjson g "$gathered" --argjson r "$returned_unique" '$g - $r')
+            extra=$(jq -nc --argjson g "$gathered" --argjson r "$returned_unique" '$r - $g')
+            echo "::error::adjudication ticket-number set does not match the gathered set. missing=${missing} extra=${extra} gathered=${gathered} returned=${returned_unique}"
+            exit 1
+          fi
+
+          echo "adjudication covers all $(jq 'length' <<< "$gathered") gathered ticket(s) exactly, no duplicates/invented numbers"
+
   post-digest:
     name: post-digest
     needs: adjudicate
@@ -355,44 +392,63 @@ jobs:
         with:
           name: triage-adjudication
 
-      - name: Render digest markdown
+      # v1 creates no issues (PR #456 P0: an unbounded issue-creation fallback both can't actually stay
+      # under the same 65536-char limit it exists to dodge, and violates the agent-filed-Issue labeling
+      # rules). Split the render in two: `full` (everything, including proposed body edits, which can be
+      # arbitrarily large) always goes to a run artifact; `summary` (counts + per-ticket verdict table +
+      # a link back to this run's artifact) is the bounded piece that goes to #414 as a comment.
+      - name: Render digest markdown (full artifact + bounded #414 summary)
         id: render
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          jq -r --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json -n '
+          RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+
+          jq -n --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json --arg run_url "$RUN_URL" '
             # Model-authored free text (title, notes) can contain a literal "|" or embedded newline, either
             # of which would corrupt a markdown table row — escape both before interpolating into one.
             def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
             ($packets[0].tickets | map({(.number|tostring): .title}) | add // {}) as $titles |
             $adj[0] as $a |
-            "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
-            "Assessed " + ($packets[0].tickets | length | tostring) + " open `needs-design` ticket(s). " +
-            "Assess-and-propose only (automated-researcher#437 v1) — no label or body writes were made by this run.\n\n" +
-            $a.summary + "\n\n" +
-            "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
-            "|---|-------|---------|--------------|------|-------|\n" +
-            ( $a.tickets | sort_by(.number) | map(
-                "| #" + (.number|tostring) + " | " + (($titles[(.number|tostring)] // "?") | esc) + " | " + .verdict +
-                " | " + (if .disagreement then "yes" else "" end) +
-                " | " + ((.wave // "") | tostring) +
-                " | " + (.notes | esc) + " |"
-              ) | join("\n") ) +
-            "\n\n## Proposed body edits\n\n" +
-            ( ($a.tickets | map(select(.proposed_body_edit != null))) as $edits |
-              if ($edits | length) == 0 then "None proposed this run.\n"
-              else ($edits | map(
-                  "### #" + (.number|tostring) + "\n\n<details><summary>proposed replacement body</summary>\n\n```\n" + .proposed_body_edit + "\n```\n\n</details>\n"
-                ) | join("\n"))
-              end
-            )
-          ' > digest.md
+            ( "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
+              "Assessed " + ($packets[0].tickets | length | tostring) + " open `needs-design` ticket(s). " +
+              "Assess-and-propose only (automated-researcher#437 v1) — no label or body writes were made by this run.\n\n" +
+              $a.summary + "\n\n" +
+              "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
+              "|---|-------|---------|--------------|------|-------|\n" +
+              ( $a.tickets | sort_by(.number) | map(
+                  "| #" + (.number|tostring) + " | " + (($titles[(.number|tostring)] // "?") | esc) + " | " + .verdict +
+                  " | " + (if .disagreement then "yes" else "" end) +
+                  " | " + ((.wave // "") | tostring) +
+                  " | " + (.notes | esc) + " |"
+                ) | join("\n") )
+            ) as $header_and_table |
+            {
+              summary: ($header_and_table + "\n\nFull digest (verdicts + proposed body edits): " + $run_url + "\n"),
+              full: ($header_and_table + "\n\n## Proposed body edits\n\n" +
+                ( ($a.tickets | map(select(.proposed_body_edit != null))) as $edits |
+                  if ($edits | length) == 0 then "None proposed this run.\n"
+                  else ($edits | map(
+                      "### #" + (.number|tostring) + "\n\n<details><summary>proposed replacement body</summary>\n\n```\n" + .proposed_body_edit + "\n```\n\n</details>\n"
+                    ) | join("\n"))
+                  end
+                ) + "\n"
+              )
+            }
+          ' > digest-rendered.json
 
-          delim="digest_$(openssl rand -hex 20)"
-          {
-            echo "body<<$delim"
-            cat digest.md
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
+          jq -r '.full' digest-rendered.json > digest-full.md
+          jq -r '.summary' digest-rendered.json > digest-summary.md
+
+      - name: Upload full digest artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: triage-digest-full
+          path: digest-full.md
+          retention-days: 90
 
       - name: Mint claude engineer App token
         id: mint_claude_token
@@ -403,24 +459,57 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Post digest (comment on the digest issue, or a fallback digest issue if it outgrows one)
+      # Every comment this workflow posts on #414 is prefixed with a fixed marker (PR #456 P0:
+      # self-accumulation) so it is recognizable as this workflow's own output at a glance; the backfill
+      # step above no longer fetches the #414 thread at all (it reads two pinned comment IDs), so this
+      # marker doesn't gate anything today, but keeping every digest comment self-identifying is cheap and
+      # future-proofs any later reader of that thread.
+      - name: Post digest summary comment(s) on #414
         env:
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           REPO: ${{ github.repository }}
-          BODY: ${{ steps.render.outputs.body }}
         run: |
           set -euo pipefail
-          # GitHub's issue/PR comment body hard limit is 65536 characters. Issue #437's own design
-          # anticipates this at current backlog size ("post ... on #414 (or a per-run digest issue if it
-          # outgrows comments)"): file a fresh issue carrying the full digest instead, and leave only a
-          # short pointer comment on the usual destination. LIMIT leaves headroom below the hard cap.
+          MARKER='<!-- TRIAGE-DIGEST -->'
           LIMIT=64000
-          body_len=${#BODY}
-          if [ "$body_len" -gt "$LIMIT" ]; then
-            echo "digest is ${body_len} chars (> ${LIMIT}); filing a per-run digest issue instead of a #${DIGEST_ISSUE} comment"
-            title="Triage digest $(date -u +%Y-%m-%d)"
-            digest_issue_url=$(gh issue create --repo "$REPO" --title "$title" --body "$BODY")
-            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "This run's digest (${body_len} chars) outgrew a single comment; filed as $digest_issue_url instead."
-          else
-            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$BODY"
+
+          summary=$(cat digest-summary.md)
+          single="${MARKER}"$'\n\n'"${summary}"
+
+          if [ "${#single}" -le "$LIMIT" ]; then
+            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$single"
+            exit 0
           fi
+
+          echo "digest summary is ${#single} chars (> ${LIMIT}); chunking into sequential '#${DIGEST_ISSUE}' comments"
+
+          # Reserve room for the marker + "part k/N" header added to every chunk, then pack line-by-line
+          # (never mid-line) so a chunk never cuts a markdown table row in half; a single line that alone
+          # exceeds the budget (not expected at current ticket-note lengths) is hard-split as a last
+          # resort so every posted chunk still respects the hard cap.
+          HEADER_BUDGET=200
+          BUDGET=$((LIMIT - HEADER_BUDGET))
+          jq -Rs --argjson budget "$BUDGET" '
+            (split("\n") as $lines |
+             reduce $lines[] as $line ([""];
+               (if .[-1] == "" then $line else .[-1] + "\n" + $line end) as $candidate |
+               if (.[-1] | length) > 0 and ($candidate | length) > $budget
+               then . + [$line]
+               else (.[0:-1] + [$candidate])
+               end
+             )
+            ) as $packed |
+            [ $packed[] |
+              if length <= $budget then [.]
+              else [range(0; length; $budget) as $i | .[$i:$i+$budget]]
+              end
+            ] | flatten
+          ' digest-summary.md > /tmp/digest-chunks.json
+
+          total=$(jq 'length' /tmp/digest-chunks.json)
+          for i in $(seq 0 $((total - 1))); do
+            n=$((i + 1))
+            chunk=$(jq -r --argjson i "$i" '.[$i]' /tmp/digest-chunks.json)
+            body="${MARKER}"$'\n\n'"part ${n}/${total}"$'\n\n'"${chunk}"
+            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$body"
+          done
