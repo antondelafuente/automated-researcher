@@ -193,7 +193,13 @@ jobs:
         run: |
           set -euo pipefail
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: \`needs-senior-engineer\` has been applied to this PR 3 times (the 2-reappearance loop guard) without the underlying issue resolving. Escalating to \`needs-human\` instead of running another adjudication round — repeated re-labeling without progress means the automated guidance loop isn't converging and needs a person's judgment on what's actually stuck."
-          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label needs-human --remove-label needs-senior-engineer || true
+          # No `|| true` here: a claimed-but-undelivered escalation is exactly the swallowed-escalation
+          # class this pipeline exists to eliminate -- the escalation only exists once needs-human is
+          # actually on the PR, so a failed mutation must fail this job, not pass silently.
+          if ! gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label needs-human --remove-label needs-senior-engineer; then
+            echo "::error::failed to add needs-human / remove needs-senior-engineer on PR #$PR_NUMBER after posting the loop-guard escalation comment -- the escalation is not delivered until the label mutation succeeds"
+            exit 1
+          fi
 
   adjudicate:
     name: adjudicate
