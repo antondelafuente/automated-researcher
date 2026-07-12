@@ -63,6 +63,12 @@ jobs:
       - name: Checkout base branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
+          # Explicit ref, not the default: without it, a `pull_request` trigger checks out the PR's
+          # untrusted MERGE ref (actions/checkout's default for that event), not the base branch this
+          # comment claims -- and the step below sources canonical-login.sh from this checkout before
+          # authorization runs. base.ref on `pull_request`; this workflow's own ref (its default-branch
+          # invocation) on workflow_dispatch. Same pattern as review-on-pr.yml.
+          ref: ${{ github.event.pull_request.base.ref || github.ref }}
           persist-credentials: false
 
       # Re-verify BEFORE minting any token: same-repo (no forks), PR open, and its author is exactly the
@@ -195,6 +201,16 @@ jobs:
     if: needs.resolve.outputs.configured == 'true' && needs.resolve.outputs.loop_trip != 'true'
     runs-on: ubuntu-latest
     steps:
+      # `adjudicate` is a separate job from `resolve` -- jobs don't share a workspace, so this runner
+      # starts empty and the prompt render below (which `cat`s a file from the working tree) needs its
+      # own checkout first. Pinned to the base ref `resolve` already authorized against (not the untrusted
+      # PR head) since this is control-plane content, same as `resolve`'s own base checkout.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.base_ref }}
+          persist-credentials: false
+
       - name: Render senior-engineer prompt
         id: render_prompt
         env:
