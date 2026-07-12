@@ -8,8 +8,10 @@ name: triage-assess
 # edits + proposed wave composition + disagreement analysis) are archived as run artifacts for
 # auditability; a bounded summary (counts + per-ticket verdict table + a link back to the run artifact),
 # marker-prefixed and chunked into sequential "part k/N" comments if it would ever outgrow one comment, is
-# posted to #414. The adjudicator's returned ticket set is asserted to exactly match the gathered set
-# before any of this is posted — on any mismatch the run fails closed and posts nothing.
+# posted to #414. All three model outputs — both blind assessments and the adjudication — have their
+# returned ticket set asserted to exactly match the gathered set (.github/triage/validate_coverage.sh)
+# immediately after parsing; on any mismatch the run fails closed at that point and posts nothing, so a
+# corrupt blind pass never even reaches adjudication.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for
 # the rubric every assessment/adjudication pass applies. v2 (write actions: body edits, budgeted flips,
 # ASK parking) is a separate ticket, filed only after v1's proposals prove out for a batch or two.
@@ -172,6 +174,12 @@ jobs:
           path: triage-blind-fable.json
           retention-days: 90
 
+      # Same fail-closed exact-set check as the adjudicator (PR #456 round 2): a corrupt blind pass must
+      # not reach adjudication at all, so this runs immediately after parsing, before the adjudicate job
+      # (which needs this job) can even start.
+      - name: Validate Fable blind-assessment ticket coverage
+        run: .github/triage/validate_coverage.sh "Fable blind assessment" triage-packets.json triage-blind-fable.json .assessments
+
   blind-assess-sol:
     name: blind-assess-sol
     needs: gather
@@ -243,6 +251,12 @@ jobs:
           name: triage-blind-sol
           path: triage-blind-sol.json
           retention-days: 90
+
+      # Same fail-closed exact-set check as the adjudicator (PR #456 round 2): a corrupt blind pass must
+      # not reach adjudication at all, so this runs immediately after parsing, before the adjudicate job
+      # (which needs this job) can even start.
+      - name: Validate Sol blind-assessment ticket coverage
+        run: .github/triage/validate_coverage.sh "Sol blind assessment" triage-packets.json triage-blind-sol.json .assessments
 
   adjudicate:
     name: adjudicate
@@ -347,31 +361,13 @@ jobs:
           path: triage-adjudication.json
           retention-days: 90
 
-      # A confidently incomplete digest is worse than no digest (PR #456 P0): assert the returned
-      # ticket-number set is EXACTLY the gathered set, no omissions/duplicates/invented numbers. On any
-      # mismatch, fail loudly with the diff in the log and post nothing — post-digest is gated on
-      # `needs: adjudicate`, so a failure here already prevents any comment; a scheduled run retries next
-      # cycle.
+      # A confidently incomplete digest is worse than no digest (PR #456 P0/round 2): assert the returned
+      # ticket-number set is EXACTLY the gathered set, no omissions/duplicates/invented numbers, using the
+      # same shared check the two blind-assess jobs already ran on their own outputs. On any mismatch, fail
+      # loudly with the diff in the log and post nothing — post-digest is gated on `needs: adjudicate`, so
+      # a failure here already prevents any comment; a scheduled run retries next cycle.
       - name: Validate adjudication ticket coverage
-        run: |
-          set -euo pipefail
-          gathered=$(jq -c '[.tickets[].number] | sort' triage-packets.json)
-          returned_sorted=$(jq -c '[.tickets[].number] | sort' triage-adjudication.json)
-          returned_unique=$(jq -c '[.tickets[].number] | unique' triage-adjudication.json)
-
-          if [ "$returned_sorted" != "$returned_unique" ]; then
-            echo "::error::adjudication returned duplicate ticket numbers. returned=${returned_sorted}"
-            exit 1
-          fi
-
-          if [ "$gathered" != "$returned_unique" ]; then
-            missing=$(jq -nc --argjson g "$gathered" --argjson r "$returned_unique" '$g - $r')
-            extra=$(jq -nc --argjson g "$gathered" --argjson r "$returned_unique" '$r - $g')
-            echo "::error::adjudication ticket-number set does not match the gathered set. missing=${missing} extra=${extra} gathered=${gathered} returned=${returned_unique}"
-            exit 1
-          fi
-
-          echo "adjudication covers all $(jq 'length' <<< "$gathered") gathered ticket(s) exactly, no duplicates/invented numbers"
+        run: .github/triage/validate_coverage.sh "adjudication" triage-packets.json triage-adjudication.json .tickets
 
   post-digest:
     name: post-digest
