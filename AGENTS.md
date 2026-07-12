@@ -105,10 +105,10 @@ agentic-engineering#43).
   (`.github/prompts/address-review.md`), gated to the researcher + the two engineer bots, same as
   implement-on-ready's allowlist. It never invokes the review itself — pushing a fix fires `synchronize`,
   which `review-on-pr.yml`'s own `cancel-in-progress` already handles.
-- **Escalation (`needs-strong-model`):** if the implementor is blocked, or a review finding conflicts with
-  what the issue specifies, it labels the PR (or the issue, if no PR yet) `needs-strong-model` and comments
+- **Escalation (`needs-senior-engineer`):** if the implementor is blocked, or a review finding conflicts with
+  what the issue specifies, it labels the PR (or the issue, if no PR yet) `needs-senior-engineer` and comments
   what's needed, then stops that thread of work. This defines only the label convention — the notifier
-  that surfaces `needs-strong-model` to a session or the researcher is instance wiring, not part of this
+  that surfaces `needs-senior-engineer` to a session or the researcher is instance wiring, not part of this
   product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
   the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
   `address-review.yml` runs use the same escalation convention on the PR it's already working.
@@ -124,17 +124,17 @@ agentic-engineering#43).
   still-open same-area PR goes conflicted, and every subsequent `opened`/`synchronize` event on it produces
   nothing until a human/dispatcher notices. `reconcile-prs.yml` runs on a ~10-minute schedule and walks
   open bot-authored PRs to repair this itself: `mergeable == CONFLICTING` → post the allowlisted
-  `@claude-code-engineer` resolution-dispatch mention (round-budgeted; escalates to `needs-strong-model`
+  `@claude-code-engineer` resolution-dispatch mention (round-budgeted; escalates to `needs-senior-engineer`
   instead of nudging forever once the head stops moving); `mergeable == MERGEABLE` with no completed codex
   review at the current head → re-fire `review-on-pr.yml` via the actuator above (the residual
   true-event-loss case, if one exists).
 - **Label lifecycle:** a ticket rests at `needs-design` until a triager pass assesses it (v1, #437:
   proposes a flip for the researcher to confirm; v2: acts autonomously within the autonomous-flip class
   below) → a `ready` flip carries a citation of the shaping conversation plus, when the triager edited the
-  body, a one-line delta summary of what changed → once implementation opens a PR, `needs-strong-model`
-  summons the shepherd (#438) for in-flight adjudication → `needs-human` parks an escalation the shepherd
-  (or any lane) can't resolve itself, for interactive researcher review. `needs-human` is pull-based — no
-  reminders: an unanswered ASK degrades to SKIP, and SKIP is a legitimate outcome, not a stall.
+  body, a one-line delta summary of what changed → once implementation opens a PR, `needs-senior-engineer`
+  summons the senior engineer (#438) for in-flight adjudication → `needs-human` parks an escalation the
+  senior engineer (or any lane) can't resolve itself, for interactive researcher review. `needs-human` is
+  pull-based — no reminders: an unanswered ASK degrades to SKIP, and SKIP is a legitimate outcome, not a stall.
 - **Shaping rights:** the triager (v1 proposes, v2 acts — see above) edits ticket bodies freely; the body is
   the contract a zero-context implementor reads, and comment-as-spec (design drifting into a comment thread
   instead of the body) is the proven failure mode this convention exists to close off. Guardrails: never
@@ -150,7 +150,7 @@ agentic-engineering#43).
   lands): a `needs-design → ready` flip is autonomous when the change is both-models-DO (both review
   families would independently choose to build it), doc/guidance-level (no product-shape decision), and
   inside the flip budget; a workflow/trust-gate/heuristic ticket may still autonomously flip but is
-  shepherd-flagged for a closer look in review; a flip where the two models disagree, or that changes
+  senior-engineer-flagged for a closer look in review; a flip where the two models disagree, or that changes
   product shape, goes to the researcher instead.
 - **Dispatcher playbook** — the operations a human/dispatcher uses to drive this pipeline day to day (each
   mechanic is defined above; this is the consolidated at-a-glance list):
@@ -165,8 +165,8 @@ agentic-engineering#43).
     above); `MERGEABLE` with no review at the current head → `gh workflow run review-on-pr.yml -f
     pr_number=<n>` (the actuator). The scheduled reconciler normally beats a human to both within ~10
     minutes; this is the manual equivalent for when you don't want to wait.
-  - Unblock a `needs-strong-model` Issue or PR: answer the blocking question in a comment, remove
-    `needs-strong-model`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
+  - Unblock a `needs-senior-engineer` Issue or PR: answer the blocking question in a comment, remove
+    `needs-senior-engineer`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
 - **Gate configuration** (state it here so it doesn't drift or get "fixed" back by someone who doesn't know
   it's deliberate — all three verified live 2026-07-11): `checks` (from `checks.yml`) is a required status
   check on `main`; `allow_auto_merge` is enabled repo-wide (what lets `implement-on-ready.yml`'s auto-merge
