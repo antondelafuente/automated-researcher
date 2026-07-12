@@ -1,0 +1,410 @@
+name: triage-assess
+
+# GitHub-native SWE pipeline, triager leg v1 (automated-researcher#437 — the "Triager, v1" stage of the
+# design synthesized on #414). Scheduled + workflow_dispatch: assesses the open `needs-design` backlog and
+# proposes, but writes NOTHING to any assessed issue — v1 deliberately has no label/body permissions. Both
+# blind assessments (Fable, Sol — same cross-family split review-on-pr.yml already uses) are archived as
+# run artifacts for auditability, and the sighted adjudication's full proposal (verdicts + proposed body
+# edits + proposed wave composition + disagreement analysis) is posted as a single digest comment on #414.
+# See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for
+# the rubric every assessment/adjudication pass applies. v2 (write actions: body edits, budgeted flips,
+# ASK parking) is a separate ticket, filed only after v1's proposals prove out for a batch or two.
+
+on:
+  schedule:
+    # Weekly; cadence is not load-bearing at current backlog volume (issue #437 acceptance) and GitHub
+    # throttles aggressive crons anyway (observed on automated-researcher#431's reconciler).
+    - cron: '0 15 * * 1'
+  workflow_dispatch: {}
+
+concurrency:
+  group: triage-assess
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: read
+
+env:
+  # Fixed digest destination (issue #437's design: "post the whole proposal as a single comment on #414").
+  DIGEST_ISSUE: 414
+
+jobs:
+  gather:
+    name: gather
+    runs-on: ubuntu-latest
+    # Coarse pre-filter on workflow_dispatch, mirroring the other pipeline workflows' actor allowlist (this
+    # run's last job mints a write-capable engineer token to post the digest comment, so the same
+    # defense-in-depth applies even though this workflow's blast radius is much smaller than the
+    # implementor/reviewer legs — it makes zero mutations to any assessed issue). A `schedule` event has no
+    # meaningful actor to check, so it is always allowed. Downstream jobs all key off `needs: gather`, so
+    # gating this one job gates the whole chain.
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+        contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.actor))
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      # Builds one packet per open `needs-design` issue: title, body, labels, age, the full comment thread
+      # (triage-relevant context often lives there, e.g. a later comment narrowing scope), and
+      # `referenced_issues` (a #NNN-mention scan across body+comments — a hint toward linked incidents, not
+      # an authoritative link graph).
+      - name: Build ticket packets
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          if ! gh issue list --repo "$REPO" --label needs-design --state open \
+              --json number,title,body,labels,createdAt,comments --limit 300 > /tmp/raw_issues.json; then
+            echo "::error::gh issue list failed"
+            exit 1
+          fi
+
+          jq --arg now "$NOW" '
+            def age_days(created):
+              (($now | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) - (created | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) / 86400 | floor;
+            def refs(text; self):
+              ([text | scan("#[0-9]+")] | map(ltrimstr("#") | tonumber) | unique) - [self];
+            {
+              generated_at: $now,
+              tickets: [ .[] | {
+                number,
+                title,
+                body: (.body // ""),
+                labels: [.labels[].name],
+                created_at: .createdAt,
+                age_days: age_days(.createdAt),
+                comments: [ .comments[] | {author: .author.login, created_at: .createdAt, body: (.body // "")} ],
+                referenced_issues: refs( ((.body // "") + "\n" + ([.comments[].body // ""] | join("\n"))); .number )
+              } ]
+            }
+          ' /tmp/raw_issues.json > triage-packets.json
+
+          ticket_count=$(jq '.tickets | length' triage-packets.json)
+          echo "gathered $ticket_count open needs-design ticket(s)"
+          echo "ticket_count=$ticket_count" >> "$GITHUB_OUTPUT"
+
+      - name: Upload packets artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: triage-packets
+          path: triage-packets.json
+          retention-days: 90
+
+  blind-assess-fable:
+    name: blind-assess-fable
+    needs: gather
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download ticket packets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      - name: Render blind-assessment prompt
+        id: render_prompt
+        run: |
+          set -euo pipefail
+          {
+            echo "prompt<<PROMPT_EOF"
+            cat .github/prompts/triage-blind-assess.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Same pin rationale as implement-on-ready.yml/checks.yml (automated-researcher#384/#387): the
+      # claude-code-action wrapper's auto-install has a known startup-crash class, so the raw CLI is
+      # installed and invoked directly at this exact verified-good version.
+      - name: Install pinned Claude Code
+        id: install_claude
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+
+      - name: Run pinned Claude Code CLI (Fable blind assessor)
+        id: run_claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          # Read-only assessor: no Bash/Edit/Write, so it cannot mutate anything even if instructed to —
+          # it can only Read the packets/rubric files already present in its checkout.
+          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+            | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
+                --model claude-fable-5 \
+                --allowedTools Read \
+                --json-schema '{"type":"object","additionalProperties":false,"required":["assessments"],"properties":{"assessments":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","importance","reasoning"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"importance":{"enum":["low","med","high"]},"reasoning":{"type":"string"}}}}}}' \
+            | tee /tmp/claude_stream.jsonl
+
+          structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
+          if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+            echo "::error::claude CLI exited 0 but produced no structured_output in its result event"
+            exit 1
+          fi
+          echo "$structured" > triage-blind-fable.json
+
+      - name: Upload Fable blind-assessment artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: triage-blind-fable
+          path: triage-blind-fable.json
+          retention-days: 90
+
+  blind-assess-sol:
+    name: blind-assess-sol
+    needs: gather
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download ticket packets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      # Same prompt FILE as the Fable job (not just the same wording, the identical bytes) — true blind
+      # symmetry requires both assessors to see the exact same packet under the exact same instructions.
+      - name: Render blind-assessment prompt
+        id: render_prompt
+        run: |
+          set -euo pipefail
+          {
+            echo "prompt<<PROMPT_EOF"
+            cat .github/prompts/triage-blind-assess.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run codex-action (Sol blind assessor)
+        id: run_codex
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # openai/codex-action v1.11
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          permission-profile: ":read-only"
+          # Same pins as review-on-pr.yml's reviewer (automated-researcher#394): a deliberate choice, bump
+          # only as review-on-pr.yml's own conscious change, never as a side effect of touching this file.
+          model: gpt-5.6-sol
+          effort: medium
+          allow-bot-users: ${{ github.actor }}
+          prompt: ${{ steps.render_prompt.outputs.prompt }}
+          output-file: triage-blind-sol.json
+          output-schema: |
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["assessments"],
+              "properties": {
+                "assessments": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["number", "verdict", "importance", "reasoning"],
+                    "properties": {
+                      "number": { "type": "integer" },
+                      "verdict": { "enum": ["DO", "SKIP", "ASK"] },
+                      "importance": { "enum": ["low", "med", "high"] },
+                      "reasoning": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+
+      - name: Upload Sol blind-assessment artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: triage-blind-sol
+          path: triage-blind-sol.json
+          retention-days: 90
+
+  adjudicate:
+    name: adjudicate
+    needs: [gather, blind-assess-fable, blind-assess-sol]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      # Full checkout (not just the rubric file) so the adjudicator's Grep/Glob tools can check candidate
+      # DO tickets' expected file footprints against the real tree for wave batching.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Download ticket packets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      - name: Download Fable blind assessment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-blind-fable
+
+      - name: Download Sol blind assessment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-blind-sol
+
+      # The first run's backfill (issue #437's design): the two 2026-07-11 dry runs' recommendations live
+      # only in #414's comment thread today. Fetching them every run (not just "the first") is simplest and
+      # harmless — a ticket with no matching prior recommendation just gets no backfill influence.
+      - name: Fetch backfill recommendations from #414
+        id: backfill
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          {
+            echo "# Prior triage recommendations (from #${DIGEST_ISSUE}'s dry-run comments)"
+            echo
+            gh issue view "$DIGEST_ISSUE" --repo "$REPO" --json comments \
+              --jq '.comments[] | "## Comment by " + .author.login + " at " + .createdAt + "\n\n" + .body + "\n"'
+          } > triage-backfill.md
+
+      - name: Render adjudication prompt
+        id: render_prompt
+        run: |
+          set -euo pipefail
+          {
+            echo "prompt<<PROMPT_EOF"
+            cat .github/prompts/triage-adjudicate.md
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Claude Code
+        id: install_claude
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+
+      - name: Run pinned Claude Code CLI (Fable sighted adjudication)
+        id: run_claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          # Read/Grep/Glob only — no Bash/Edit/Write/gh. This pass produces a PROPOSAL; it has no path to
+          # mutate any issue even if instructed to.
+          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+            | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
+                --model claude-fable-5 \
+                --allowedTools Read,Grep,Glob \
+                --json-schema '{"type":"object","additionalProperties":false,"required":["tickets","summary"],"properties":{"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","disagreement","proposed_body_edit","wave","notes"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"disagreement":{"type":"boolean"},"proposed_body_edit":{"type":["string","null"]},"wave":{"type":["integer","null"]},"notes":{"type":"string"}}}},"summary":{"type":"string"}}}' \
+            | tee /tmp/claude_stream.jsonl
+
+          structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
+          if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+            echo "::error::claude CLI exited 0 but produced no structured_output in its result event"
+            exit 1
+          fi
+          echo "$structured" > triage-adjudication.json
+
+      - name: Upload adjudication artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
+        with:
+          name: triage-adjudication
+          path: triage-adjudication.json
+          retention-days: 90
+
+  post-digest:
+    name: post-digest
+    needs: adjudicate
+    # Fresh runner, no repo checkout — same rationale as implement-on-ready's enable-automerge job: only
+    # ever talks to the GitHub API, using its own freshly minted token, never whatever host state a prior
+    # agent-running job left behind.
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Download ticket packets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      - name: Download adjudication
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-adjudication
+
+      - name: Render digest markdown
+        id: render
+        run: |
+          set -euo pipefail
+          jq -r --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json -n '
+            ($packets[0].tickets | map({(.number|tostring): .title}) | add // {}) as $titles |
+            $adj[0] as $a |
+            "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
+            "Assessed " + ($packets[0].tickets | length | tostring) + " open `needs-design` ticket(s). " +
+            "Assess-and-propose only (automated-researcher#437 v1) — no label or body writes were made by this run.\n\n" +
+            $a.summary + "\n\n" +
+            "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
+            "|---|-------|---------|--------------|------|-------|\n" +
+            ( $a.tickets | sort_by(.number) | map(
+                "| #" + (.number|tostring) + " | " + ($titles[(.number|tostring)] // "?") + " | " + .verdict +
+                " | " + (if .disagreement then "yes" else "" end) +
+                " | " + ((.wave // "") | tostring) +
+                " | " + (.notes | gsub("\n"; " ")) + " |"
+              ) | join("\n") ) +
+            "\n\n## Proposed body edits\n\n" +
+            ( ($a.tickets | map(select(.proposed_body_edit != null))) as $edits |
+              if ($edits | length) == 0 then "None proposed this run.\n"
+              else ($edits | map(
+                  "### #" + (.number|tostring) + "\n\n<details><summary>proposed replacement body</summary>\n\n```\n" + .proposed_body_edit + "\n```\n\n</details>\n"
+                ) | join("\n"))
+              end
+            )
+          ' > digest.md
+
+          delim="digest_$(openssl rand -hex 20)"
+          {
+            echo "body<<$delim"
+            cat digest.md
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Post digest comment
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BODY: ${{ steps.render.outputs.body }}
+        run: |
+          set -euo pipefail
+          gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$BODY"
