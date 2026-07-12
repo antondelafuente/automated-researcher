@@ -294,15 +294,24 @@ jobs:
           echo "status=$(echo "$structured" | jq -r '.status // "escalated"')" >> "$GITHUB_OUTPUT"
 
       # Safety net, not the primary mechanism: the prompt instructs the agent to clear the label itself
-      # (step 5), but a stuck `needs-senior-engineer` after a crashed/timed-out run would silently look
-      # like "still needs handling" with no automatic retry (unlike needs-dispatcher, which a human
-      # monitors). Runs regardless of the CLI step's outcome; `|| true` on the removal because a label
-      # already removed by the agent itself is not a failure.
+      # (step 5). This step only runs when the CLI step actually succeeded -- i.e. adjudication delivered a
+      # real outcome (guidance comment posted, or `needs-human` applied as the escalation); `if: success()`
+      # is the default step condition, made explicit here so it isn't mistaken for `always()`. `|| true` on
+      # the removal because a label already removed by the agent itself is not a failure.
       - name: Ensure needs-senior-engineer is cleared
-        if: always()
+        if: success()
         env:
           GH_TOKEN: ${{ steps.mint_token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: |
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label needs-senior-engineer || true
+
+      # On any failure in this job (CLI crash, timeout, malformed structured output), `needs-senior-engineer`
+      # must stay in place -- it is the retry signal (a re-labeled event or a manual workflow_dispatch
+      # re-summons this workflow). Silently clearing it here would mark an unhandled PR as handled, so this
+      # emits an explicit ::error for run-log visibility instead of touching the label.
+      - name: Adjudication failed — leaving needs-senior-engineer in place
+        if: failure()
+        run: |
+          echo "::error::senior-engineer adjudication for PR #${{ needs.resolve.outputs.pr_number }} did not complete (CLI crash, timeout, or malformed structured output) -- leaving needs-senior-engineer in place as the retry signal, not clearing it"
