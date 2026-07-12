@@ -62,16 +62,15 @@ researcher directive, and a label is machine-readable where prose is not:
 - `researcher-requested` — the researcher explicitly asked you to file this (e.g. a session told you "file a
   ticket for X"); cite the request (what was asked, and when/where) in the body.
 
-Also add one **provenance line** to the body naming the filing session/executor and the authoring path used
-(engineer identity vs. fallback), so the label carries the class and the body carries the specifics. The
-line's wording varies by provenance class:
+Also add one **provenance line** to the body naming the filing session/executor and the authoring path used,
+so the label carries the class and the body carries the specifics. The line's wording varies by provenance
+class:
 
 `agent-filed`:
 
 ```
 Filed autonomously by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback
-skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex> create` [or: raw
-`gh issue create` -- flagged last resort, `wf.sh` was unavailable on this box].
+skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex> create`.
 ```
 
 `researcher-requested`:
@@ -79,8 +78,7 @@ skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex
 ```
 Filed by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback skill on the
 researcher's explicit request (<what was asked, and when/where>), not hand-written by the researcher.
-Posted via `wf.sh issue <claude|codex> create` [or: raw `gh issue create` -- flagged last resort, `wf.sh`
-was unavailable on this box].
+Posted via `wf.sh issue <claude|codex> create`.
 ```
 
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
@@ -90,13 +88,17 @@ wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<
 wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
 ```
 
-Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. `wf.sh issue` is the required path: it is never fine to default to raw
-`gh issue create` for product feedback, since that may post as the repository owner instead of the agent engineer
-identity. Raw `gh issue create` is a flagged last resort only: when `wf.sh issue` is genuinely unavailable or
-unconfigured (e.g. no `aar-engineering` checkout on this box — the #447 incident), post it yourself with raw
-`gh issue create` and name the fallback explicitly in the provenance line above, or — when posting yourself isn't
-appropriate — draft the exact title, body, labels (type + disposition + provenance), and recurrence comment for a
-human or configured maintainer to submit instead.
+Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. `wf.sh issue` is the required path: it is never fine to fall back to
+raw `gh issue create` for product feedback. The ambient agent GitHub credential is read-only by construction
+(see AGENTS.md); a bare `gh` write either fails closed or, on a non-conforming box, silently succeeds under the
+repository owner's identity instead of the agent's — that is exactly what happened in #447, filed under the
+owner's identity because a box without an `aar-engineering` checkout let a raw-`gh` fallback through. When
+`wf.sh issue` is genuinely unavailable or unconfigured, do not write with the ambient credential as a
+workaround. Instead, persist the fully-drafted Issue — title, body (including the provenance line above),
+and labels (type + disposition + provenance) — to a durable location you already have (the run's artifact
+store, or the close handoff notes), and surface it LOUDLY in your close summary: state plainly that filing was
+deferred and a properly-credentialed session needs to run `wf.sh issue create` with the persisted draft. The
+draft is the deliverable; the write waits for the right identity.
 
 Deployment-only feedback is local to the consuming instance: a lab path, account quirk, local runner, deployment
 changelog, private pipeline, or coordination convention that an outside adopter would not share. Do not write to

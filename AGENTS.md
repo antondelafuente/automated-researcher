@@ -179,12 +179,7 @@ tooling in `agentic-engineering` that builds them).
   pipeline's one engineer-token path (`WF_ENGINEER_TOKEN_CMD_*`). An instance may keep a thin
   `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
   *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
-  human-authored Issues is not possible (GitHub can't reauthor) and not attempted. Raw `gh issue create` is
-  a flagged last resort only: when `wf.sh` is genuinely unavailable on the box (the #447 incident — no
-  `aar-engineering` checkout), post with raw `gh` and name the fallback explicitly in the Issue body's
-  provenance line (see `file-feedback`'s filing instructions) — losing the feedback outright is worse than
-  an attribution blemish the provenance line makes auditable. This does not relax the rule for the normal
-  case, where `wf.sh issue` remains required.
+  human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
 - **The ambient agent GitHub credential MUST be read-only — by construction, not by convention.** This is
   the capability half of the rule above: the credential an agent shell reaches by default (exported
   `GH_TOKEN`/`GITHUB_TOKEN`, the stored `gh auth` login, and the Git push credential) must be **minted
