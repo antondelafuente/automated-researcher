@@ -59,7 +59,7 @@ researcher directive, and a label is machine-readable where prose is not:
 
 - `agent-filed` — you're filing this from your own observation (an incident, a footgun, a close-retro
   finding) with no researcher ask behind it.
-- `researcher-requested` — the researcher explicitly asked you to file this (e.g. a session told you "file a
+- `human-requested` — the researcher explicitly asked you to file this (e.g. a session told you "file a
   ticket for X"); cite the request (what was asked, and when/where) in the body.
 
 Also add one **provenance line** to the body naming the filing session/executor and the authoring path used,
@@ -73,7 +73,7 @@ Filed autonomously by a <substrate> <skill-name> executor (session <session-id>)
 skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex> create`.
 ```
 
-`researcher-requested`:
+`human-requested`:
 
 ```
 Filed by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback skill on the
