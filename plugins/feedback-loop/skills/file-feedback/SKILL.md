@@ -63,13 +63,24 @@ researcher directive, and a label is machine-readable where prose is not:
   ticket for X"); cite the request (what was asked, and when/where) in the body.
 
 Also add one **provenance line** to the body naming the filing session/executor and the authoring path used
-(engineer identity vs. fallback), so the label carries the class and the body carries the specifics:
+(engineer identity vs. fallback), so the label carries the class and the body carries the specifics. The
+line's wording varies by provenance class:
+
+`agent-filed`:
 
 ```
 Filed autonomously by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback
-skill, not hand-written by <researcher>. Posted via `wf.sh issue <claude|codex> create` [or: raw
-`gh issue create` because `wf.sh` was unavailable on this box -- noting that here since the skill's
-intended path is the engineer-safe identity].
+skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex> create` [or: raw
+`gh issue create` -- flagged last resort, `wf.sh` was unavailable on this box].
+```
+
+`researcher-requested`:
+
+```
+Filed by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback skill on the
+researcher's explicit request (<what was asked, and when/where>), not hand-written by the researcher.
+Posted via `wf.sh issue <claude|codex> create` [or: raw `gh issue create` -- flagged last resort, `wf.sh`
+was unavailable on this box].
 ```
 
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
@@ -79,10 +90,13 @@ wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<
 wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
 ```
 
-Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. Never substitute raw `gh issue create` for product feedback: it may post as
-the repository owner instead of the agent engineer identity. If `wf.sh issue` is unavailable or unconfigured, draft the
-exact title, body, labels (type + disposition + provenance), and recurrence comment for a human or configured
-maintainer to submit, or post it yourself with raw `gh issue create` and say so in the provenance line (see #447).
+Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. `wf.sh issue` is the required path: it is never fine to default to raw
+`gh issue create` for product feedback, since that may post as the repository owner instead of the agent engineer
+identity. Raw `gh issue create` is a flagged last resort only: when `wf.sh issue` is genuinely unavailable or
+unconfigured (e.g. no `aar-engineering` checkout on this box — the #447 incident), post it yourself with raw
+`gh issue create` and name the fallback explicitly in the provenance line above, or — when posting yourself isn't
+appropriate — draft the exact title, body, labels (type + disposition + provenance), and recurrence comment for a
+human or configured maintainer to submit instead.
 
 Deployment-only feedback is local to the consuming instance: a lab path, account quirk, local runner, deployment
 changelog, private pipeline, or coordination convention that an outside adopter would not share. Do not write to

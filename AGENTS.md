@@ -179,7 +179,12 @@ tooling in `agentic-engineering` that builds them).
   pipeline's one engineer-token path (`WF_ENGINEER_TOKEN_CMD_*`). An instance may keep a thin
   `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
   *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
-  human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
+  human-authored Issues is not possible (GitHub can't reauthor) and not attempted. Raw `gh issue create` is
+  a flagged last resort only: when `wf.sh` is genuinely unavailable on the box (the #447 incident — no
+  `aar-engineering` checkout), post with raw `gh` and name the fallback explicitly in the Issue body's
+  provenance line (see `file-feedback`'s filing instructions) — losing the feedback outright is worse than
+  an attribution blemish the provenance line makes auditable. This does not relax the rule for the normal
+  case, where `wf.sh issue` remains required.
 - **The ambient agent GitHub credential MUST be read-only — by construction, not by convention.** This is
   the capability half of the rule above: the credential an agent shell reaches by default (exported
   `GH_TOKEN`/`GITHUB_TOKEN`, the stored `gh auth` login, and the Git push credential) must be **minted
@@ -271,7 +276,9 @@ summarizing/linking the shaping discussion. An agent asked to *implement* an iss
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
 close) is that lane's own concern to build out. An Issue an agent files (including via `file-feedback`, see
-#405) carries exactly `needs-design` plus a type label — nothing else: never self-apply `ready`, and never
+#405) carries exactly `needs-design` plus a type label plus, when an agent is the filer, exactly one
+provenance label (`agent-filed` or `researcher-requested` — see `file-feedback`'s filing instructions for
+the class contract) — nothing else besides those: never self-apply `ready`, and never
 self-apply `blocked`, `parked`, or `other` either. Those three remain valid dispositions but are
 researcher/triage-applied only, same reasoning as never self-applying `ready` — self-parking is a triage
 decision. An agent that believes a filing is blocked or parkable says so in the issue body, for the triage
