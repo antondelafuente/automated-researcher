@@ -57,6 +57,7 @@ jobs:
       base_ref: ${{ steps.resolve_pr.outputs.base_ref }}
       configured: ${{ steps.secrets_check.outputs.configured }}
       loop_trip: ${{ steps.loop_guard.outputs.trip }}
+      loop_count: ${{ steps.loop_guard.outputs.count }}
     steps:
       # Checkout runs FIRST (same rationale as every other pipeline workflow): the authorize step below
       # sources the canonical-login helper from the working tree, which must exist before it's sourced.
@@ -151,6 +152,7 @@ jobs:
             trip="false"
           fi
           echo "trip=$trip" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
 
       # Fail gracefully while the App/secrets don't exist yet: a step-level (not job-level) check, since
       # `secrets` isn't available in a job's own `if:` context. Every downstream job gates on this output
@@ -190,9 +192,10 @@ jobs:
           GH_TOKEN: ${{ steps.mint_token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          LOOP_COUNT: ${{ needs.resolve.outputs.loop_count }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: \`needs-senior-engineer\` has been applied to this PR 3 times (the 2-reappearance loop guard) without the underlying issue resolving. Escalating to \`needs-human\` instead of running another adjudication round — repeated re-labeling without progress means the automated guidance loop isn't converging and needs a person's judgment on what's actually stuck."
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: \`needs-senior-engineer\` has been applied to this PR $LOOP_COUNT times (the 2-reappearance loop guard) without the underlying issue resolving. Escalating to \`needs-human\` instead of running another adjudication round — repeated re-labeling without progress means the automated guidance loop isn't converging and needs a person's judgment on what's actually stuck."
           # No `|| true` here: a claimed-but-undelivered escalation is exactly the swallowed-escalation
           # class this pipeline exists to eliminate -- the escalation only exists once needs-human is
           # actually on the PR, so a failed mutation must fail this job, not pass silently.
@@ -350,19 +353,24 @@ jobs:
           esac
           echo "verified outcome '$STATUS' for PR #$PR_NUMBER against actual GitHub state"
 
-      # Safety net, not the primary mechanism: the prompt instructs the agent to clear the label itself
-      # (step 5). This step only runs once the claimed outcome has been VERIFIED against actual GitHub
-      # state above (not merely self-reported); `if: success()` is the default step condition, made
-      # explicit here so it isn't mistaken for `always()`. `|| true` on the removal because a label already
-      # removed by the agent itself is not a failure.
-      - name: Ensure needs-senior-engineer is cleared
+      # The WORKFLOW owns needs-senior-engineer's entire lifecycle -- the agent never touches this label
+      # (see the prompt). This step only runs once the claimed outcome has been VERIFIED against actual
+      # GitHub state above (not merely self-reported); `if: success()` is the default step condition, made
+      # explicit here so it isn't mistaken for `always()`. No `|| true` on the removal: a label wrongly
+      # left in place after a verified outcome means the PR can't be re-summoned for adjudication, which is
+      # itself a failure state someone must see, not one to swallow.
+      - name: Clear needs-senior-engineer
         if: success()
         env:
           GH_TOKEN: ${{ steps.mint_token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
         run: |
-          gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label needs-senior-engineer || true
+          set -euo pipefail
+          if ! gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label needs-senior-engineer; then
+            echo "::error::verified outcome for PR #$PR_NUMBER but failed to remove needs-senior-engineer -- the label is now incorrectly still present, blocking re-summon via a future labeled event"
+            exit 1
+          fi
 
       # On any failure in this job (CLI crash, timeout, malformed structured output, or a self-reported
       # outcome that verification couldn't find on GitHub), `needs-senior-engineer` must stay in place --

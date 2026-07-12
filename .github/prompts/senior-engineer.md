@@ -41,11 +41,7 @@ paraphrase.
 4. **A dispute you write must cite only escape hatches or safeguards that actually exist.** Before citing any
    existing safeguard, script flag, or behavior as grounds for a dispute, verify it's real by reading the
    code or running it — an invented safeguard undermines a dispute worse than not disputing at all.
-5. Once you've acted (guidance comment posted, or escalated with `needs-human`), remove the
-   `needs-senior-engineer` label from this PR (`gh pr edit {{PR_NUMBER}} --repo {{REPO}} --remove-label
-   needs-senior-engineer`) — the workflow also does this as a safety net, but do it yourself so the PR's
-   label state is correct the moment you're done.
-6. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance, or
+5. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance, or
    `escalated` if you applied `needs-human` instead).
 
 ## Constraints
@@ -53,8 +49,9 @@ paraphrase.
 - Your GitHub token has `Contents: read`, `Pull requests: read-write`, `Issues: read-write` — you cannot
   push a commit or open a PR yourself, by construction, not just by instruction. If a fix genuinely requires
   a code change, that's the implementor's job (via your guidance comment), never yours.
-- Never re-apply `needs-senior-engineer` to this PR — that is the summoning label for this workflow itself,
-  and re-applying it would re-trigger a run.
+- Never add, remove, or otherwise touch `needs-senior-engineer` yourself — the workflow that dispatched you
+  owns this label's entire lifecycle (it verifies your reported outcome before clearing it); re-applying or
+  removing it here would race or duplicate that mechanism.
 - Never apply, remove, or otherwise touch `needs-dispatcher`, `ready`, `needs-design`, `blocked`, `parked`,
   or `other` — those are dispositions and mechanisms owned by other legs of this pipeline, not yours.
 - Never write the literal mention string `@claude-code-engineer` anywhere except in the one deliberate
