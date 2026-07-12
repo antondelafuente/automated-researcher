@@ -32,15 +32,19 @@ jobs:
     # author, open state) via the shared canonical-login helper before any token is minted. `issue_comment`
     # fires for comments on plain Issues too, not just PRs — `github.event.issue.pull_request` is only
     # present when the comment is on a PR, which is what restricts this to PR comments at all. The
-    # allowlist (researcher + the codex bot, both login representations) is hard-coded here for the same
-    # reason as implement-on-ready.yml's own allowlist: a compromised in-repo file must not be able to
-    # widen who can trigger a privileged run. The claude engineer bot itself is deliberately EXCLUDED
-    # (automated-researcher#400): the implementor never needs to dispatch itself, and its own completion
-    # comments can contain the literal mention string, which would otherwise self-retrigger a round.
+    # allowlist (researcher + the codex bot + the senior-engineer bot, all login representations) is
+    # hard-coded here for the same reason as implement-on-ready.yml's own allowlist: a compromised in-repo
+    # file must not be able to widen who can trigger a privileged run. The claude engineer bot itself is
+    # deliberately EXCLUDED (automated-researcher#400): the implementor never needs to dispatch itself, and
+    # its own completion comments can contain the literal mention string, which would otherwise
+    # self-retrigger a round. senior-engineer[bot] was added (automated-researcher#438): it is the
+    # in-flight PR adjudicator, and its guidance comments are exactly how it hands the implementor precise
+    # instructions through this same mention path -- posting as the codex App would be wrong-family, and
+    # posting as claude-code-engineer is excluded by the rule above.
     if: |
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@claude-code-engineer') &&
-      contains(fromJSON('["antondelafuente","codex-engineer[bot]","app/codex-engineer"]'), github.event.comment.user.login)
+      contains(fromJSON('["antondelafuente","codex-engineer[bot]","app/codex-engineer","senior-engineer[bot]","app/senior-engineer"]'), github.event.comment.user.login)
     steps:
       # Checkout runs FIRST (same rationale as implement-on-ready#381): the authorize step below sources a
       # helper script from the working tree, which must exist before it's sourced. This is a control-plane

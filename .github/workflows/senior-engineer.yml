@@ -1,0 +1,292 @@
+name: senior-engineer
+
+# GitHub-native SWE pipeline, senior-engineer leg (automated-researcher#438; parent design #414's "Shepherd").
+# In-flight PR judgment -- verifying reviewer findings, adjudicating disputes, handing the implementor exact
+# guidance -- previously depended on a human-attended box session, landing on `needs-dispatcher` whenever the
+# reconciler's round budget tripped or an agent needed adjudication. This workflow makes that judgment layer
+# product-owned and event-driven like the rest of the pipeline: it's summoned by the `needs-senior-engineer`
+# label landing on a PR (the reconciler's round-budget trip, an implementor asking for help, or a human),
+# plus `workflow_dispatch` as the manual lever. Runs a Fable-family agent (judgment-dense per model policy;
+# events are rare so per-event premium cost is fine) with a read-only base checkout, gh read access to the PR
+# thread, and comment/label permission -- it never pushes code itself. On success it posts a guidance comment
+# through the existing `@claude-code-engineer` mention path (re-dispatching the implementor via
+# address-review.yml) and clears `needs-senior-engineer`; when it can't verify something itself (instance
+# state, researcher taste), it applies `needs-human` with a structured question instead. See AGENTS.md
+# "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
+#
+# Fails gracefully while the dedicated senior-engineer GitHub App / its secrets don't exist yet (issue #438's
+# comment thread): the `resolve` job's secrets-check step logs a clear skip line instead of erroring, and
+# every downstream job is gated on that check passing.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to run senior-engineer adjudication against (its current head)"
+        required: true
+        type: number
+
+concurrency:
+  group: senior-engineer-pr-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  resolve:
+    name: resolve
+    runs-on: ubuntu-latest
+    # Coarse pre-filter only (mirrors implement-on-ready.yml/review-on-pr.yml): the authoritative gate is the
+    # "Resolve + authorize PR" step below, which re-fetches the PR fresh via the shared canonical-login
+    # helper before any token is minted. Allowlist = the researcher + the two engineer Apps (same set as
+    # implement-on-ready.yml's ALLOWLIST) -- any of the three can be the one applying `needs-senior-engineer`
+    # (a human, the implementor asking for help, or the reconciler's round-budget trip via the codex token).
+    if: |
+      (github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'needs-senior-engineer'
+        && contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.event.sender.login))
+      || (github.event_name == 'workflow_dispatch'
+        && contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.actor))
+    outputs:
+      pr_number: ${{ steps.resolve_pr.outputs.pr_number }}
+      head_ref: ${{ steps.resolve_pr.outputs.head_ref }}
+      base_ref: ${{ steps.resolve_pr.outputs.base_ref }}
+      configured: ${{ steps.secrets_check.outputs.configured }}
+      loop_trip: ${{ steps.loop_guard.outputs.trip }}
+    steps:
+      # Checkout runs FIRST (same rationale as every other pipeline workflow): the authorize step below
+      # sources the canonical-login helper from the working tree, which must exist before it's sourced.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      # Re-verify BEFORE minting any token: same-repo (no forks), PR open, and its author is exactly the
+      # claude engineer bot (senior-engineer only adjudicates the implementor's own PRs). For the labeled
+      # path, also re-confirm the label is CURRENTLY present (closes the same workflow_dispatch-vs-freshness
+      # gap implement-on-ready.yml's authorize step closes for `ready`); the manual workflow_dispatch lever
+      # deliberately skips that specific check (acceptance: "manual workflow_dispatch path works for a
+      # dispatcher-initiated adjudication" -- it may run with no label present at all).
+      - name: Resolve + authorize PR
+        id: resolve_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_EVENT_PR: ${{ github.event.pull_request.number }}
+          DISPATCH_PR: ${{ github.event.inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$DISPATCH_PR"
+          else
+            PR_NUMBER="$LABEL_EVENT_PR"
+          fi
+          [ -n "$PR_NUMBER" ] || { echo "::error::no PR number resolved for this event"; exit 1; }
+
+          pr_json=$(gh pr view "$PR_NUMBER" --repo "$REPO" \
+            --json author,isCrossRepository,state,headRefName,baseRefName,labels)
+          author=$(jq -r '.author.login' <<<"$pr_json")
+          is_cross=$(jq -r '.isCrossRepository' <<<"$pr_json")
+          state=$(jq -r '.state' <<<"$pr_json")
+          author_canon=$(canonical_login "$author")
+
+          if [ "$is_cross" != "false" ]; then
+            echo "::error::PR #$PR_NUMBER is a fork PR; refusing to run senior-engineer against it"
+            exit 1
+          fi
+          if [ "$author_canon" != "claude-code-engineer[bot]" ]; then
+            echo "::error::PR #$PR_NUMBER author '$author' is not the claude engineer bot; refusing to run"
+            exit 1
+          fi
+          if [ "$state" != "OPEN" ]; then
+            echo "::error::PR #$PR_NUMBER is not open (state: $state); refusing to run"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && ! jq -e 'any(.labels[]; .name == "needs-senior-engineer")' <<<"$pr_json" >/dev/null; then
+            echo "::error::PR #$PR_NUMBER no longer carries needs-senior-engineer; refusing to run"
+            exit 1
+          fi
+
+          {
+            echo "pr_number=$PR_NUMBER"
+            echo "head_ref=$(jq -r '.headRefName' <<<"$pr_json")"
+            echo "base_ref=$(jq -r '.baseRefName' <<<"$pr_json")"
+          } >> "$GITHUB_OUTPUT"
+
+      # Loop guard (issue #438): the senior engineer must never dispatch more than once per
+      # `needs-senior-engineer` application, and if the label REAPPEARS N=2 times on one PR (i.e. this is
+      # its 3rd+ application), the guidance loop isn't converging -- escalate straight to needs-human instead
+      # of running another adjudication round. Counts `labeled` events for this exact label via the issue's
+      # own event timeline (ambient read-only token is sufficient -- this is a read). Only meaningful for the
+      # labeled path; a workflow_dispatch run isn't a label (re-)application at all.
+      - name: Loop guard — count needs-senior-engineer applications
+        id: loop_guard
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          count=$(gh api "repos/$REPO/issues/$PR_NUMBER/events" --paginate | jq -s '
+            add // [] | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | length
+          ')
+          echo "needs-senior-engineer has been applied $count time(s) (including this one) on PR #$PR_NUMBER"
+          if [ "$count" -ge 3 ]; then
+            trip="true"
+          else
+            trip="false"
+          fi
+          echo "trip=$trip" >> "$GITHUB_OUTPUT"
+
+      # Fail gracefully while the App/secrets don't exist yet: a step-level (not job-level) check, since
+      # `secrets` isn't available in a job's own `if:` context. Every downstream job gates on this output
+      # instead of failing the run.
+      - name: Check senior-engineer secrets configured
+        id: secrets_check
+        env:
+          APP_ID: ${{ secrets.SENIOR_ENGINEER_APP_ID }}
+          APP_KEY: ${{ secrets.SENIOR_ENGINEER_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$APP_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "senior-engineer App secrets (SENIOR_ENGINEER_APP_ID / SENIOR_ENGINEER_APP_PRIVATE_KEY) are not configured on this repo yet; skipping this run"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  loop-guard-escalate:
+    name: loop-guard-escalate
+    needs: resolve
+    if: needs.resolve.outputs.configured == 'true' && needs.resolve.outputs.loop_trip == 'true'
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mint senior-engineer App token
+        id: mint_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.SENIOR_ENGINEER_APP_ID }}
+          private-key: ${{ secrets.SENIOR_ENGINEER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Escalate — loop guard tripped
+        env:
+          GH_TOKEN: ${{ steps.mint_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: \`needs-senior-engineer\` has been applied to this PR 3 times (the 2-reappearance loop guard) without the underlying issue resolving. Escalating to \`needs-human\` instead of running another adjudication round — repeated re-labeling without progress means the automated guidance loop isn't converging and needs a person's judgment on what's actually stuck."
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label needs-human --remove-label needs-senior-engineer || true
+
+  adjudicate:
+    name: adjudicate
+    needs: resolve
+    if: needs.resolve.outputs.configured == 'true' && needs.resolve.outputs.loop_trip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render senior-engineer prompt
+        id: render_prompt
+        env:
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          REPO: ${{ github.repository }}
+          HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
+          BASE_REF: ${{ needs.resolve.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          body="$(cat .github/prompts/senior-engineer.md)"
+          body="${body//\{\{PR_NUMBER\}\}/$PR_NUMBER}"
+          body="${body//\{\{REPO\}\}/$REPO}"
+          body="${body//\{\{HEAD_REF\}\}/$HEAD_REF}"
+          body="${body//\{\{BASE_REF\}\}/$BASE_REF}"
+          {
+            echo "prompt<<PROMPT_EOF"
+            echo "$body"
+            echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint senior-engineer App token
+        id: mint_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.SENIOR_ENGINEER_APP_ID }}
+          private-key: ${{ secrets.SENIOR_ENGINEER_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Same pin as every other CLI-running leg of this pipeline (automated-researcher#387/#388): the
+      # wrapper action's own bun/agent-SDK harness crashes at startup; the raw pinned CLI runs cleanly.
+      - name: Install pinned Claude Code
+        id: install_claude
+        run: |
+          set -euo pipefail
+          npm install -g @anthropic-ai/claude-code@2.1.207
+          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+
+      # This is the ONLY checkout of the PR's own head branch content, happening after authorization is
+      # already done from the trusted base branch checkout in the `resolve` job. The senior-engineer App
+      # token has Contents:read only, so this working tree is read-only in effect regardless of what the
+      # agent attempts.
+      - name: Checkout PR head branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          ref: ${{ needs.resolve.outputs.head_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base ref
+        env:
+          BASE_REF: ${{ needs.resolve.outputs.base_ref }}
+        run: git fetch --no-tags origin "$BASE_REF"
+
+      - name: Run pinned Claude Code CLI (senior-engineer)
+        id: run_claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # So `gh` calls the agent makes from its own Bash tool are authorized as the senior-engineer App.
+          GH_TOKEN: ${{ steps.mint_token.outputs.token }}
+          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+            | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
+                --model claude-fable-5 \
+                --allowedTools Bash,Read,Grep,Glob \
+                --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["guided","escalated"]}}}' \
+            | tee /tmp/claude_stream.jsonl
+
+          # Same validation as every other CLI-running leg (implement-on-ready.yml design-review finding 1):
+          # don't let a CLI run that exited 0 but produced no result event / no structured_output fall
+          # through silently.
+          structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
+          if [ -z "$structured" ] || [ "$structured" = "null" ]; then
+            echo "::error::claude CLI exited 0 but produced no structured_output in its result event"
+            exit 1
+          fi
+          echo "status=$(echo "$structured" | jq -r '.status // "escalated"')" >> "$GITHUB_OUTPUT"
+
+      # Safety net, not the primary mechanism: the prompt instructs the agent to clear the label itself
+      # (step 5), but a stuck `needs-senior-engineer` after a crashed/timed-out run would silently look
+      # like "still needs handling" with no automatic retry (unlike needs-dispatcher, which a human
+      # monitors). Runs regardless of the CLI step's outcome; `|| true` on the removal because a label
+      # already removed by the agent itself is not a failure.
+      - name: Ensure needs-senior-engineer is cleared
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.mint_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+        run: |
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label needs-senior-engineer || true
