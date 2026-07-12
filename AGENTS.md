@@ -112,6 +112,29 @@ agentic-engineering#43).
   product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
   the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
   `address-review.yml` runs use the same escalation convention on the PR it's already working.
+- **Senior-engineer leg (in-flight PR adjudication, automated-researcher#438; parent design #414's
+  "Shepherd"):** `senior-engineer.yml` is summoned by the `needs-senior-engineer` label landing on a PR — by
+  the reconciler's round-budget trip, by an implementor asking for help, or by a human — plus
+  `workflow_dispatch` (PR number) as the manual lever, same actor allowlist as the other actuators. It runs a
+  Fable-family agent (`claude-fable-5` — judgment-dense per model policy; these events are rare so per-event
+  premium cost is acceptable) under a dedicated `senior-engineer-agent[bot]` App identity with `Contents: read`,
+  `Pull requests: read-write`, `Issues: read-write` — it can comment and label but cannot push code, by
+  construction. Its mandate, drawn straight from the 2026-07-11 supervised night's transcripts: (1) verify
+  every finding/dispute/conflict-cause EMPIRICALLY (read the code, run a one-command test) before
+  adjudicating, never by weighing prose alone; (2) hand the implementor **exact target semantics**, not
+  finding-pointers — precise guidance converged in one push, vague pointing produced PR #428's round-5
+  regression; (3) a dispute must cite only escape hatches/safeguards that actually exist (PR #425's lesson);
+  (4) escalate anything needing instance state (pods, fleet, box) or researcher taste it can't verify — that
+  is correct behavior, not a limitation. On success it posts a guidance comment through the existing
+  allowlisted `@claude-code-engineer` mention path (re-dispatching the implementor via `address-review.yml`,
+  whose allowlist includes `senior-engineer-agent[bot]` for exactly this) and clears `needs-senior-engineer`; when
+  it escalates instead, it applies `needs-human` with a structured comment (the decision needed, the
+  options, its own lean, and what happens by default if unanswered) and stops. **Loop guard:** it never
+  dispatches more than once per label application, and if `needs-senior-engineer` REAPPEARS on the same PR
+  N=2 times (a 3rd+ total application — counted from the issue's own `labeled` event timeline), it escalates
+  straight to `needs-human` instead of running another round, since a converging guidance loop wouldn't need
+  to be re-labeled. Fails gracefully (a clear skip log line, no error) while the dedicated App and its two
+  secrets don't exist yet.
 - **Review re-fire actuator:** `review-on-pr.yml` also accepts `workflow_dispatch` (input: `pr_number`),
   running the same authorize→review→verdict path against the PR's CURRENT head — same actor allowlist as
   implement-on-ready's dispatch path (re-verified fresh via `gh pr view`: same-repo, bot-authored, open).
@@ -125,9 +148,11 @@ agentic-engineering#43).
   nothing until a human/dispatcher notices. `reconcile-prs.yml` runs on a ~10-minute schedule and walks
   open bot-authored PRs to repair this itself: `mergeable == CONFLICTING` → post the allowlisted
   `@claude-code-engineer` resolution-dispatch mention (round-budgeted; escalates to `needs-senior-engineer`
-  instead of nudging forever once the head stops moving); `mergeable == MERGEABLE` with no completed codex
-  review at the current head → re-fire `review-on-pr.yml` via the actuator above (the residual
-  true-event-loss case, if one exists).
+  instead of nudging forever once the head stops moving — automated-researcher#438, see the senior-engineer
+  leg below); `mergeable == MERGEABLE` with no completed codex review at the current head → re-fire
+  `review-on-pr.yml` via the actuator above (the residual true-event-loss case, if one exists). It also skips
+  any PR already carrying `needs-senior-engineer` or `needs-human` — those mean another leg of the pipeline
+  (or a person) is already handling it.
 - **Label lifecycle:** a ticket rests at `needs-design` until a triager pass assesses it (v1, #437:
   proposes a flip for the researcher to confirm; v2: acts autonomously within the autonomous-flip class
   below) → a `ready` flip carries a citation of the shaping conversation plus, when the triager edited the
@@ -167,6 +192,11 @@ agentic-engineering#43).
     minutes; this is the manual equivalent for when you don't want to wait.
   - Unblock a `needs-senior-engineer` Issue or PR: answer the blocking question in a comment, remove
     `needs-senior-engineer`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
+  - Trigger a manual in-flight adjudication on a PR: `gh workflow run senior-engineer.yml -f pr_number=<n>`
+    (works with or without `needs-senior-engineer` present — the manual lever doesn't require the label).
+  - Unblock a `needs-human` PR: answer the structured question the senior engineer posted, remove
+    `needs-human`, and re-apply `needs-senior-engineer` if you want another automated adjudication pass, or
+    comment `@claude-code-engineer` directly if you already know the exact fix.
 - **Gate configuration** (state it here so it doesn't drift or get "fixed" back by someone who doesn't know
   it's deliberate — all three verified live 2026-07-11): `checks` (from `checks.yml`) is a required status
   check on `main`; `allow_auto_merge` is enabled repo-wide (what lets `implement-on-ready.yml`'s auto-merge
@@ -179,7 +209,10 @@ agentic-engineering#43).
 - **Secrets this flow needs** (instance-provisioned, never checked in): `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `CLAUDE_APP_ID`, `CLAUDE_APP_PRIVATE_KEY`, `CODEX_APP_ID`, `CODEX_APP_PRIVATE_KEY`.
   Until all six are set, `ready` events fail loudly in the Actions tab (a missing-secret error at
-  token-mint) rather than silently doing something else.
+  token-mint) rather than silently doing something else. The senior-engineer leg additionally needs
+  `SENIOR_ENGINEER_APP_ID` + `SENIOR_ENGINEER_APP_PRIVATE_KEY`, but by design fails gracefully (a clear skip
+  log line) rather than loudly while those two are unset, since it's an optional-until-provisioned addition
+  to an already-working pipeline, not a bring-up dependency the way the original six are.
 
 **Two orthogonal cuts to keep straight:** *product vs instance* (this repo vs any consuming deployment that uses
 it) and *product vs SWE pipeline* (the shipped research plugins HERE vs the `aar-engineering` / `ship-change`
