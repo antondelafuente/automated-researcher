@@ -381,6 +381,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     viewer change through the recipe's gated path. The page is deliberately **bespoke, not a generic
     manifest-to-template generator** — a template flattens the "tell this experiment's story" quality; share only
     house style (the page lib + prior pages as pattern).
+  - **The gallery rebuild is a verified gate, not a named step.** The recipe's gallery-rebuild command must
+    actually **run** (rendering the page is not the same as rebuilding the index that lists it), and the leg is
+    not complete until the new page is **verified present in the built output** — grep the built index/manifest
+    for the experiment's slug, or fetch the gallery page and confirm the entry — with the verification evidence
+    (the command + the matching output line) cited in the close notes/CHECKLIST. A publish leg without this
+    evidence is an incomplete close, not a judgment call: this is the same fail-closed pattern as the skill's
+    other gates, added because a real close (run-csp1-gemma4-refusal-ablation-1) built the page but skipped the
+    rebuild, so the page existed but the dashboard never listed it.
   - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
     land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
     shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed

@@ -65,7 +65,10 @@
       (a) PUBLISHED — snapshot carries a `[recipes.viewer]` pointer: pinned figures rendered per the DESIGN.md
           Presentation spec, per-experiment page SOURCE (build/assemble scripts + manifest) committed to the
           viewer repo, page + gallery landed via the recipe's gated path (page prose is a first-pass draft —
-          its quality is NOT this gate's bar).       ev: landed PR/commit + committed source paths + page URL
+          its quality is NOT this gate's bar), AND the gallery-rebuild command actually RUN with the new page
+          VERIFIED PRESENT in the built output (not just rendered) — never just the named step.
+          ev: landed PR/commit + committed source paths + page URL + rebuild command run + grep/fetch showing
+              the experiment's slug listed in the built index/gallery
       (b) NO RECIPE — no `[recipes.viewer]` in the snapshot; manifest-only close.  ev: "no [recipes.viewer] in snapshot"
       (c) RECIPE INCOMPLETE — pointer present but the recipe is missing required contents (repo+landing path,
           page lib+prior page, commands, source destination): a load-bearing brief-gap flag, NOT a blocked
