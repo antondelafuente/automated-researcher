@@ -11,7 +11,8 @@ name: triage-assess
 # outputs — both blind assessments and the adjudication — have their returned ticket set asserted to
 # exactly match the gathered set (.github/triage/validate_coverage.sh) immediately after parsing; on any
 # mismatch the run fails closed at that point and posts nothing, so a corrupt blind pass never even reaches
-# adjudication.
+# adjudication. The adjudication output additionally gets a semantic wave-assignment check (--check-wave):
+# DO verdict requires an integer wave >= 1, SKIP/ASK verdict requires a null wave, same fail-closed path.
 # The blind-vs-sighted agreement signal is this design's audit anchor, so it is computed, never asserted
 # (PR #456 P0/round 4): the adjudicator contributes only a per-ticket final verdict + rationale + proposed
 # body edit — no `disagreement` field and no self-reported aggregate `summary` exist in its schema at all.
@@ -381,8 +382,10 @@ jobs:
       # same shared check the two blind-assess jobs already ran on their own outputs. On any mismatch, fail
       # loudly with the diff in the log and post nothing — post-digest is gated on `needs: adjudicate`, so
       # a failure here already prevents any comment; a scheduled run retries next cycle.
+      # --check-wave (PR #456 round 5) additionally enforces DO => integer wave >= 1, SKIP/ASK => null wave
+      # — only this call site passes it, since the blind-assessment schema has no `wave` field to check.
       - name: Validate adjudication ticket coverage
-        run: .github/triage/validate_coverage.sh "adjudication" triage-packets.json triage-adjudication.json .tickets
+        run: .github/triage/validate_coverage.sh "adjudication" triage-packets.json triage-adjudication.json .tickets --check-wave
 
   post-digest:
     name: post-digest
