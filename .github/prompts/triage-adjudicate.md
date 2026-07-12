@@ -20,7 +20,6 @@ reads in a digest — v1 of this pipeline makes no writes of any kind to any iss
    - `verdict`: `DO`, `SKIP`, or `ASK` — your own judgment, informed by (not bound by) the two blind
      verdicts. A split between the two blind assessors is itself a signal worth surfacing, not something to
      silently paper over.
-   - `disagreement`: `true` if the two blind verdicts differ on this ticket, else `false`.
    - `proposed_body_edit`: for a ticket whose body would benefit from sharpened scope, explicit exclusions,
      added constraints, or a cross-family note (e.g. "Sol flagged X"), the FULL replacement body text (not a
      diff or a patch) — or `null` if the existing body needs no edit. Guardrails, applied strictly:
@@ -35,8 +34,12 @@ reads in a digest — v1 of this pipeline makes no writes of any kind to any iss
      numbers so they serialize instead of batching. `null` for `SKIP`/`ASK`.
    - `notes`: one line summarizing your reasoning, written for direct inclusion in a digest a human will
      read as-is.
-5. Also produce an overall `summary`: a short paragraph — how many DO/SKIP/ASK, how many disagreements
-   between the blind pair, and anything else the human should know before reading the per-ticket table.
+
+You do NOT report whether the two blind assessors disagreed, and you do NOT produce any overall summary or
+aggregate counts. The workflow computes both mechanically — per-ticket disagreement from the two blind
+passes' own recorded verdicts, and every DO/SKIP/ASK/disagreement count from your validated `tickets` array
+— never from a model's self-report, because the blind-vs-sighted agreement signal is this pipeline's audit
+anchor and must stay mechanical.
 
 ## Constraints
 

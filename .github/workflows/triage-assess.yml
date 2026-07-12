@@ -5,13 +5,18 @@ name: triage-assess
 # proposes, but writes NOTHING to any assessed issue — v1 deliberately has no label/body permissions, and
 # creates no Issues of any kind. Both blind assessments (Fable, Sol — same cross-family split
 # review-on-pr.yml already uses) and the sighted adjudication's full proposal (verdicts + proposed body
-# edits + proposed wave composition + disagreement analysis) are archived as run artifacts for
-# auditability; a bounded summary (counts + per-ticket verdict table + a link back to the run artifact),
-# marker-prefixed and chunked into sequential "part k/N" comments if it would ever outgrow one comment, is
-# posted to #414. All three model outputs — both blind assessments and the adjudication — have their
-# returned ticket set asserted to exactly match the gathered set (.github/triage/validate_coverage.sh)
-# immediately after parsing; on any mismatch the run fails closed at that point and posts nothing, so a
-# corrupt blind pass never even reaches adjudication.
+# edits + proposed wave composition) are archived as run artifacts for auditability; a bounded summary
+# (counts + per-ticket verdict table + a link back to the run artifact), marker-prefixed and chunked into
+# sequential "part k/N" comments if it would ever outgrow one comment, is posted to #414. All three model
+# outputs — both blind assessments and the adjudication — have their returned ticket set asserted to
+# exactly match the gathered set (.github/triage/validate_coverage.sh) immediately after parsing; on any
+# mismatch the run fails closed at that point and posts nothing, so a corrupt blind pass never even reaches
+# adjudication.
+# The blind-vs-sighted agreement signal is this design's audit anchor, so it is computed, never asserted
+# (PR #456 P0/round 4): the adjudicator contributes only a per-ticket final verdict + rationale + proposed
+# body edit — no `disagreement` field and no self-reported aggregate `summary` exist in its schema at all.
+# post-digest derives per-ticket disagreement (Fable blind verdict != Sol blind verdict) and every DO/SKIP/
+# ASK/disagreement count itself, script-side, from the three validated model outputs.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for
 # the rubric every assessment/adjudication pass applies. v2 (write actions: body edits, budgeted flips,
 # ASK parking) is a separate ticket, filed only after v1's proposals prove out for a batch or two.
@@ -71,6 +76,16 @@ jobs:
           if ! gh issue list --repo "$REPO" --label needs-design --state open \
               --json number,title,body,labels,createdAt,comments --limit 300 > /tmp/raw_issues.json; then
             echo "::error::gh issue list failed"
+            exit 1
+          fi
+
+          # No pagination in v1 (issue #437 acceptance) — but a silently truncated gathered set would then
+          # pass exact-set coverage validation against itself, masking the truncation instead of catching
+          # it. If the query saturates the --limit, fail loudly instead (PR #456 P1/round 4); raise the
+          # limit (or add pagination) once the backlog is actually within range of it.
+          raw_count=$(jq 'length' /tmp/raw_issues.json)
+          if [ "$raw_count" -eq 300 ]; then
+            echo "::error::gh issue list returned exactly 300 ticket(s) — backlog exceeds gather limit — raise it"
             exit 1
           fi
 
@@ -344,7 +359,7 @@ jobs:
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
                 --allowedTools Read,Grep,Glob \
-                --json-schema '{"type":"object","additionalProperties":false,"required":["tickets","summary"],"properties":{"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","disagreement","proposed_body_edit","wave","notes"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"disagreement":{"type":"boolean"},"proposed_body_edit":{"type":["string","null"]},"wave":{"type":["integer","null"]},"notes":{"type":"string"}}}},"summary":{"type":"string"}}}' \
+                --json-schema '{"type":"object","additionalProperties":false,"required":["tickets"],"properties":{"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","proposed_body_edit","wave","notes"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"proposed_body_edit":{"type":["string","null"]},"wave":{"type":["integer","null"]},"notes":{"type":"string"}}}}}}' \
             | tee /tmp/claude_stream.jsonl
 
           structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
@@ -388,11 +403,26 @@ jobs:
         with:
           name: triage-adjudication
 
+      - name: Download Fable blind assessment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-blind-fable
+
+      - name: Download Sol blind assessment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-blind-sol
+
       # v1 creates no issues (PR #456 P0: an unbounded issue-creation fallback both can't actually stay
       # under the same 65536-char limit it exists to dodge, and violates the agent-filed-Issue labeling
       # rules). Split the render in two: `full` (everything, including proposed body edits, which can be
       # arbitrarily large) always goes to a run artifact; `summary` (counts + per-ticket verdict table +
       # a link back to this run's artifact) is the bounded piece that goes to #414 as a comment.
+      #
+      # Per-ticket `disagreement` and every DO/SKIP/ASK/disagreement count are computed HERE, from the two
+      # validated blind passes' own recorded verdicts and the validated adjudication array — never taken
+      # from the adjudicator's self-report (PR #456 P0/round 4: the blind-vs-sighted agreement signal is
+      # this design's audit anchor, so it must be mechanical, not asserted).
       - name: Render digest markdown (full artifact + bounded #414 summary)
         id: render
         env:
@@ -403,19 +433,35 @@ jobs:
           set -euo pipefail
           RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
 
-          jq -n --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json --arg run_url "$RUN_URL" '
+          jq -n --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json \
+                --slurpfile fable triage-blind-fable.json --slurpfile sol triage-blind-sol.json \
+                --arg run_url "$RUN_URL" '
             # Model-authored free text (title, notes) can contain a literal "|" or embedded newline, either
             # of which would corrupt a markdown table row — escape both before interpolating into one.
             def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
             ($packets[0].tickets | map({(.number|tostring): .title}) | add // {}) as $titles |
-            $adj[0] as $a |
+            ($fable[0].assessments | map({(.number|tostring): .verdict}) | add) as $fable_verdicts |
+            ($sol[0].assessments | map({(.number|tostring): .verdict}) | add) as $sol_verdicts |
+            ( $adj[0].tickets | map(. + {
+                disagreement: ($fable_verdicts[(.number|tostring)] != $sol_verdicts[(.number|tostring)])
+              }) | sort_by(.number)
+            ) as $tickets |
+            ( $tickets | map(select(.verdict == "DO")) | length ) as $do_count |
+            ( $tickets | map(select(.verdict == "SKIP")) | length ) as $skip_count |
+            ( $tickets | map(select(.verdict == "ASK")) | length ) as $ask_count |
+            ( $tickets | map(select(.disagreement)) | length ) as $disagreement_count |
+            ( ($do_count|tostring) + " DO, " + ($skip_count|tostring) + " SKIP, " + ($ask_count|tostring) +
+              " ASK. " + ($disagreement_count|tostring) + " ticket(s) show disagreement between the two " +
+              "blind passes (computed from Fable'"'"'s and Sol'"'"'s recorded blind verdicts, not the " +
+              "adjudicator'"'"'s report)."
+            ) as $computed_summary |
             ( "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
               "Assessed " + ($packets[0].tickets | length | tostring) + " open `needs-design` ticket(s). " +
               "Assess-and-propose only (automated-researcher#437 v1) — no label or body writes were made by this run.\n\n" +
-              $a.summary + "\n\n" +
+              $computed_summary + "\n\n" +
               "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
               "|---|-------|---------|--------------|------|-------|\n" +
-              ( $a.tickets | sort_by(.number) | map(
+              ( $tickets | map(
                   "| #" + (.number|tostring) + " | " + (($titles[(.number|tostring)] // "?") | esc) + " | " + .verdict +
                   " | " + (if .disagreement then "yes" else "" end) +
                   " | " + ((.wave // "") | tostring) +
@@ -425,7 +471,7 @@ jobs:
             {
               summary: ($header_and_table + "\n\nFull digest (verdicts + proposed body edits): " + $run_url + "\n"),
               full: ($header_and_table + "\n\n## Proposed body edits\n\n" +
-                ( ($a.tickets | map(select(.proposed_body_edit != null))) as $edits |
+                ( ($tickets | map(select(.proposed_body_edit != null))) as $edits |
                   if ($edits | length) == 0 then "None proposed this run.\n"
                   else ($edits | map(
                       "### #" + (.number|tostring) + "\n\n<details><summary>proposed replacement body</summary>\n\n```\n" + .proposed_body_edit + "\n```\n\n</details>\n"
