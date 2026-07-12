@@ -52,16 +52,37 @@ researcher/triage-applied statuses, not filing-time choices. If you believe the 
 prerequisite or better parked than actioned, say so in the issue body (e.g. a `blocked-by: #N` line or a
 one-line note) and let the triage pass act on it. Read `references/DISPOSITIONS.md` for the label contract.
 
+Every Issue filed through this skill (never a hand-filed one — that's the researcher's own filing, not this
+skill's) also carries exactly one **provenance label**, alongside the type and `needs-design` labels above.
+This is structural attribution — the triager weighs an incident-driven agent report differently from a
+researcher directive, and a label is machine-readable where prose is not:
+
+- `agent-filed` — you're filing this from your own observation (an incident, a footgun, a close-retro
+  finding) with no researcher ask behind it.
+- `researcher-requested` — the researcher explicitly asked you to file this (e.g. a session told you "file a
+  ticket for X"); cite the request (what was asked, and when/where) in the body.
+
+Also add one **provenance line** to the body naming the filing session/executor and the authoring path used
+(engineer identity vs. fallback), so the label carries the class and the body carries the specifics:
+
+```
+Filed autonomously by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback
+skill, not hand-written by <researcher>. Posted via `wf.sh issue <claude|codex> create` [or: raw
+`gh issue create` because `wf.sh` was unavailable on this box -- noting that here since the skill's
+intended path is the engineer-safe identity].
+```
+
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
 
 ```bash
-wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <disposition>
+wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <disposition> -l <provenance>
 wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
 ```
 
 Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. Never substitute raw `gh issue create` for product feedback: it may post as
 the repository owner instead of the agent engineer identity. If `wf.sh issue` is unavailable or unconfigured, draft the
-exact title, body, labels, and recurrence comment for a human or configured maintainer to submit.
+exact title, body, labels (type + disposition + provenance), and recurrence comment for a human or configured
+maintainer to submit, or post it yourself with raw `gh issue create` and say so in the provenance line (see #447).
 
 Deployment-only feedback is local to the consuming instance: a lab path, account quirk, local runner, deployment
 changelog, private pipeline, or coordination convention that an outside adopter would not share. Do not write to
