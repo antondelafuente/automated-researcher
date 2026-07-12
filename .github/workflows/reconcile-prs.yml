@@ -10,7 +10,7 @@ name: reconcile-prs
 #   - `mergeable == CONFLICTING`: post the allowlisted `@claude-code-engineer` resolution-dispatch mention
 #     (address-review.yml re-dispatches the implementor onto the SAME branch to merge origin/main, resolve,
 #     and push -- which fires `synchronize` on the now-buildable merge ref). Round-budgeted: escalates to
-#     `needs-dispatcher` instead of nudging forever if the head never moves.
+#     `needs-senior-engineer` instead of nudging forever if the head never moves.
 #   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
 #     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
@@ -56,7 +56,7 @@ jobs:
           set -euo pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
 
-          # Round budget before a CONFLICTING PR with no progress escalates to needs-dispatcher, rather
+          # Round budget before a CONFLICTING PR with no progress escalates to needs-senior-engineer, rather
           # than being re-nudged forever.
           BUDGET=3
           CONFLICT_MARKER="Reconciler: PR conflicts with main"
@@ -113,9 +113,9 @@ jobs:
             fi
 
             if [ "$round" -gt "$BUDGET" ]; then
-              echo "PR #$n: conflicted with no progress after $((round - 1)) reconciler dispatch(es); escalating to needs-dispatcher"
-              gh pr comment "$n" --repo "$REPO" --body "Reconciler: PR has stayed conflicted with main across $((round - 1)) resolution-dispatch round(s) with no new commit landing (still at head $short). Escalating to \`needs-dispatcher\` rather than continuing to nudge."
-              gh pr edit "$n" --repo "$REPO" --add-label needs-dispatcher
+              echo "PR #$n: conflicted with no progress after $((round - 1)) reconciler dispatch(es); escalating to needs-senior-engineer"
+              gh pr comment "$n" --repo "$REPO" --body "Reconciler: PR has stayed conflicted with main across $((round - 1)) resolution-dispatch round(s) with no new commit landing (still at head $short). Escalating to \`needs-senior-engineer\` rather than continuing to nudge."
+              gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
               return
             fi
 
@@ -206,7 +206,7 @@ jobs:
 
             labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
             case ",$labels," in
-              *,needs-dispatcher,*) echo "PR #$n: needs-dispatcher already set, skipping"; continue ;;
+              *,needs-senior-engineer,*) echo "PR #$n: needs-senior-engineer already set, skipping"; continue ;;
             esac
 
             mergeable=$(jq -r '.mergeable' <<<"$pr")
