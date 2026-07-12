@@ -271,7 +271,9 @@ summarizing/linking the shaping discussion. An agent asked to *implement* an iss
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
 close) is that lane's own concern to build out. An Issue an agent files (including via `file-feedback`, see
-#405) carries exactly `needs-design` plus a type label — nothing else: never self-apply `ready`, and never
+#405) carries exactly `needs-design` plus a type label plus, when an agent is the filer, exactly one
+provenance label (`agent-filed` or `researcher-requested` — see `file-feedback`'s filing instructions for
+the class contract) — nothing else besides those: never self-apply `ready`, and never
 self-apply `blocked`, `parked`, or `other` either. Those three remain valid dispositions but are
 researcher/triage-applied only, same reasoning as never self-applying `ready` — self-parking is a triage
 decision. An agent that believes a filing is blocked or parkable says so in the issue body, for the triage
