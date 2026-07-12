@@ -35,13 +35,13 @@ below in it, not in this prompt's paraphrase.
 5. **If you are fully blocked** — every finding is unaddressable as specified, or acting on the feedback
    would contradict something the issue this PR implements explicitly says — do NOT guess and do NOT force
    a partial/wrong fix just to have something to show. Instead: comment on the PR explaining exactly what's
-   blocking you, add the `needs-dispatcher` label to the PR, and stop.
+   blocking you, add the `needs-senior-engineer` label to the PR, and stop.
 6. Once you've addressed what's genuinely right, commit and push to `{{HEAD_REF}}` using the GitHub token
    you were given — every git and `gh` operation you perform must run as that identity, never a different
    credential. Do **NOT** invoke a review yourself: pushing fires `synchronize`, which re-runs
    `review-on-pr.yml` automatically (its own `cancel-in-progress` handles any stale in-flight round).
 7. Report your outcome as structured output: `status` (`addressed` if you pushed a fix, or `blocked` if you
-   escalated to `needs-dispatcher` without pushing).
+   escalated to `needs-senior-engineer` without pushing).
 
 ## Constraints
 

@@ -211,7 +211,6 @@ jobs:
             # pile a duplicate resolution-dispatch round on top of that.
             labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
             case ",$labels," in
-              *,needs-dispatcher,*) echo "PR #$n: needs-dispatcher already set, skipping"; continue ;;
               *,needs-senior-engineer,*) echo "PR #$n: needs-senior-engineer already set, skipping"; continue ;;
               *,needs-human,*) echo "PR #$n: needs-human already set, skipping"; continue ;;
             esac
