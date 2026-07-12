@@ -403,11 +403,24 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Post digest comment
+      - name: Post digest (comment on the digest issue, or a fallback digest issue if it outgrows one)
         env:
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           REPO: ${{ github.repository }}
           BODY: ${{ steps.render.outputs.body }}
         run: |
           set -euo pipefail
-          gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$BODY"
+          # GitHub's issue/PR comment body hard limit is 65536 characters. Issue #437's own design
+          # anticipates this at current backlog size ("post ... on #414 (or a per-run digest issue if it
+          # outgrows comments)"): file a fresh issue carrying the full digest instead, and leave only a
+          # short pointer comment on the usual destination. LIMIT leaves headroom below the hard cap.
+          LIMIT=64000
+          body_len=${#BODY}
+          if [ "$body_len" -gt "$LIMIT" ]; then
+            echo "digest is ${body_len} chars (> ${LIMIT}); filing a per-run digest issue instead of a #${DIGEST_ISSUE} comment"
+            title="Triage digest $(date -u +%Y-%m-%d)"
+            digest_issue_url=$(gh issue create --repo "$REPO" --title "$title" --body "$BODY")
+            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "This run's digest (${body_len} chars) outgrew a single comment; filed as $digest_issue_url instead."
+          else
+            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$BODY"
+          fi
