@@ -360,6 +360,9 @@ jobs:
         run: |
           set -euo pipefail
           jq -r --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json -n '
+            # Model-authored free text (title, notes) can contain a literal "|" or embedded newline, either
+            # of which would corrupt a markdown table row — escape both before interpolating into one.
+            def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
             ($packets[0].tickets | map({(.number|tostring): .title}) | add // {}) as $titles |
             $adj[0] as $a |
             "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
@@ -369,10 +372,10 @@ jobs:
             "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
             "|---|-------|---------|--------------|------|-------|\n" +
             ( $a.tickets | sort_by(.number) | map(
-                "| #" + (.number|tostring) + " | " + ($titles[(.number|tostring)] // "?") + " | " + .verdict +
+                "| #" + (.number|tostring) + " | " + (($titles[(.number|tostring)] // "?") | esc) + " | " + .verdict +
                 " | " + (if .disagreement then "yes" else "" end) +
                 " | " + ((.wave // "") | tostring) +
-                " | " + (.notes | gsub("\n"; " ")) + " |"
+                " | " + (.notes | esc) + " |"
               ) | join("\n") ) +
             "\n\n## Proposed body edits\n\n" +
             ( ($a.tickets | map(select(.proposed_body_edit != null))) as $edits |
