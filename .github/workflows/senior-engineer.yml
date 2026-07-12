@@ -201,6 +201,13 @@ jobs:
     if: needs.resolve.outputs.configured == 'true' && needs.resolve.outputs.loop_trip != 'true'
     runs-on: ubuntu-latest
     steps:
+      # Recorded before anything else in this job so the outcome-verification step below can tell apart a
+      # comment/label the agent produces THIS run from one that was already sitting on the PR from a prior
+      # (possibly failed or unrelated) run.
+      - name: Record adjudication start time
+        id: run_started
+        run: echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       # `adjudicate` is a separate job from `resolve` -- jobs don't share a workspace, so this runner
       # starts empty and the prompt render below (which `cat`s a file from the working tree) needs its
       # own checkout first. Pinned to the base ref `resolve` already authorized against (not the untrusted
@@ -293,11 +300,55 @@ jobs:
           fi
           echo "status=$(echo "$structured" | jq -r '.status // "escalated"')" >> "$GITHUB_OUTPUT"
 
+      # Outcomes are VERIFIED, never self-reported (same principle applied to the triager PR): the CLI's
+      # structured_output is the agent's own claim, not proof. Before anything downstream treats this run
+      # as having delivered guidance or escalation, confirm the claimed outcome actually exists on GitHub --
+      # for `guided`, a senior-engineer-agent[bot] comment containing the @claude-code-engineer mention,
+      # created after this run started; for `escalated`, the needs-human label actually present. A mismatch
+      # is treated as the failure path (this step exits non-zero, so `success()` below goes false and the
+      # `failure()` step fires instead) -- never clear needs-senior-engineer on an unverified claim.
+      - name: Verify adjudication outcome
+        id: verify_outcome
+        env:
+          GH_TOKEN: ${{ steps.mint_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          STATUS: ${{ steps.run_claude.outputs.status }}
+          STARTED_AT: ${{ steps.run_started.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          case "$STATUS" in
+            guided)
+              found=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --arg started "$STARTED_AT" '
+                add // [] | any(.[]; .user.login == "senior-engineer-agent[bot]"
+                  and .created_at > $started
+                  and (.body | contains("@claude-code-engineer")))
+              ')
+              if [ "$found" != "true" ]; then
+                echo "::error::status=guided was self-reported for PR #$PR_NUMBER, but no senior-engineer-agent[bot] comment mentioning @claude-code-engineer created after $STARTED_AT was found -- treating the self-report as unverified/failed"
+                exit 1
+              fi
+              ;;
+            escalated)
+              has_label=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels \
+                | jq -e 'any(.labels[]; .name == "needs-human")' >/dev/null 2>&1 && echo true || echo false)
+              if [ "$has_label" != "true" ]; then
+                echo "::error::status=escalated was self-reported for PR #$PR_NUMBER, but needs-human is not actually present -- treating the self-report as unverified/failed"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unrecognized status '$STATUS' from claude CLI structured output"
+              exit 1
+              ;;
+          esac
+          echo "verified outcome '$STATUS' for PR #$PR_NUMBER against actual GitHub state"
+
       # Safety net, not the primary mechanism: the prompt instructs the agent to clear the label itself
-      # (step 5). This step only runs when the CLI step actually succeeded -- i.e. adjudication delivered a
-      # real outcome (guidance comment posted, or `needs-human` applied as the escalation); `if: success()`
-      # is the default step condition, made explicit here so it isn't mistaken for `always()`. `|| true` on
-      # the removal because a label already removed by the agent itself is not a failure.
+      # (step 5). This step only runs once the claimed outcome has been VERIFIED against actual GitHub
+      # state above (not merely self-reported); `if: success()` is the default step condition, made
+      # explicit here so it isn't mistaken for `always()`. `|| true` on the removal because a label already
+      # removed by the agent itself is not a failure.
       - name: Ensure needs-senior-engineer is cleared
         if: success()
         env:
@@ -307,11 +358,12 @@ jobs:
         run: |
           gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label needs-senior-engineer || true
 
-      # On any failure in this job (CLI crash, timeout, malformed structured output), `needs-senior-engineer`
-      # must stay in place -- it is the retry signal (a re-labeled event or a manual workflow_dispatch
-      # re-summons this workflow). Silently clearing it here would mark an unhandled PR as handled, so this
-      # emits an explicit ::error for run-log visibility instead of touching the label.
+      # On any failure in this job (CLI crash, timeout, malformed structured output, or a self-reported
+      # outcome that verification couldn't find on GitHub), `needs-senior-engineer` must stay in place --
+      # it is the retry signal (a re-labeled event or a manual workflow_dispatch re-summons this workflow).
+      # Silently clearing it here would mark an unhandled PR as handled, so this emits an explicit ::error
+      # for run-log visibility instead of touching the label.
       - name: Adjudication failed — leaving needs-senior-engineer in place
         if: failure()
         run: |
-          echo "::error::senior-engineer adjudication for PR #${{ needs.resolve.outputs.pr_number }} did not complete (CLI crash, timeout, or malformed structured output) -- leaving needs-senior-engineer in place as the retry signal, not clearing it"
+          echo "::error::senior-engineer adjudication for PR #${{ needs.resolve.outputs.pr_number }} did not complete or its self-reported outcome could not be verified on GitHub (CLI crash, timeout, malformed structured output, or a guided/escalated claim not matching actual PR state) -- leaving needs-senior-engineer in place as the retry signal, not clearing it"
