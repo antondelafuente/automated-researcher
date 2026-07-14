@@ -9,10 +9,12 @@
 > it states the schema, the version rule, and the discovery order; it implements no discovery, validation, or
 > token minting (the init/validate script and the discovery+snapshot helper own those).
 >
-> **This file is shipped as two byte-identical per-skill copies** (one under `design-experiment/references/`,
-> one under `run-experiment/references/`), because the two skills install independently; `.aar-ci/checks.sh`
-> asserts they stay identical and that each carries exactly one integer `SCHEMA_VERSION` marker. Edit one,
-> mirror the other.
+> **This file is shipped as three byte-identical per-skill copies** (under `design-experiment/references/`,
+> `run-experiment/references/`, and `log-experiment/references/`), because all three skills install
+> independently and `aar_profile_snapshot.sh`'s design-experiment AND log-experiment copies each read the
+> `SCHEMA_VERSION` marker below from their own co-located copy of this file (resolved relative to the
+> script's own location, never a cross-skill path); `.aar-ci/checks.sh` asserts they stay identical and
+> that each carries exactly one integer `SCHEMA_VERSION` marker. Edit one, mirror the other two.
 
 ## The product `schema_version` constant
 

@@ -110,20 +110,23 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/feedback-loop/skills/(file-f
   fi
 fi
 
-# 1e. experiment-lifecycle ships the aar-profile SCHEMA.md reference in both independently-installed skill dirs
-#     (design-experiment + run-experiment), same per-skill-copy precedent as feedback-loop's init helper (#153).
-#     Keep the copies byte-identical AND assert each carries exactly one integer SCHEMA_VERSION marker — the
-#     product schema_version constant later helpers extract; a drift-only check would pass two identical but
+# 1e. experiment-lifecycle ships the aar-profile SCHEMA.md reference in all three independently-installed
+#     skill dirs that need it (design-experiment + run-experiment, same per-skill-copy precedent as
+#     feedback-loop's init helper (#153); log-experiment joined them once its aar_profile_snapshot.sh copy
+#     started reading the SCHEMA_VERSION marker from its own co-located copy, #472). Keep the copies
+#     byte-identical AND assert each carries exactly one integer SCHEMA_VERSION marker — the product
+#     schema_version constant later helpers extract; a drift-only check would pass identical but
 #     marker-less docs.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/references/SCHEMA\.md$'; then
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment|log-experiment)/references/SCHEMA\.md$'; then
   DE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/references/SCHEMA.md"
   RE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/references/SCHEMA.md"
-  if [ -f "$DE_SCHEMA" ] && [ -f "$RE_SCHEMA" ] && cmp -s "$DE_SCHEMA" "$RE_SCHEMA"; then
+  LE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/references/SCHEMA.md"
+  if [ -f "$DE_SCHEMA" ] && [ -f "$RE_SCHEMA" ] && [ -f "$LE_SCHEMA" ] && cmp -s "$DE_SCHEMA" "$RE_SCHEMA" && cmp -s "$DE_SCHEMA" "$LE_SCHEMA"; then
     ok "aar-profile SCHEMA.md copies match"
   else
-    err "aar-profile SCHEMA.md copies drift; keep design-experiment and run-experiment copies byte-identical"
+    err "aar-profile SCHEMA.md copies drift; keep design-experiment, run-experiment, and log-experiment copies byte-identical"
   fi
-  for s in "$DE_SCHEMA" "$RE_SCHEMA"; do
+  for s in "$DE_SCHEMA" "$RE_SCHEMA" "$LE_SCHEMA"; do
     [ -f "$s" ] || continue
     n=$(grep -cE '^<!-- SCHEMA_VERSION: [0-9]+ -->$' "$s")
     if [ "$n" = 1 ]; then ok "SCHEMA_VERSION marker in $(basename "$(dirname "$(dirname "$s")")")/references/SCHEMA.md"

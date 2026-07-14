@@ -10,9 +10,11 @@
 # git_ref, a type-coerced schema_version, and an edited profile_path — none of these change
 # profile_sha256, so each is caught independently of the hash-staleness check), and TOML-escaping of
 # interpolated strings (a quote/backslash profile path, and a non-BMP/emoji profile path, both round-trip
-# through tomllib.loads). Also asserts the design-experiment and log-experiment copies stay byte-identical
-# (checks.sh's own drift check duplicates this at the repo level; this smoke additionally proves the copy
-# under test actually behaves correctly, not just that the bytes match). Exit non-zero on any failure.
+# through tomllib.loads), and rejection of a [github].branch_prefix that isn't exactly 'run/' (#129's
+# convention — a permissive charset regex used to let e.g. "other/" through). Also asserts the
+# design-experiment and log-experiment copies stay byte-identical (checks.sh's own drift check duplicates
+# this at the repo level; this smoke additionally proves the copy under test actually behaves correctly,
+# not just that the bytes match). Exit non-zero on any failure.
 set -uo pipefail
 ROOT=${1:?repo root}
 SCRIPT="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot.sh"
@@ -195,6 +197,24 @@ if out=$(AAR_PROFILE="$T/xdg/experiment-lifecycle/aar-profile-badgh.toml" bash "
 else
   case "$out" in *"branch_prefix"*) ok "missing required [github] field BLOCKs";;
     *) err "missing-field failure lacked the expected message: $out";; esac
+fi
+
+# 6a. [github].branch_prefix must equal 'run/' EXACTLY (#129's convention) -> a permissive-but-wrong value
+#     like "other/" (which the old ^[A-Za-z0-9._-]+/$ regex would have accepted) must BLOCK.
+cat > "$T/xdg/experiment-lifecycle/aar-profile-badprefix.toml" <<'EOF'
+schema_version = 1
+[github]
+research_repo = "owner/research-lab"
+base_branch = "main"
+branch_prefix = "other/"
+private = true
+EOF
+fresh_start "$T/START4a.md"
+if out=$(AAR_PROFILE="$T/xdg/experiment-lifecycle/aar-profile-badprefix.toml" bash "$SCRIPT" snapshot "$T/START4a.md" 2>&1); then
+  err "snapshot succeeded with [github].branch_prefix='other/' (must equal 'run/' exactly)"
+else
+  case "$out" in *"branch_prefix"*"run/"*) ok "[github].branch_prefix='other/' BLOCKs (must equal 'run/' exactly)";;
+    *) err "wrong-branch_prefix failure lacked the expected message: $out";; esac
 fi
 
 # 7. viewer-less profile -> snapshot succeeds manifest-only, check agrees ([recipes.viewer] legitimately absent).

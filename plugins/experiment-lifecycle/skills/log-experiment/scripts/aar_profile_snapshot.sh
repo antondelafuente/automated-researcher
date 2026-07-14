@@ -22,7 +22,10 @@
 # Fails CLOSED (a one-line `BLOCK: ...` on stderr, non-zero exit) on: no discoverable profile, an unknown
 # schema_version MAJOR, a malformed [github] table, or (check only) a missing/stale/unparseable snapshot
 # block — this is what makes a profile-less or unknown-schema instance BLOCK at snapshot time, never
-# silently fall back to manifest-only.
+# silently fall back to manifest-only. The supported schema_version integer is never hardcoded here: it is
+# read from the `SCHEMA_VERSION` HTML-comment marker on line 1 of the co-located `../references/SCHEMA.md`
+# (resolved relative to this script's own location) — a missing/unparsable marker is itself a fail-closed
+# BLOCK, since a reader that can't confirm what version it understands must refuse to guess.
 #
 # snapshot <START.md>: resolve the live profile, then WRITE/REPLACE the fenced-TOML block in START.md
 #   (idempotent — re-running replaces the prior block in place, so a re-snapshot after a profile edit is
@@ -38,7 +41,10 @@
 #
 # Packaging: this file is shipped as a byte-identical copy under log-experiment/scripts/ (the design-stage
 # gate's enforcement owner lives in that skill) — same per-skill-copy + .aar-ci/checks.sh drift-check
-# precedent as the aar-profile SCHEMA.md and feedback-loop's init helper. Edit one, mirror the other.
+# precedent as the aar-profile SCHEMA.md and feedback-loop's init helper. Edit one, mirror the other. Since
+# this script now reads its SCHEMA_VERSION marker from a co-located references/SCHEMA.md, log-experiment
+# ships its own references/SCHEMA.md copy too (a third byte-identical copy alongside design-experiment's
+# and run-experiment's) — each skill installs independently, so each needs its own local marker file.
 set -euo pipefail
 
 HEADING='## Instance profile (snapshot)'
@@ -51,7 +57,10 @@ case "$MODE" in snapshot|check) : ;; *) usage ;; esac
 
 command -v python3 >/dev/null 2>&1 || { echo "BLOCK: python3 is required to resolve the instance profile" >&2; exit 1; }
 
-MODE="$MODE" START_PATH="$START_PATH" HEADING="$HEADING" python3 - <<'PY'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCHEMA_PATH="$SCRIPT_DIR/../references/SCHEMA.md"
+
+MODE="$MODE" START_PATH="$START_PATH" HEADING="$HEADING" SCHEMA_PATH="$SCHEMA_PATH" python3 - <<'PY'
 import hashlib
 import os
 import re
@@ -89,7 +98,6 @@ _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SAFE_HEXDIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
 _SAFE_URI = re.compile(rf"^(?:r2|s3|https)://{_SEG}(?:/{_SEG})*$")
 _SAFE_BRANCH = re.compile(rf"^{_SEG}$")
-_SAFE_BRANCH_PREFIX = re.compile(rf"^{_SEG}/$")   # e.g. "run/" — matches #129's run/<exp> convention
 
 
 def _no_traversal(v):
@@ -123,12 +131,18 @@ def require_github(data, path):
     for field, rx in (
         ("research_repo", _SAFE_OWNER_REPO),
         ("base_branch", _SAFE_BRANCH),
-        ("branch_prefix", _SAFE_BRANCH_PREFIX),
     ):
         v = gh.get(field)
         if not isinstance(v, str) or not v or not rx.match(v) or not _no_traversal(v):
             block(f"instance profile at {path} has a missing/invalid required field [github].{field}")
         out[field] = v
+    bp = gh.get("branch_prefix")
+    if not isinstance(bp, str) or bp != "run/":
+        block(
+            f"instance profile at {path} has [github].branch_prefix={bp!r} but it must equal 'run/' exactly "
+            "(matches #129's run/<exp> branch convention)"
+        )
+    out["branch_prefix"] = bp
     priv = gh.get("private")
     if not isinstance(priv, bool):
         block(f"instance profile at {path} has a missing/invalid required field [github].private (must be bool)")
@@ -177,6 +191,24 @@ def read_viewer(data, path):
     return out
 
 
+_SCHEMA_VERSION_RE = re.compile(r"^<!-- SCHEMA_VERSION: ([0-9]+) -->\s*$")
+
+
+def supported_schema_version():
+    # Read from the skill's own co-located references/SCHEMA.md (resolved relative to this script's
+    # location, not hardcoded) so a future schema bump only needs a doc edit, never a code edit here.
+    schema_path = os.environ["SCHEMA_PATH"]
+    try:
+        with open(schema_path, "r", encoding="utf-8") as f:
+            first_line = f.readline()
+    except Exception as e:
+        block(f"could not read the SCHEMA_VERSION marker at {schema_path}: {e}")
+    m = _SCHEMA_VERSION_RE.match(first_line)
+    if not m:
+        block(f"SCHEMA_VERSION marker at {schema_path} is missing or unparsable (expected line 1 to read '<!-- SCHEMA_VERSION: N -->')")
+    return int(m.group(1))
+
+
 def resolve_live():
     path, looked = resolve_profile_path()
     if not path:
@@ -184,12 +216,13 @@ def resolve_live():
     data, raw = load_profile(path)
     if not isinstance(data, dict):
         block(f"instance profile at {path} does not parse to a table at its root")
+    supported = supported_schema_version()
     sv = data.get("schema_version")
     if sv is None:
         block(f"instance profile at {path} is missing required field 'schema_version'")
-    if not isinstance(sv, int) or isinstance(sv, bool) or sv != 1:
+    if not isinstance(sv, int) or isinstance(sv, bool) or sv != supported:
         block(
-            f"instance profile at {path} declares schema_version={sv!r}; this product understands only 1 "
+            f"instance profile at {path} declares schema_version={sv!r}; this product understands only {supported} "
             "(refuse-unknown-MAJOR)"
         )
     gh = require_github(data, path)
