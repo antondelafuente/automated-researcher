@@ -187,7 +187,7 @@ def resolve_live():
     sv = data.get("schema_version")
     if sv is None:
         block(f"instance profile at {path} is missing required field 'schema_version'")
-    if sv != 1:
+    if not isinstance(sv, int) or isinstance(sv, bool) or sv != 1:
         block(
             f"instance profile at {path} declares schema_version={sv!r}; this product understands only 1 "
             "(refuse-unknown-MAJOR)"

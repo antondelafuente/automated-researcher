@@ -4,7 +4,8 @@
 # Deterministic, fully offline: exercises the snapshot/check round-trip that closes the #469 incident
 # (three closed experiments silently missed the viewer-publish leg because nothing ever wrote or checked
 # a START.md instance-profile snapshot) — write, idempotent re-write, staleness detection, fail-closed on
-# a missing/unknown-schema profile, the [recipes.viewer]-optional (manifest-only) path, tampered-snapshot
+# a missing/unknown-schema profile (including a live schema_version that type-coerces to 1, like TOML
+# `true` or JSON `1.0`), the [recipes.viewer]-optional (manifest-only) path, tampered-snapshot
 # detection via the re-rendered-block comparison (a stripped [recipes.viewer] section, a hand-edited
 # git_ref, a type-coerced schema_version, and an edited profile_path — none of these change
 # profile_sha256, so each is caught independently of the hash-staleness check), and TOML-escaping of
@@ -139,6 +140,45 @@ if out=$(AAR_PROFILE="$T/xdg/experiment-lifecycle/aar-profile-v2.toml" bash "$SC
 else
   case "$out" in *"understands only 1"*) ok "unknown schema_version MAJOR BLOCKs (refuse-unknown-MAJOR)";;
     *) err "unknown-MAJOR failure lacked the expected message: $out";; esac
+fi
+
+# 5a. schema_version=true (TOML): Python's coercing `==` treats `True == 1`, so a bare `sv != 1` check
+#     would wrongly accept this; resolve_live() must reject via isinstance(sv, int) and isinstance(sv, bool).
+cat > "$T/xdg/experiment-lifecycle/aar-profile-bool.toml" <<'EOF'
+schema_version = true
+[github]
+research_repo = "owner/research-lab"
+base_branch = "main"
+branch_prefix = "run/"
+private = true
+EOF
+fresh_start "$T/START3a.md"
+if out=$(AAR_PROFILE="$T/xdg/experiment-lifecycle/aar-profile-bool.toml" bash "$SCRIPT" snapshot "$T/START3a.md" 2>&1); then
+  err "snapshot succeeded against a TOML schema_version=true profile (bool coerced to int 1)"
+else
+  case "$out" in *"understands only 1"*) ok "schema_version=true (TOML) BLOCKs snapshot (refuse-unknown-MAJOR)";;
+    *) err "schema_version=true failure lacked the expected message: $out";; esac
+fi
+
+# 5b. schema_version=1.0 (JSON): Python's coercing `==` treats `1.0 == 1`, so a bare `sv != 1` check would
+#     wrongly accept this too; same isinstance(sv, int) guard rejects the float.
+cat > "$T/xdg/experiment-lifecycle/aar-profile-float.json" <<'EOF'
+{
+  "schema_version": 1.0,
+  "github": {
+    "research_repo": "owner/research-lab",
+    "base_branch": "main",
+    "branch_prefix": "run/",
+    "private": true
+  }
+}
+EOF
+fresh_start "$T/START3b.md"
+if out=$(AAR_PROFILE="$T/xdg/experiment-lifecycle/aar-profile-float.json" bash "$SCRIPT" snapshot "$T/START3b.md" 2>&1); then
+  err "snapshot succeeded against a JSON schema_version=1.0 profile (float coerced to int 1)"
+else
+  case "$out" in *"understands only 1"*) ok "schema_version=1.0 (JSON) BLOCKs snapshot (refuse-unknown-MAJOR)";;
+    *) err "schema_version=1.0 failure lacked the expected message: $out";; esac
 fi
 
 # 6. profile missing a required [github] field -> BLOCKs.
