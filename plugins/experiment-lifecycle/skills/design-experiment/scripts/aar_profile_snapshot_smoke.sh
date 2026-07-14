@@ -4,13 +4,14 @@
 # Deterministic, fully offline: exercises the snapshot/check round-trip that closes the #469 incident
 # (three closed experiments silently missed the viewer-publish leg because nothing ever wrote or checked
 # a START.md instance-profile snapshot) — write, idempotent re-write, staleness detection, fail-closed on
-# a missing/unknown-schema profile, the [recipes.viewer]-optional (manifest-only) path, a
-# tampered-snapshot presence mismatch, a tampered-snapshot VALUE mismatch (caught independently of the
-# hash-staleness check), and TOML-escaping of interpolated strings (a quote/backslash profile path still
-# round-trips through tomllib.loads). Also asserts the design-experiment and log-experiment copies stay
-# byte-identical (checks.sh's own drift check duplicates this at the repo level; this smoke additionally
-# proves the copy under test actually behaves correctly, not just that the bytes match). Exit non-zero on
-# any failure.
+# a missing/unknown-schema profile, the [recipes.viewer]-optional (manifest-only) path, tampered-snapshot
+# detection via the re-rendered-block comparison (a stripped [recipes.viewer] section, a hand-edited
+# git_ref, a type-coerced schema_version, and an edited profile_path — none of these change
+# profile_sha256, so each is caught independently of the hash-staleness check), and TOML-escaping of
+# interpolated strings (a quote/backslash profile path, and a non-BMP/emoji profile path, both round-trip
+# through tomllib.loads). Also asserts the design-experiment and log-experiment copies stay byte-identical
+# (checks.sh's own drift check duplicates this at the repo level; this smoke additionally proves the copy
+# under test actually behaves correctly, not just that the bytes match). Exit non-zero on any failure.
 set -uo pipefail
 ROOT=${1:?repo root}
 SCRIPT="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot.sh"
@@ -182,7 +183,8 @@ else
 fi
 
 # 9. tampered snapshot: [recipes.viewer] hand-removed from the block while profile_sha256 is left matching
-#    the (unchanged) live profile -> the presence cross-check catches it independently of the hash check.
+#    the (unchanged) live profile -> the re-rendered-block comparison catches it independently of the hash
+#    check (render_block(live) always includes [recipes.viewer] since the live profile still has it).
 fresh_start "$T/START7.md"
 bash "$SCRIPT" snapshot "$T/START7.md" >/dev/null 2>&1
 python3 - "$T/START7.md" <<'PY'
@@ -195,13 +197,13 @@ PY
 if out=$(bash "$SCRIPT" check "$T/START7.md" 2>&1); then
   err "check passed despite [recipes.viewer] being hand-stripped from an otherwise-matching snapshot"
 else
-  case "$out" in *"presence"*"disagrees"*) ok "hand-tampered [recipes.viewer] presence mismatch is caught independently of the hash check";;
+  case "$out" in *"does not match the live profile"*) ok "hand-stripped [recipes.viewer] is caught by the render-block comparison independently of the hash check";;
     *) err "tampered-presence failure lacked the expected message: $out";; esac
 fi
 
 # 10. tampered viewer VALUE: hand-edit git_ref in the snapshot block while profile_sha256 (and the live
 #     profile) stay untouched -> the hash-staleness check alone can't catch this (the live profile never
-#     changed), so this proves the field-by-field value comparison against resolve_live() catches snapshot
+#     changed), so this proves the render-block text comparison against resolve_live() catches snapshot
 #     tampering independently of staleness.
 fresh_start "$T/START8.md"
 bash "$SCRIPT" snapshot "$T/START8.md" >/dev/null 2>&1
@@ -215,8 +217,47 @@ PY
 if out=$(bash "$SCRIPT" check "$T/START8.md" 2>&1); then
   err "check passed despite a hand-tampered viewer git_ref while profile_sha256 stayed intact"
 else
-  case "$out" in *"tampered field"*"git_ref"*) ok "hand-tampered viewer git_ref is caught by the value comparison even though profile_sha256 is intact";;
+  case "$out" in *"does not match the live profile"*) ok "hand-tampered viewer git_ref is caught by the render-block comparison even though profile_sha256 is intact";;
     *) err "tampered-value failure lacked the expected message: $out";; esac
+fi
+
+# 11a. tampered schema_version: hand-edit `schema_version = 1` to `schema_version = true` in the snapshot
+#      block while profile_sha256 (and the live profile) stay untouched. A bare Python `!=` comparison
+#      would miss this (True == 1); the render-block comparison catches it because render_block(live)
+#      always emits the live integer 1, never the boolean.
+fresh_start "$T/START8a.md"
+bash "$SCRIPT" snapshot "$T/START8a.md" >/dev/null 2>&1
+python3 - "$T/START8a.md" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p).read()
+text = re.sub(r"schema_version = 1", "schema_version = true", text, count=1)
+open(p, "w").write(text)
+PY
+if out=$(bash "$SCRIPT" check "$T/START8a.md" 2>&1); then
+  err "check passed despite schema_version being tampered from 1 to true (type coercion)"
+else
+  case "$out" in *"does not match the live profile"*) ok "tampered schema_version (1 -> true) is caught by the render-block comparison";;
+    *) err "tampered-schema_version failure lacked the expected message: $out";; esac
+fi
+
+# 11b. tampered profile_path: hand-edit the snapshotted profile_path while profile_sha256 (and the live
+#      profile) stay untouched. The prior field-by-field comparison omitted this field entirely; the
+#      render-block comparison catches it because profile_path is part of the compared text.
+fresh_start "$T/START8b.md"
+bash "$SCRIPT" snapshot "$T/START8b.md" >/dev/null 2>&1
+python3 - "$T/START8b.md" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p).read()
+text = re.sub(r'profile_path\s*= "[^"]*"', 'profile_path   = "/tmp/not-the-real-profile.toml"', text, count=1)
+open(p, "w").write(text)
+PY
+if out=$(bash "$SCRIPT" check "$T/START8b.md" 2>&1); then
+  err "check passed despite profile_path being hand-tampered"
+else
+  case "$out" in *"does not match the live profile"*) ok "tampered profile_path is caught by the render-block comparison";;
+    *) err "tampered-profile_path failure lacked the expected message: $out";; esac
 fi
 
 # 11. profile path containing a double-quote and a backslash: snapshot must still succeed AND the emitted
@@ -248,6 +289,40 @@ else
   err "emitted TOML block for a quote/backslash path failed to round-trip through tomllib.loads: $out"
 fi
 
+# 11c. profile path containing a non-BMP character (an emoji): snapshot must still succeed, the emitted
+#      block must round-trip through tomllib.loads (proving ensure_ascii=False emits raw UTF-8 instead of
+#      a \uD8xx surrogate-pair escape, which is not a valid TOML \u escape and which tomllib rejects), and
+#      check must pass immediately after.
+EMOJI_DIR="emoji-😀-dir"
+mkdir -p "$T/$EMOJI_DIR"
+EMOJI_PROFILE="$T/$EMOJI_DIR/aar-profile.toml"
+complete_profile "$EMOJI_PROFILE"
+fresh_start "$T/START9c.md"
+if out=$(AAR_PROFILE="$EMOJI_PROFILE" bash "$SCRIPT" snapshot "$T/START9c.md" 2>&1); then
+  ok "snapshot succeeds against a profile path containing a non-BMP character"
+else
+  err "snapshot failed against a non-BMP profile path: $out"
+fi
+if out=$(python3 - "$T/START9c.md" "$EMOJI_PROFILE" <<'PY'
+import re, sys, tomllib
+start_path, expected_path = sys.argv[1], sys.argv[2]
+text = open(start_path, encoding="utf-8").read()
+m = re.search(r"```toml\n(.*?)\n```", text, re.DOTALL)
+assert m, "no fenced toml block found"
+snap = tomllib.loads(m.group(1))
+assert snap["profile_path"] == expected_path, (snap.get("profile_path"), expected_path)
+PY
+); then
+  ok "emitted TOML block round-trips through tomllib.loads and preserves the non-BMP path"
+else
+  err "emitted TOML block for a non-BMP path failed to round-trip through tomllib.loads: $out"
+fi
+if out=$(AAR_PROFILE="$EMOJI_PROFILE" bash "$SCRIPT" check "$T/START9c.md" 2>&1); then
+  ok "check passes immediately after snapshotting a non-BMP profile path"
+else
+  err "check failed against a non-BMP profile path snapshot: $out"
+fi
+
 # 12. hardcoded-instance-path absence: static grep over the NEW files this issue ships (the helper +
 #     this smoke script itself is excluded, since its own source necessarily quotes the forbidden
 #     literals as toy fixtures/patterns). Scoped to scripts/ (not the whole skill dir) so this check does
@@ -264,4 +339,4 @@ else
   ok "no hardcoded home-anton/hostname-port/cloudflare values in the new aar_profile_snapshot files"
 fi
 
-[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + presence/value tamper detection + TOML escaping" >&2; exit 0; } || exit 1
+[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + render-block tamper detection + TOML escaping (quote/backslash + non-BMP)" >&2; exit 0; } || exit 1

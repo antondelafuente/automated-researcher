@@ -27,10 +27,14 @@
 # snapshot <START.md>: resolve the live profile, then WRITE/REPLACE the fenced-TOML block in START.md
 #   (idempotent — re-running replaces the prior block in place, so a re-snapshot after a profile edit is
 #   just running this again). Prints "OK: ..." on success.
-# check <START.md>: read the block already in START.md, re-resolve the LIVE profile, and verify the
-#   block's profile_sha256 still matches the live file's bytes (staleness) and that [recipes.viewer]'s
-#   presence agrees between the block and the live profile. Prints "OK: ..." on success, "BLOCK: <reason>"
-#   (+ non-zero exit) otherwise — this exact text is what the design-stage gate surfaces to a human.
+# check <START.md>: read the block already in START.md, re-resolve the LIVE profile, verify the block's
+#   profile_sha256 still matches the live file's bytes (staleness — a distinct message from tampering,
+#   checked first), then re-render the block from the live profile via the SAME render_block() snapshot
+#   uses and require the START.md block's text to match it exactly (trailing whitespace normalized) — this
+#   is what catches tampering, including type coercion (schema_version = true), an omitted field, or any
+#   future field, without re-implementing the comparison field by field. Prints "OK: ..." on success,
+#   "BLOCK: <reason>" (+ non-zero exit) otherwise — this exact text is what the design-stage gate surfaces
+#   to a human.
 #
 # Packaging: this file is shipped as a byte-identical copy under log-experiment/scripts/ (the design-stage
 # gate's enforcement owner lives in that skill) — same per-skill-copy + .aar-ci/checks.sh drift-check
@@ -198,8 +202,10 @@ def _toml_str(value):
     # json.dumps's quoting (\" \\ \n \t \r \b \f \uXXXX) is a valid TOML basic string for every value we
     # emit here — needed because the resolved profile PATH is not charset-restricted like the [github] /
     # viewer fields are (those are regex-validated in require_github/read_viewer above), so a path
-    # containing a literal '"' or '\' would otherwise break the emitted TOML.
-    return json.dumps(value)
+    # containing a literal '"' or '\' would otherwise break the emitted TOML. ensure_ascii=False keeps
+    # non-BMP characters (e.g. emoji) as raw UTF-8 instead of \uD8xx surrogate-pair escapes — TOML \u
+    # escapes must be Unicode scalar values, and tomllib rejects a surrogate half on parse.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def render_block(live):
@@ -283,19 +289,8 @@ except Exception as e:
     block(f"instance-profile snapshot block in {start_path} is not valid TOML: {e}")
 
 snap_hash = snap.get("profile_sha256")
-snap_sv = snap.get("schema_version")
-snap_gh = snap.get("github")
 if not isinstance(snap_hash, str) or not _SAFE_HEXDIGEST.match(snap_hash):
     block(f"instance-profile snapshot block in {start_path} is missing/has an invalid 'profile_sha256'")
-if snap_sv != 1:
-    block(f"instance-profile snapshot block in {start_path} declares schema_version={snap_sv!r}; expected 1")
-if not isinstance(snap_gh, dict) or not snap_gh.get("research_repo"):
-    block(f"instance-profile snapshot block in {start_path} is missing required [github] fields")
-snap_recipes = snap.get("recipes")
-snap_viewer = snap_recipes.get("viewer") if isinstance(snap_recipes, dict) else None
-if not isinstance(snap_viewer, dict):
-    snap_viewer = None
-snap_viewer_present = snap_viewer is not None
 
 live = resolve_live()
 if live["sha256"] != snap_hash:
@@ -303,39 +298,37 @@ if live["sha256"] != snap_hash:
         f"instance-profile snapshot in {start_path} is stale: snapshot profile_sha256={snap_hash} but the "
         f"live profile at {live['path']} hashes to {live['sha256']} — re-run 'aar_profile_snapshot.sh snapshot'"
     )
-live_viewer_present = live["viewer"] is not None
-if live_viewer_present != snap_viewer_present:
-    block(
-        f"instance-profile snapshot in {start_path} [recipes.viewer] presence ({snap_viewer_present}) "
-        f"disagrees with the live profile ({live_viewer_present}) — re-run 'aar_profile_snapshot.sh snapshot'"
-    )
 
 # The hash check above only catches the LIVE profile changing since the snapshot was taken. It says
 # nothing about the BLOCK ITSELF having been hand-edited while profile_sha256 was left intact — so
-# re-derive every snapshotted value from the live profile (render_block(live) is deterministic) and
-# compare field by field; the first mismatch names the tampered field.
+# re-render the block from the live profile with the SAME render_block() snapshot uses (deterministic)
+# and require the START.md block's text to match it exactly. This subsumes tampering with any field
+# (including type coercion a bare `!=` comparison would miss, e.g. True == 1) in one check instead of
+# enumerating fields by hand, and it also catches a field this script doesn't know to check yet.
+expected_block = render_block(live)
+actual_block = m.group(0)
 
 
-def tampered(field, snap_val, live_val):
-    if snap_val != live_val:
-        block(
-            f"instance-profile snapshot in {start_path} has a tampered field '{field}': snapshot={snap_val!r} "
-            f"but the live profile has {live_val!r} — re-run 'aar_profile_snapshot.sh snapshot' (or revert "
-            "the tampering)"
-        )
+def _normalize(text):
+    return "\n".join(line.rstrip() for line in text.splitlines())
 
 
-tampered("schema_version", snap_sv, live["schema_version"])
-for field in ("research_repo", "base_branch", "branch_prefix", "private", "issue_repo"):
-    tampered(f"github.{field}", snap_gh.get(field), live["github"].get(field))
-if live_viewer_present:
-    lv = live["viewer"]
-    tampered("recipes.viewer.kind", snap_viewer.get("kind"), lv["kind"])
-    value_fields = ("repo", "path", "git_ref") if lv["kind"] == "repo" else ("uri", "sha256")
-    for field in value_fields:
-        tampered(f"recipes.viewer.{field}", snap_viewer.get(field), lv.get(field))
+if _normalize(actual_block) != _normalize(expected_block):
+    exp_lines = [line.rstrip() for line in expected_block.splitlines()]
+    act_lines = [line.rstrip() for line in actual_block.splitlines()]
+    first_diff = next(
+        i
+        for i in range(max(len(exp_lines), len(act_lines)))
+        if (act_lines[i] if i < len(act_lines) else None) != (exp_lines[i] if i < len(exp_lines) else None)
+    )
+    got = repr(act_lines[first_diff]) if first_diff < len(act_lines) else "<line missing>"
+    want = repr(exp_lines[first_diff]) if first_diff < len(exp_lines) else "<line missing>"
+    block(
+        f"instance-profile snapshot in {start_path} does not match the live profile at line {first_diff + 1}: "
+        f"got {got}, expected {want} — re-run 'aar_profile_snapshot.sh snapshot' (or revert the tampering)"
+    )
 
-viewer_note = "[recipes.viewer] present" if live_viewer_present else "no [recipes.viewer] (manifest-only is legitimate)"
+viewer_note = "[recipes.viewer] present" if live["viewer"] is not None else "no [recipes.viewer] (manifest-only is legitimate)"
 print(f"OK: instance-profile snapshot in {start_path} is present and matches the live profile ({viewer_note})")
 sys.exit(0)
 PY
