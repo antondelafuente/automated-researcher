@@ -5,6 +5,10 @@
 # viewer-publish miss (three closed experiments never got a dashboard entry because nothing ever wrote or
 # checked this block). Drives the REAL script via `--dry-run` against throwaway git fixtures, the same
 # pattern log_experiment_secret_scan_smoke.sh uses. No engineer identity or network needed.
+#
+# make_design_repo's DESIGN.md carries a locked Presentation header (#470/#471) since gate_design_stage
+# checks that BEFORE the #469 snapshot check this smoke targets — without it every case here would BLOCK on
+# the lock check instead of reaching the snapshot behavior under test.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +57,7 @@ make_design_repo() {
   git init -q -b main "$root"
   git -C "$root" config user.email smoke@test; git -C "$root" config user.name smoke
   mkdir -p "$root/reg/exp1"
-  printf '# DESIGN\npurpose: smoke\n' > "$root/reg/exp1/DESIGN.md"
+  printf '# DESIGN\npurpose: smoke\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$root/reg/exp1/DESIGN.md"
   git -C "$root" add -A; git -C "$root" commit -qm base
   git -C "$root" update-ref refs/remotes/origin/main main
   git -C "$root" checkout -q -b change/x

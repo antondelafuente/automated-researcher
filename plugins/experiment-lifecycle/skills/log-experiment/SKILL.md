@@ -44,7 +44,7 @@ The driver **classifies by the registry convention** (no label needed):
 | the dir has… | classified as | gate |
 |---|---|---|
 | `DESIGN.md` **and** `RESULTS.md` | **experiment** | verify the close-audit is present + triaged |
-| `DESIGN.md`, **no** `RESULTS.md` | **design-stage** | verify the design-audit is present (`DESIGN_AUDIT*.md`) + deterministic secret scan |
+| `DESIGN.md`, **no** `RESULTS.md` | **design-stage** | verify the design-audit is present (`DESIGN_AUDIT*.md`), the Presentation section is locked with the researcher, + deterministic secret scan |
 | anything else | **note** | deterministic secret scan |
 
 The two legs of the **two-PR experiment flow** map onto the two design-bearing kinds: log a dir at design
@@ -72,15 +72,19 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   `DESIGN_AUDIT*.md` is present (the numbered `DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, … chain is the validity
   record). Like the experiment gate it verifies the audit is *present*, not that every finding was resolved (a
   machine-readable triage status is the same documented future hardening; the researcher invoking this at
-  design time **is** the clearance act). It **also runs the deterministic secret scan** — a `DESIGN.md`-only
-  dir was secret-scanned as a `note` before this kind existed, so design-stage must not drop that scan. It
-  **also verifies the `START.md` instance-profile snapshot** (`aar_profile_snapshot.sh check`, #469) — the
-  single deterministic owner of that check: BLOCK unless `START.md` is present, carries the fenced-TOML
-  `## Instance profile (snapshot)` block `design-experiment`'s Step 3 writes, and that block's
-  `profile_sha256` still matches the live instance profile (not stale). A `[recipes.viewer]`-less snapshot
-  is a legitimate manifest-only instance and passes; a missing/stale/unparseable snapshot does not — this
-  closes the #347 silent miss where three closed experiments never got a viewer page because nothing ever
-  wrote or checked this block. A missing design-audit, a secret hit, or a missing/stale snapshot, BLOCKS.
+  design time **is** the clearance act). It also **verifies the Presentation section is locked with the
+  researcher** (#470) — BLOCK unless `DESIGN.md` carries a header matching `## Presentation (locked with the
+  researcher <ISO date>)` (any heading level); this is enforced HERE rather than in design-audit because
+  design-audit runs *before* the clearance pass that produces the lock, so it can't check something that
+  doesn't exist yet. It **also runs the deterministic secret scan** — a `DESIGN.md`-only dir was secret-scanned
+  as a `note` before this kind existed, so design-stage must not drop that scan. It **also verifies the
+  `START.md` instance-profile snapshot** (`aar_profile_snapshot.sh check`, #469) — the single deterministic
+  owner of that check: BLOCK unless `START.md` is present, carries the fenced-TOML `## Instance profile
+  (snapshot)` block `design-experiment`'s Step 3 writes, and that block's `profile_sha256` still matches the
+  live instance profile (not stale). A `[recipes.viewer]`-less snapshot is a legitimate manifest-only instance
+  and passes; a missing/stale/unparseable snapshot does not — this closes the #347 silent miss where three
+  closed experiments never got a viewer page because nothing ever wrote or checked this block. A missing
+  design-audit, a missing/unlocked Presentation section, a secret hit, or a missing/stale snapshot, BLOCKS.
 - **Note.** A note has nothing to adversarially audit, so there is **no LLM review** — only a deterministic
   scan for secret-value patterns (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys). A hit BLOCKS.
 
