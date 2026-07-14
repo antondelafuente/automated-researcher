@@ -4,7 +4,8 @@
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
 #   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
-#   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present + secret scan.
+#   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present, the
+#                                               Presentation section carries the researcher's lock line, + secret scan.
 #   - note         (anything else):            deterministic secret scan only.
 # Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
 # staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
@@ -267,8 +268,25 @@ gate_design_stage() {
     if [[ "$(basename "$_f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then _da=1; break; fi
   done
   [ "$_da" = 1 ] || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md; a *_RESPONSE.md does not count) — surface for human"
-  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) and secret scan clean; pre-launch leg of the two-PR flow."
-  note "design-stage gate ok: design-audit present (secret scan runs on the staged set)"
+  # Require the machine-checkable presentation lock (#470): design-audit (above) runs BEFORE final clearance,
+  # so it cannot check a lock that clearance itself produces — this is why enforcement lives HERE, at
+  # design-stage logging, not in design-audit. The header convention is `## Presentation (locked with the
+  # researcher <ISO date>)` (design-experiment SKILL.md, per the good example in
+  # registry/csp1-author-sweep-1/DESIGN.md); a rerun inheriting a prior presentation by citation still carries
+  # its own fresh lock date on this same header. Any heading level (#-######) is accepted.
+  # The digit-shape [0-9]{4}-[0-9]{2}-[0-9]{2} alone accepts a nonsense date like 2026-99-99, so the extracted
+  # date must additionally round-trip through GNU `date` (CI is Linux) — a real calendar date reproduces
+  # itself, a fabricated one either fails to parse (empty output, redirected to /dev/null) or normalizes to a
+  # different string.
+  # `|| true` inside the substitution: under `pipefail` (set at the script top), a DESIGN.md with NO matching
+  # header at all makes the first grep exit non-zero with no output, which would otherwise trip `set -e` on
+  # this assignment and exit the script silently — before the `die` below ever runs.
+  _lock_date="$(grep -oE '^#{1,6}[[:space:]]*Presentation[[:space:]]*\(locked with the researcher [0-9]{4}-[0-9]{2}-[0-9]{2}\)' "$DIR/DESIGN.md" \
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -n1 || true)"
+  [ -n "$_lock_date" ] && [ "$(date -ud "$_lock_date" +%F 2>/dev/null)" = "$_lock_date" ] \
+    || die "design-stage dir's DESIGN.md has no locked Presentation section — expected a header like '## Presentation (locked with the researcher <ISO date>)' recording the researcher's explicit in-chat lock on what to plot/rollouts/page story, with a real calendar date — surface for human"
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, and secret scan clean; pre-launch leg of the two-PR flow."
+  note "design-stage gate ok: design-audit present + Presentation lock found (secret scan runs on the staged set)"
 }
 case "$KIND" in
   experiment)   gate_experiment ;;

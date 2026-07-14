@@ -17,6 +17,12 @@
 # relative target happens to resolve inside the repo (wholesale rejection, not a resolve-and-judge heuristic)
 # — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
 #
+# #470/#471: also covers the design-stage KIND's Presentation-lock gate added to gate_design_stage: a valid
+# `## Presentation (locked with the researcher <ISO date>)` header PASSes; a DESIGN.md with no lock header at
+# all BLOCKs on "no locked Presentation section"; and a header with a digit-shaped but calendar-invalid date
+# (e.g. 2026-99-99) BLOCKs the same way, since the gate round-trips the date through GNU `date` rather than
+# trusting digit shape alone.
+#
 # #340: also covers a non-trivial file the BASE tree's .gitignore silently excludes from staging (even
 # alongside other content that stages fine) BLOCKS and is listed; --skip-ignored explicitly acknowledges and
 # proceeds; well-known junk (e.g. .DS_Store) never blocks on its own.
@@ -68,6 +74,22 @@ run_dry() {
   local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
       bash "$SCRIPT" "$dir" --dry-run "$@" 2>&1)"; local rc=$?
   LAST_ERR="$out"; rm -rf "$cfg"; return $rc
+}
+
+# make_design_stage_repo <dir>: a fresh git repo with an EMPTY base commit, checked out onto change/x so a
+# reg/design dir added afterward (DESIGN.md + DESIGN_AUDIT.md, no RESULTS.md) is entirely NEW content and
+# stages cleanly — exercises the design-stage KIND's Presentation-lock gate (#470/#471) added to
+# gate_design_stage, not the note-kind secret-scan cases above.
+make_design_stage_repo() {
+  local root="$1"
+  git init -q -b main "$root"
+  git -C "$root" config user.email smoke@test; git -C "$root" config user.name smoke
+  mkdir -p "$root/reg"
+  printf 'placeholder\n' > "$root/reg/.keep"
+  git -C "$root" add -A; git -C "$root" commit -qm base
+  git -C "$root" update-ref refs/remotes/origin/main main
+  git -C "$root" checkout -q -b change/x
+  mkdir -p "$root/reg/design"
 }
 
 # make_repo_with_gitignore <dir> <gitignore-content>: like make_repo, but the BASE commit also carries a
@@ -272,6 +294,32 @@ printf 'row\n' > "$T/reg/note/artifacts/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note"; then fail "false 'committed' claim on a file inside a wholly-ignored directory was NOT blocked"; else
   case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "claim about a file inside a wholly-ignored directory is blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 24: design-stage DESIGN.md with a valid locked Presentation header -> PASS (#470/#471)"
+T=$(mktemp -d); make_design_stage_repo "$T"
+printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$T/reg/design/DESIGN.md"
+printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
+if run_dry "$T/reg/design"; then pass "design-stage with a valid lock header passes the gate"; else
+  fail "valid lock header BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 25: design-stage DESIGN.md with NO lock header -> BLOCK ('no locked Presentation section')"
+T=$(mktemp -d); make_design_stage_repo "$T"
+printf '# Design\n\n## Presentation\nDetails, not yet locked.\n' > "$T/reg/design/DESIGN.md"
+printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
+if run_dry "$T/reg/design"; then fail "design-stage with no lock header was NOT blocked"; else
+  case "$LAST_ERR" in *"no locked Presentation section"*) pass "missing lock header blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 26: design-stage DESIGN.md with a malformed calendar date in the lock header -> BLOCK (digit-shape alone would accept this)"
+T=$(mktemp -d); make_design_stage_repo "$T"
+printf '# Design\n\n## Presentation (locked with the researcher 2026-99-99)\nDetails.\n' > "$T/reg/design/DESIGN.md"
+printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
+if run_dry "$T/reg/design"; then fail "malformed calendar date (2026-99-99) was NOT blocked"; else
+  case "$LAST_ERR" in *"no locked Presentation section"*) pass "malformed calendar date blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
