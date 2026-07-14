@@ -18,10 +18,11 @@
 # — and that it runs for the 'note' kind used throughout this smoke (symlink_scan runs for every KIND).
 #
 # #470/#471: also covers the design-stage KIND's Presentation-lock gate added to gate_design_stage: a valid
-# `## Presentation (locked with the researcher <ISO date>)` header PASSes; a DESIGN.md with no lock header at
-# all BLOCKs on "no locked Presentation section"; and a header with a digit-shaped but calendar-invalid date
-# (e.g. 2026-99-99) BLOCKs the same way, since the gate round-trips the date through GNU `date` rather than
-# trusting digit shape alone.
+# `## Presentation (locked with the researcher <ISO date>)` header PASSes (case 24 also supplies a valid
+# instance-profile snapshot, since gate_design_stage's #469 check runs after the lock check and would
+# otherwise BLOCK it); a DESIGN.md with no lock header at all BLOCKs on "no locked Presentation section"; and
+# a header with a digit-shaped but calendar-invalid date (e.g. 2026-99-99) BLOCKs the same way, since the gate
+# round-trips the date through GNU `date` rather than trusting digit shape alone.
 #
 # #340: also covers a non-trivial file the BASE tree's .gitignore silently excludes from staging (even
 # alongside other content that stages fine) BLOCKS and is listed; --skip-ignored explicitly acknowledges and
@@ -297,12 +298,25 @@ if run_dry "$T/reg/note"; then fail "false 'committed' claim on a file inside a 
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 24: design-stage DESIGN.md with a valid locked Presentation header -> PASS (#470/#471)"
+echo "[smoke] case 24: design-stage DESIGN.md with a valid locked Presentation header + a valid instance-profile snapshot -> PASS (#469/#470/#471)"
 T=$(mktemp -d); make_design_stage_repo "$T"
 printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$T/reg/design/DESIGN.md"
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
-if run_dry "$T/reg/design"; then pass "design-stage with a valid lock header passes the gate"; else
-  fail "valid lock header BLOCKED (regression): $LAST_ERR"; fi
+cfg24="$(mktemp -d)"; mkdir -p "$cfg24/experiment-lifecycle"
+cat > "$cfg24/experiment-lifecycle/aar-profile.toml" <<'EOF'
+schema_version = 1
+[github]
+research_repo = "owner/example-repo"
+base_branch = "main"
+branch_prefix = "run/"
+private = true
+EOF
+printf '# START.md\n\n## Your one job\ndo a thing\n' > "$T/reg/design/START.md"
+XDG_CONFIG_HOME="$cfg24" AAR_PROFILE="" bash "$SELF_DIR/aar_profile_snapshot.sh" snapshot "$T/reg/design/START.md" >/dev/null
+out24="$(XDG_CONFIG_HOME="$cfg24" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main bash "$SCRIPT" "$T/reg/design" --dry-run 2>&1)"; rc24=$?
+rm -rf "$cfg24"
+if [ "$rc24" -eq 0 ]; then pass "design-stage with a valid lock header + valid snapshot passes the gate"; else
+  fail "valid lock header + snapshot BLOCKED (regression): $out24"; fi
 rm -rf "$T"
 
 echo "[smoke] case 25: design-stage DESIGN.md with NO lock header -> BLOCK ('no locked Presentation section')"

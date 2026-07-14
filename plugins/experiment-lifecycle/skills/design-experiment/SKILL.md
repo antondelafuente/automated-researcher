@@ -212,6 +212,17 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   load-bearing that's only in your head goes INTO the docs first. Operational facts (paths, scripts) belong in
   `START.md`; the executor having them is not "context we're testing" — guessing a path is not the test, executing the
   *science* from the doc is.
+- **Snapshot the instance profile (mechanical, before the brief commit — #469):** run
+  `scripts/aar_profile_snapshot.sh snapshot <path to this experiment's START.md>`. It resolves the live
+  `aar-profile` once (the SCHEMA.md discovery order), fails closed with a one-line `BLOCKED: …` if no
+  profile is discoverable or its `schema_version` is unknown, and writes/replaces the fenced-TOML
+  `## Instance profile (snapshot)` block the `START` template already carries a placeholder for — `[github]` +
+  `[recipes.viewer]` only (never `[recipes.visualization_*]`, which `visualize-results` resolves live by
+  design). This is what the `log-experiment` design-stage gate (below, and see that skill) verifies is present
+  and not stale before the design PR can merge — the deterministic fix for the #347 silent miss (three closed
+  experiments never got a viewer page because nothing ever wrote or checked this block; only a parenthetical
+  mention of it existed here). In a **multi-arm wave**, run this once per START.md — each independently
+  resolves the same live profile, so every arm's snapshot shares one `profile_sha256`.
 
 ## Step 3b — Write `CHECKLIST.md` (the verification gates — the forcing function)
 

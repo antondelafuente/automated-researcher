@@ -110,25 +110,42 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/feedback-loop/skills/(file-f
   fi
 fi
 
-# 1e. experiment-lifecycle ships the aar-profile SCHEMA.md reference in both independently-installed skill dirs
-#     (design-experiment + run-experiment), same per-skill-copy precedent as feedback-loop's init helper (#153).
-#     Keep the copies byte-identical AND assert each carries exactly one integer SCHEMA_VERSION marker — the
-#     product schema_version constant later helpers extract; a drift-only check would pass two identical but
+# 1e. experiment-lifecycle ships the aar-profile SCHEMA.md reference in all three independently-installed
+#     skill dirs that need it (design-experiment + run-experiment, same per-skill-copy precedent as
+#     feedback-loop's init helper (#153); log-experiment joined them once its aar_profile_snapshot.sh copy
+#     started reading the SCHEMA_VERSION marker from its own co-located copy, #472). Keep the copies
+#     byte-identical AND assert each carries exactly one integer SCHEMA_VERSION marker — the product
+#     schema_version constant later helpers extract; a drift-only check would pass identical but
 #     marker-less docs.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment)/references/SCHEMA\.md$'; then
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|run-experiment|log-experiment)/references/SCHEMA\.md$'; then
   DE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/references/SCHEMA.md"
   RE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/references/SCHEMA.md"
-  if [ -f "$DE_SCHEMA" ] && [ -f "$RE_SCHEMA" ] && cmp -s "$DE_SCHEMA" "$RE_SCHEMA"; then
+  LE_SCHEMA="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/references/SCHEMA.md"
+  if [ -f "$DE_SCHEMA" ] && [ -f "$RE_SCHEMA" ] && [ -f "$LE_SCHEMA" ] && cmp -s "$DE_SCHEMA" "$RE_SCHEMA" && cmp -s "$DE_SCHEMA" "$LE_SCHEMA"; then
     ok "aar-profile SCHEMA.md copies match"
   else
-    err "aar-profile SCHEMA.md copies drift; keep design-experiment and run-experiment copies byte-identical"
+    err "aar-profile SCHEMA.md copies drift; keep design-experiment, run-experiment, and log-experiment copies byte-identical"
   fi
-  for s in "$DE_SCHEMA" "$RE_SCHEMA"; do
+  for s in "$DE_SCHEMA" "$RE_SCHEMA" "$LE_SCHEMA"; do
     [ -f "$s" ] || continue
     n=$(grep -cE '^<!-- SCHEMA_VERSION: [0-9]+ -->$' "$s")
     if [ "$n" = 1 ]; then ok "SCHEMA_VERSION marker in $(basename "$(dirname "$(dirname "$s")")")/references/SCHEMA.md"
     else err "SCHEMA.md must carry exactly one integer SCHEMA_VERSION marker (found $n in $s)"; fi
   done
+fi
+
+# 1f. experiment-lifecycle ships the aar_profile_snapshot.sh helper (#469) in both independently-installed
+#     skill dirs that need it (design-experiment writes the snapshot; log-experiment's design-stage gate
+#     reads it back with `check`), same per-skill-copy + drift-check precedent as SCHEMA.md (1e) and
+#     feedback-loop's init helper (1d). Keep the copies byte-identical.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|log-experiment)/scripts/aar_profile_snapshot\.sh$'; then
+  DE_SNAP="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot.sh"
+  LE_SNAP="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/aar_profile_snapshot.sh"
+  if [ -f "$DE_SNAP" ] && [ -f "$LE_SNAP" ] && cmp -s "$DE_SNAP" "$LE_SNAP"; then
+    ok "aar_profile_snapshot.sh copies match"
+  else
+    err "aar_profile_snapshot.sh copies drift; keep design-experiment and log-experiment copies byte-identical"
+  fi
 fi
 
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
@@ -274,6 +291,35 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
     bash "$LE_SMOKE" >&2 && ok "log-experiment secret-scan smoke" || err "log-experiment secret-scan smoke FAILED"
   else
     err "log-experiment.sh changed but log_experiment_secret_scan_smoke.sh missing — cannot verify the secret scan"
+  fi
+fi
+
+# 10c2. log-experiment design-stage snapshot-gate smoke (#469): gate_design_stage's addition — a
+#      design-stage record's START.md must carry an instance-profile snapshot that is present, parseable,
+#      and not stale (aar_profile_snapshot.sh check) — the single deterministic enforcement owner that
+#      closes the silent viewer-publish miss (#347). Runs when log-experiment.sh, either
+#      aar_profile_snapshot.sh copy, or this smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(log-experiment/scripts/(log-experiment\.sh|aar_profile_snapshot\.sh|log_experiment_design_stage_snapshot_smoke\.sh)|design-experiment/scripts/aar_profile_snapshot\.sh)$'; then
+  DS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_design_stage_snapshot_smoke.sh"
+  if [ -f "$DS_SMOKE" ]; then
+    echo "[checks] log-experiment design-stage snapshot-gate smoke" >&2
+    bash "$DS_SMOKE" >&2 && ok "log-experiment design-stage snapshot-gate smoke" || err "log-experiment design-stage snapshot-gate smoke FAILED"
+  else
+    err "log-experiment.sh or aar_profile_snapshot.sh changed but log_experiment_design_stage_snapshot_smoke.sh missing — cannot verify the design-stage snapshot gate"
+  fi
+fi
+
+# 10c3. aar_profile_snapshot.sh helper smoke (#469): the snapshot/check round-trip itself (write, idempotent
+#      re-write, staleness detection, fail-closed on a missing/unknown-schema profile, the
+#      [recipes.viewer]-optional manifest-only path, and a tampered-snapshot presence mismatch), independent
+#      of the log-experiment gate integration covered above. Runs when either copy or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|log-experiment)/scripts/aar_profile_snapshot(_smoke)?\.sh$'; then
+  APS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot_smoke.sh"
+  if [ -f "$APS_SMOKE" ]; then
+    echo "[checks] aar_profile_snapshot smoke" >&2
+    bash "$APS_SMOKE" "$ROOT" >&2 && ok "aar_profile_snapshot smoke" || err "aar_profile_snapshot smoke FAILED"
+  else
+    err "aar_profile_snapshot.sh changed but aar_profile_snapshot_smoke.sh missing — cannot verify the snapshot helper"
   fi
 fi
 
