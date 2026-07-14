@@ -4,8 +4,10 @@
 # Deterministic, fully offline: exercises the snapshot/check round-trip that closes the #469 incident
 # (three closed experiments silently missed the viewer-publish leg because nothing ever wrote or checked
 # a START.md instance-profile snapshot) — write, idempotent re-write, staleness detection, fail-closed on
-# a missing/unknown-schema profile, the [recipes.viewer]-optional (manifest-only) path, and a
-# tampered-snapshot presence mismatch. Also asserts the design-experiment and log-experiment copies stay
+# a missing/unknown-schema profile, the [recipes.viewer]-optional (manifest-only) path, a
+# tampered-snapshot presence mismatch, a tampered-snapshot VALUE mismatch (caught independently of the
+# hash-staleness check), and TOML-escaping of interpolated strings (a quote/backslash profile path still
+# round-trips through tomllib.loads). Also asserts the design-experiment and log-experiment copies stay
 # byte-identical (checks.sh's own drift check duplicates this at the repo level; this smoke additionally
 # proves the copy under test actually behaves correctly, not just that the bytes match). Exit non-zero on
 # any failure.
@@ -197,7 +199,56 @@ else
     *) err "tampered-presence failure lacked the expected message: $out";; esac
 fi
 
-# 10. hardcoded-instance-path absence: static grep over the NEW files this issue ships (the helper +
+# 10. tampered viewer VALUE: hand-edit git_ref in the snapshot block while profile_sha256 (and the live
+#     profile) stay untouched -> the hash-staleness check alone can't catch this (the live profile never
+#     changed), so this proves the field-by-field value comparison against resolve_live() catches snapshot
+#     tampering independently of staleness.
+fresh_start "$T/START8.md"
+bash "$SCRIPT" snapshot "$T/START8.md" >/dev/null 2>&1
+python3 - "$T/START8.md" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p).read()
+text = re.sub(r'git_ref = "[^"]*"', 'git_ref = "deadbeef"', text, count=1)
+open(p, "w").write(text)
+PY
+if out=$(bash "$SCRIPT" check "$T/START8.md" 2>&1); then
+  err "check passed despite a hand-tampered viewer git_ref while profile_sha256 stayed intact"
+else
+  case "$out" in *"tampered field"*"git_ref"*) ok "hand-tampered viewer git_ref is caught by the value comparison even though profile_sha256 is intact";;
+    *) err "tampered-value failure lacked the expected message: $out";; esac
+fi
+
+# 11. profile path containing a double-quote and a backslash: snapshot must still succeed AND the emitted
+#     block must round-trip through tomllib.loads — proving every interpolated string is TOML-escaped, not
+#     just [github]/viewer fields (which are regex-charset-restricted already) but the unrestricted
+#     resolved profile PATH too.
+WEIRD_DIR='weird "quote"\slash dir'
+mkdir -p "$T/$WEIRD_DIR"
+WEIRD_PROFILE="$T/$WEIRD_DIR/aar-profile.toml"
+complete_profile "$WEIRD_PROFILE"
+fresh_start "$T/START9.md"
+if out=$(AAR_PROFILE="$WEIRD_PROFILE" bash "$SCRIPT" snapshot "$T/START9.md" 2>&1); then
+  ok "snapshot succeeds against a profile path containing a quote and a backslash"
+else
+  err "snapshot failed against a quote/backslash profile path: $out"
+fi
+if out=$(python3 - "$T/START9.md" "$WEIRD_PROFILE" <<'PY'
+import re, sys, tomllib
+start_path, expected_path = sys.argv[1], sys.argv[2]
+text = open(start_path, encoding="utf-8").read()
+m = re.search(r"```toml\n(.*?)\n```", text, re.DOTALL)
+assert m, "no fenced toml block found"
+snap = tomllib.loads(m.group(1))
+assert snap["profile_path"] == expected_path, (snap.get("profile_path"), expected_path)
+PY
+); then
+  ok "emitted TOML block round-trips through tomllib.loads and preserves the quote/backslash path"
+else
+  err "emitted TOML block for a quote/backslash path failed to round-trip through tomllib.loads: $out"
+fi
+
+# 12. hardcoded-instance-path absence: static grep over the NEW files this issue ships (the helper +
 #     this smoke script itself is excluded, since its own source necessarily quotes the forbidden
 #     literals as toy fixtures/patterns). Scoped to scripts/ (not the whole skill dir) so this check does
 #     not flag pre-existing, unrelated example prose elsewhere in the skill (e.g. SCHEMA.md's own
@@ -213,4 +264,4 @@ else
   ok "no hardcoded home-anton/hostname-port/cloudflare values in the new aar_profile_snapshot files"
 fi
 
-[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + tamper detection" >&2; exit 0; } || exit 1
+[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + presence/value tamper detection + TOML escaping" >&2; exit 0; } || exit 1

@@ -194,32 +194,40 @@ def resolve_live():
     return {"path": path, "sha256": digest, "schema_version": sv, "github": gh, "viewer": viewer}
 
 
+def _toml_str(value):
+    # json.dumps's quoting (\" \\ \n \t \r \b \f \uXXXX) is a valid TOML basic string for every value we
+    # emit here — needed because the resolved profile PATH is not charset-restricted like the [github] /
+    # viewer fields are (those are regex-validated in require_github/read_viewer above), so a path
+    # containing a literal '"' or '\' would otherwise break the emitted TOML.
+    return json.dumps(value)
+
+
 def render_block(live):
     lines = [HEADING, "", "```toml"]
-    lines.append(f'profile_path   = "{live["path"]}"')
-    lines.append(f'profile_sha256 = "{live["sha256"]}"')
+    lines.append(f'profile_path   = {_toml_str(live["path"])}')
+    lines.append(f'profile_sha256 = {_toml_str(live["sha256"])}')
     lines.append(f'schema_version = {live["schema_version"]}')
     lines.append("")
     lines.append("[github]")
     gh = live["github"]
-    lines.append(f'research_repo  = "{gh["research_repo"]}"')
-    lines.append(f'base_branch    = "{gh["base_branch"]}"')
-    lines.append(f'branch_prefix  = "{gh["branch_prefix"]}"')
+    lines.append(f'research_repo  = {_toml_str(gh["research_repo"])}')
+    lines.append(f'base_branch    = {_toml_str(gh["base_branch"])}')
+    lines.append(f'branch_prefix  = {_toml_str(gh["branch_prefix"])}')
     if "issue_repo" in gh:
-        lines.append(f'issue_repo     = "{gh["issue_repo"]}"')
+        lines.append(f'issue_repo     = {_toml_str(gh["issue_repo"])}')
     lines.append(f'private        = {"true" if gh["private"] else "false"}')
     if live["viewer"] is not None:
         lines.append("")
         lines.append("[recipes.viewer]")
         v = live["viewer"]
-        lines.append(f'kind    = "{v["kind"]}"')
+        lines.append(f'kind    = {_toml_str(v["kind"])}')
         if v["kind"] == "repo":
-            lines.append(f'repo    = "{v["repo"]}"')
-            lines.append(f'path    = "{v["path"]}"')
-            lines.append(f'git_ref = "{v["git_ref"]}"')
+            lines.append(f'repo    = {_toml_str(v["repo"])}')
+            lines.append(f'path    = {_toml_str(v["path"])}')
+            lines.append(f'git_ref = {_toml_str(v["git_ref"])}')
         else:
-            lines.append(f'uri     = "{v["uri"]}"')
-            lines.append(f'sha256  = "{v["sha256"]}"')
+            lines.append(f'uri     = {_toml_str(v["uri"])}')
+            lines.append(f'sha256  = {_toml_str(v["sha256"])}')
     lines.append("```")
     return "\n".join(lines) + "\n"
 
@@ -283,7 +291,11 @@ if snap_sv != 1:
     block(f"instance-profile snapshot block in {start_path} declares schema_version={snap_sv!r}; expected 1")
 if not isinstance(snap_gh, dict) or not snap_gh.get("research_repo"):
     block(f"instance-profile snapshot block in {start_path} is missing required [github] fields")
-snap_viewer_present = isinstance(snap.get("recipes"), dict) and isinstance(snap["recipes"].get("viewer"), dict)
+snap_recipes = snap.get("recipes")
+snap_viewer = snap_recipes.get("viewer") if isinstance(snap_recipes, dict) else None
+if not isinstance(snap_viewer, dict):
+    snap_viewer = None
+snap_viewer_present = snap_viewer is not None
 
 live = resolve_live()
 if live["sha256"] != snap_hash:
@@ -297,6 +309,31 @@ if live_viewer_present != snap_viewer_present:
         f"instance-profile snapshot in {start_path} [recipes.viewer] presence ({snap_viewer_present}) "
         f"disagrees with the live profile ({live_viewer_present}) — re-run 'aar_profile_snapshot.sh snapshot'"
     )
+
+# The hash check above only catches the LIVE profile changing since the snapshot was taken. It says
+# nothing about the BLOCK ITSELF having been hand-edited while profile_sha256 was left intact — so
+# re-derive every snapshotted value from the live profile (render_block(live) is deterministic) and
+# compare field by field; the first mismatch names the tampered field.
+
+
+def tampered(field, snap_val, live_val):
+    if snap_val != live_val:
+        block(
+            f"instance-profile snapshot in {start_path} has a tampered field '{field}': snapshot={snap_val!r} "
+            f"but the live profile has {live_val!r} — re-run 'aar_profile_snapshot.sh snapshot' (or revert "
+            "the tampering)"
+        )
+
+
+tampered("schema_version", snap_sv, live["schema_version"])
+for field in ("research_repo", "base_branch", "branch_prefix", "private", "issue_repo"):
+    tampered(f"github.{field}", snap_gh.get(field), live["github"].get(field))
+if live_viewer_present:
+    lv = live["viewer"]
+    tampered("recipes.viewer.kind", snap_viewer.get("kind"), lv["kind"])
+    value_fields = ("repo", "path", "git_ref") if lv["kind"] == "repo" else ("uri", "sha256")
+    for field in value_fields:
+        tampered(f"recipes.viewer.{field}", snap_viewer.get(field), lv.get(field))
 
 viewer_note = "[recipes.viewer] present" if live_viewer_present else "no [recipes.viewer] (manifest-only is legitimate)"
 print(f"OK: instance-profile snapshot in {start_path} is present and matches the live profile ({viewer_note})")
