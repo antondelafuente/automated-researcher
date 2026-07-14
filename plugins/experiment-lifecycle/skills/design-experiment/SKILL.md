@@ -275,7 +275,8 @@ Why fresh-context dispatch is the default:
 GitHub* step — the **design leg of the two-PR flow** (design merge before execution; closeout merge after results). Once
 the researcher has cleared the design, run the **`log-experiment`** skill on the experiment dir
 (`log-experiment.sh <registry-dir>`): with a `DESIGN.md` + `DESIGN_AUDIT*.md` and no `RESULTS.md` it classifies as
-**design-stage**, gates on the design-audit + a deterministic secret scan, posts that audit as the PR review record, gets
+**design-stage**, gates on the design-audit + the Presentation lock (the `## Presentation (locked with the researcher
+<ISO date>)` header from Step 1 above) + a deterministic secret scan, posts that audit as the PR review record, gets
 opposite-family bot approval, and merges. It **reuses the already-run design-audit as its review record — it does NOT
 re-run the science.** **Do NOT dispatch the executor until this design-stage PR is merged.** This gate is
 substrate-neutral: it holds whether the executor is Claude, Codex, or any other substrate — there is no separate

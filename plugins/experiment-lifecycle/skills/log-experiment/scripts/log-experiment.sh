@@ -274,8 +274,17 @@ gate_design_stage() {
   # researcher <ISO date>)` (design-experiment SKILL.md, per the good example in
   # registry/csp1-author-sweep-1/DESIGN.md); a rerun inheriting a prior presentation by citation still carries
   # its own fresh lock date on this same header. Any heading level (#-######) is accepted.
-  grep -qE '^#{1,6}[[:space:]]*Presentation[[:space:]]*\(locked with the researcher [0-9]{4}-[0-9]{2}-[0-9]{2}\)' "$DIR/DESIGN.md" \
-    || die "design-stage dir's DESIGN.md has no locked Presentation section — expected a header like '## Presentation (locked with the researcher <ISO date>)' recording the researcher's explicit in-chat lock on what to plot/rollouts/page story — surface for human"
+  # The digit-shape [0-9]{4}-[0-9]{2}-[0-9]{2} alone accepts a nonsense date like 2026-99-99, so the extracted
+  # date must additionally round-trip through GNU `date` (CI is Linux) — a real calendar date reproduces
+  # itself, a fabricated one either fails to parse (empty output, redirected to /dev/null) or normalizes to a
+  # different string.
+  # `|| true` inside the substitution: under `pipefail` (set at the script top), a DESIGN.md with NO matching
+  # header at all makes the first grep exit non-zero with no output, which would otherwise trip `set -e` on
+  # this assignment and exit the script silently — before the `die` below ever runs.
+  _lock_date="$(grep -oE '^#{1,6}[[:space:]]*Presentation[[:space:]]*\(locked with the researcher [0-9]{4}-[0-9]{2}-[0-9]{2}\)' "$DIR/DESIGN.md" \
+    | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}' | head -n1 || true)"
+  [ -n "$_lock_date" ] && [ "$(date -ud "$_lock_date" +%F 2>/dev/null)" = "$_lock_date" ] \
+    || die "design-stage dir's DESIGN.md has no locked Presentation section — expected a header like '## Presentation (locked with the researcher <ISO date>)' recording the researcher's explicit in-chat lock on what to plot/rollouts/page story, with a real calendar date — surface for human"
   APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, and secret scan clean; pre-launch leg of the two-PR flow."
   note "design-stage gate ok: design-audit present + Presentation lock found (secret scan runs on the staged set)"
 }
