@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.44 (2026-07-14): revive #195's aar-profile discovery + START.md snapshot helper
+- experiment-lifecycle 0.3.45 (2026-07-14): revive #195's aar-profile discovery + START.md snapshot helper
   as a new `aar_profile_snapshot.sh` (`snapshot`/`check` verbs), and wire it into a real consumer, closing
   the #469 incident: three closed experiments (`csp1-author-sweep-1`, `csp1-orig250-attribution-1`,
   `csp1-orig250-attribution-2`) never got a viewer page because no START.md carried a
