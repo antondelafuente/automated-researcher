@@ -43,6 +43,12 @@ AUTHOR_FAMILY="${LOG_EXPERIMENT_AUTHOR_FAMILY:-${AAR_SUBSTRATE:-}}"   # the runn
 die()  { echo "BLOCK: $*" >&2; exit 1; }
 note() { echo "[log-experiment] $*" >&2; }
 
+# The aar-profile snapshot helper (#469) — a byte-identical copy of design-experiment/scripts/
+# aar_profile_snapshot.sh (checks.sh asserts the two stay in sync). gate_design_stage below is this
+# product's single deterministic owner of the `check` verb.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SNAPSHOT_HELPER="$SELF_DIR/aar_profile_snapshot.sh"
+
 # ---- instance-profile bridge (#258): fill UNSET non-secret config from aar-profile.{toml,json} ----
 # The #245 profile (`[github] research_repo`, `base_branch`) is the config home, but nothing bridged those
 # values into the vars this script reads, so a MANUAL/scripted `log-experiment.sh <dir>` on a correctly-
@@ -267,7 +273,17 @@ gate_design_stage() {
     if [[ "$(basename "$_f")" =~ ^DESIGN_AUDIT[0-9]*\.md$ ]]; then _da=1; break; fi
   done
   [ "$_da" = 1 ] || die "design-stage dir has DESIGN.md but no design-audit output (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md; a *_RESPONSE.md does not count) — surface for human"
-  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md) and secret scan clean; pre-launch leg of the two-PR flow."
+  # #469: verify the START.md instance-profile snapshot is present, parseable, and NOT STALE relative to
+  # the live profile — the deterministic gate that closes the silent viewer-publish miss (three closed
+  # experiments never got a dashboard entry because nothing ever wrote or checked this block; only a
+  # parenthetical mention of it existed in design-experiment/SKILL.md). This is the SINGLE enforcement
+  # owner (not design-audit, which stays scoped to data-trustability) — a profile-less or unknown-schema
+  # instance already failed closed at `aar_profile_snapshot.sh snapshot` time; this only re-verifies the
+  # frozen block still matches. A viewer-less profile is a legitimate manifest-only instance and passes.
+  [ -f "$DIR/START.md" ] || die "design-stage dir missing START.md — cannot verify its instance-profile snapshot (#469)"
+  _snap_out="$("$SNAPSHOT_HELPER" check "$DIR/START.md" 2>&1)" || die "instance-profile snapshot check failed: $_snap_out"
+  note "instance-profile snapshot: $_snap_out"
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), instance-profile snapshot in START.md verified (#469), and secret scan clean; pre-launch leg of the two-PR flow."
   note "design-stage gate ok: design-audit present (secret scan runs on the staged set)"
 }
 case "$KIND" in

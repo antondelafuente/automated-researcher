@@ -131,6 +131,20 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   done
 fi
 
+# 1f. experiment-lifecycle ships the aar_profile_snapshot.sh helper (#469) in both independently-installed
+#     skill dirs that need it (design-experiment writes the snapshot; log-experiment's design-stage gate
+#     reads it back with `check`), same per-skill-copy + drift-check precedent as SCHEMA.md (1e) and
+#     feedback-loop's init helper (1d). Keep the copies byte-identical.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|log-experiment)/scripts/aar_profile_snapshot\.sh$'; then
+  DE_SNAP="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot.sh"
+  LE_SNAP="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/aar_profile_snapshot.sh"
+  if [ -f "$DE_SNAP" ] && [ -f "$LE_SNAP" ] && cmp -s "$DE_SNAP" "$LE_SNAP"; then
+    ok "aar_profile_snapshot.sh copies match"
+  else
+    err "aar_profile_snapshot.sh copies drift; keep design-experiment and log-experiment copies byte-identical"
+  fi
+fi
+
 # 2. shell syntax — *.sh AND extensionless shell scripts (e.g. .githooks/* hooks) detected by shebang
 for p in "${PATHS[@]}"; do
   [ -f "$p" ] || continue
@@ -274,6 +288,35 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
     bash "$LE_SMOKE" >&2 && ok "log-experiment secret-scan smoke" || err "log-experiment secret-scan smoke FAILED"
   else
     err "log-experiment.sh changed but log_experiment_secret_scan_smoke.sh missing — cannot verify the secret scan"
+  fi
+fi
+
+# 10c2. log-experiment design-stage snapshot-gate smoke (#469): gate_design_stage's addition — a
+#      design-stage record's START.md must carry an instance-profile snapshot that is present, parseable,
+#      and not stale (aar_profile_snapshot.sh check) — the single deterministic enforcement owner that
+#      closes the silent viewer-publish miss (#347). Runs when log-experiment.sh, either
+#      aar_profile_snapshot.sh copy, or this smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(log-experiment/scripts/(log-experiment\.sh|aar_profile_snapshot\.sh|log_experiment_design_stage_snapshot_smoke\.sh)|design-experiment/scripts/aar_profile_snapshot\.sh)$'; then
+  DS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_design_stage_snapshot_smoke.sh"
+  if [ -f "$DS_SMOKE" ]; then
+    echo "[checks] log-experiment design-stage snapshot-gate smoke" >&2
+    bash "$DS_SMOKE" >&2 && ok "log-experiment design-stage snapshot-gate smoke" || err "log-experiment design-stage snapshot-gate smoke FAILED"
+  else
+    err "log-experiment.sh or aar_profile_snapshot.sh changed but log_experiment_design_stage_snapshot_smoke.sh missing — cannot verify the design-stage snapshot gate"
+  fi
+fi
+
+# 10c3. aar_profile_snapshot.sh helper smoke (#469): the snapshot/check round-trip itself (write, idempotent
+#      re-write, staleness detection, fail-closed on a missing/unknown-schema profile, the
+#      [recipes.viewer]-optional manifest-only path, and a tampered-snapshot presence mismatch), independent
+#      of the log-experiment gate integration covered above. Runs when either copy or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(design-experiment|log-experiment)/scripts/aar_profile_snapshot(_smoke)?\.sh$'; then
+  APS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/design-experiment/scripts/aar_profile_snapshot_smoke.sh"
+  if [ -f "$APS_SMOKE" ]; then
+    echo "[checks] aar_profile_snapshot smoke" >&2
+    bash "$APS_SMOKE" "$ROOT" >&2 && ok "aar_profile_snapshot smoke" || err "aar_profile_snapshot smoke FAILED"
+  else
+    err "aar_profile_snapshot.sh changed but aar_profile_snapshot_smoke.sh missing — cannot verify the snapshot helper"
   fi
 fi
 

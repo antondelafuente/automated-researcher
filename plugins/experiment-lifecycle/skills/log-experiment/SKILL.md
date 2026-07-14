@@ -73,8 +73,14 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   record). Like the experiment gate it verifies the audit is *present*, not that every finding was resolved (a
   machine-readable triage status is the same documented future hardening; the researcher invoking this at
   design time **is** the clearance act). It **also runs the deterministic secret scan** — a `DESIGN.md`-only
-  dir was secret-scanned as a `note` before this kind existed, so design-stage must not drop that scan. A
-  missing design-audit, or a secret hit, BLOCKS.
+  dir was secret-scanned as a `note` before this kind existed, so design-stage must not drop that scan. It
+  **also verifies the `START.md` instance-profile snapshot** (`aar_profile_snapshot.sh check`, #469) — the
+  single deterministic owner of that check: BLOCK unless `START.md` is present, carries the fenced-TOML
+  `## Instance profile (snapshot)` block `design-experiment`'s Step 3 writes, and that block's
+  `profile_sha256` still matches the live instance profile (not stale). A `[recipes.viewer]`-less snapshot
+  is a legitimate manifest-only instance and passes; a missing/stale/unparseable snapshot does not — this
+  closes the #347 silent miss where three closed experiments never got a viewer page because nothing ever
+  wrote or checked this block. A missing design-audit, a secret hit, or a missing/stale snapshot, BLOCKS.
 - **Note.** A note has nothing to adversarially audit, so there is **no LLM review** — only a deterministic
   scan for secret-value patterns (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys). A hit BLOCKS.
 
@@ -125,6 +131,9 @@ For an **experiment** or **design-stage** PR, the already-run audit is **surface
 
 - **`run-experiment`** — produces the registry record this logs (and runs the close-audit the experiment
   gate verifies).
+- **`design-experiment`** — writes the `START.md` instance-profile snapshot (`scripts/aar_profile_snapshot.sh
+  snapshot`) the design-stage gate verifies; this skill ships a byte-identical copy of that helper (`check`
+  verb only) so the gate has no cross-plugin path dependency.
 - **gh** — PR create / review / merge.
 - The research repo's per-dir `.gitignore` keeps large artifacts on R2; `git add` honors it, so only the
   lightweight record lands — the ignored-file guard above catches the case where it excludes something that
