@@ -72,20 +72,52 @@ are not.** Pin:
   researcher's separate analysis step. (Hygiene survives: a read *fitted* from the data is a postdiction — unverified; if
   load-bearing, test on FRESH data.)
 - **Presentation — per figure/table, what it plots and what that requires, concrete enough to render
-  unattended.** For each headline figure or table the experiment will produce: what it plots — the plot type, the
-  arms/series on it, the canonical metric and axes — and which columns/fields it needs at what granularity
-  (per-arm? per-row? aggregated?), down to the per-cell data source (e.g. one transcript log per {arm ×
-  condition}, and which field is the score). The bar: a stranger could render each declared figure from the
-  collected artifacts alone, without asking you — because at close, the executor will (the `run-experiment`
-  publish leg; when the instance profile carries a `[recipes.viewer]` pointer, the standard profile snapshot
-  into `START.md` carries it like any other recipe pointer, and the executor's publish leg reads only that
-  snapshot). Still **never what it should show** (no pre-registered verdict here either; this is a
-  data-organization spec, same posture as the rest of `DESIGN.md`). Cover both halves: the headline-figure spec,
-  and the dataset/column organization (training + eval datasets, which columns are worth surfacing) — so both get
-  cleared by the researcher in this SAME design-clearance pass, with no separate gate. This is what `design-audit`
-  (Step 2) checks the data-collection plan actually persists and can render. The figure captions, story wording, and the experiment's human-facing
-  title follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an optional env var naming a path or
-  URI) is set — unset, the plain-language requirement above stands on its own.
+  unattended — PROPOSED in-chat and explicitly LOCKED by the researcher (researcher-requested, 2026-07-14:
+  "I would like the designer to propose what to plot, what rollouts to show etc so I can just say looks good
+  or change things. Also it should be plain simple language").** For each headline figure or table the
+  experiment will produce: what it plots — the plot type, the arms/series on it, the canonical metric and axes
+  — and which columns/fields it needs at what granularity (per-arm? per-row? aggregated?), down to the per-cell
+  data source (e.g. one transcript log per {arm × condition}, and which field is the score). The bar: a
+  stranger could render each declared figure from the collected artifacts alone, without asking you — because
+  at close, the executor will (the `run-experiment` publish leg; when the instance profile carries a
+  `[recipes.viewer]` pointer, the standard profile snapshot into `START.md` carries it like any other recipe
+  pointer, and the executor's publish leg reads only that snapshot). Still **never what it should show** (no
+  pre-registered verdict here either; this is a data-organization spec, same posture as the rest of
+  `DESIGN.md`). Cover both halves: the headline-figure spec, and the dataset/column organization (training +
+  eval datasets, which columns are worth surfacing) — so both get cleared by the researcher in this SAME
+  design-clearance pass, with no separate gate. This is what `design-audit` (Step 2) checks the
+  data-collection plan actually persists and can render (the design-audit's scope is unchanged by the lock
+  below — it still only checks renderability, never the lock itself, since design-audit runs BEFORE the
+  clearance pass that produces the lock).
+  - **Propose it explicitly, in-chat, in plain language, before lock.** State three things in the conversation,
+    each in plain simple sentences (no jargon; visual structure only, never a predicted finding — same
+    no-verdict posture as the rest of `DESIGN.md`), and give a recommendation on each so the researcher can
+    just say "looks good" or ask for changes:
+    - **What to plot** — the headline figure(s): plot form, axes, series/arms, with your recommendation (a
+      cheap sketch/mock where it helps).
+    - **What rollouts/transcripts to show** — as **selection RULES, not hand-picked examples** (the data
+      doesn't exist yet at design time): which cells (arm × condition), how many per cell, and the sampling
+      criterion (e.g. "first 3 by row id", "one refusal + one comply per arm"). An experiment with no rollouts
+      states that and proposes the table/dataset view instead.
+    - **The page story** — one plain sentence per figure on what the reader will be looking at (visual
+      structure, not outcome; no jargon; `STYLE.md` / `AAR_STYLE_GUIDE` register).
+  - **The lock is machine-checkable.** Once the researcher gives an explicit word on the proposal (approval or
+    requested changes, iterated till they say it's good), the Presentation section header records it:
+    `## Presentation (locked with the researcher <ISO date>)` — following the existing good example in
+    `registry/csp1-author-sweep-1/DESIGN.md`. Design clearance is **incomplete without this lock** — it is a
+    named load-bearing choice, same standing as arms/metric/comparability. If the presentation changes after
+    lock (e.g. a design-audit finding forces a data change that breaks a figure), re-propose and re-lock with a
+    new date. A rerun/replication may **inherit a prior experiment's locked presentation by citation**
+    ("presentation as csp1-X, re-locked `<date>`") instead of re-proposing from scratch — the researcher still
+    gets the one-line ask and the header still carries a fresh lock date.
+  - **Enforcement lives at design-stage logging (`log-experiment`), NOT design-audit** — design-audit runs
+    BEFORE final clearance, so it cannot check a lock that clearance itself produces; the `log-experiment`
+    design-stage gate greps the Presentation header for the lock line and BLOCKS the design-stage PR without
+    it (see that skill for the exact check).
+
+  The figure captions, story wording, and the experiment's human-facing title follow the instance's prose
+  style guide when `AAR_STYLE_GUIDE` (an optional env var naming a path or URI) is set — unset, the
+  plain-language requirement above stands on its own.
 - **Provenance gets verified or flagged, never asserted.** Before stating any lineage/provenance, sweep the archive for
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
