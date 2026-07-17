@@ -11,8 +11,10 @@
 # parenthetical mention in design-experiment/SKILL.md, so a designer had to remember an aside.
 #
 # Deliberately narrow: only [github] + [recipes.viewer] are read/snapshotted here — never
-# [recipes.visualization_*], which `visualize-results` resolves LIVE by design (see the role-split section
-# of ../references/SCHEMA.md). Identity/protection/other-recipe fields are out of THIS slice (#469's
+# [recipes.visualization_*], which `update-site` resolves LIVE by design (see the role-split section
+# of ../references/SCHEMA.md). `update-dashboard` also resolves [recipes.viewer] itself, live, for its
+# own post-close purposes (#484) — a second, narrower live reader of this snapshot's own key.
+# Identity/protection/other-recipe fields are out of THIS slice (#469's
 # re-scope); a future pass may extend the snapshot to the full #153 field set — this block is additive, so
 # that would not conflict with what's written here.
 #

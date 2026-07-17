@@ -217,8 +217,9 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   `aar-profile` once (the SCHEMA.md discovery order), fails closed with a one-line `BLOCKED: …` if no
   profile is discoverable or its `schema_version` is unknown, and writes/replaces the fenced-TOML
   `## Instance profile (snapshot)` block the `START` template already carries a placeholder for — `[github]` +
-  `[recipes.viewer]` only (never `[recipes.visualization_*]`, which `visualize-results` resolves live by
-  design). This is what the `log-experiment` design-stage gate (below, and see that skill) verifies is present
+  `[recipes.viewer]` only (never `[recipes.visualization_*]`, which `update-site` resolves live by
+  design; `update-dashboard` also resolves `[recipes.viewer]` itself, live, for its own post-close purposes
+  — see that skill). This is what the `log-experiment` design-stage gate (below, and see that skill) verifies is present
   and not stale before the design PR can merge — the deterministic fix for the #347 silent miss (three closed
   experiments never got a viewer page because nothing ever wrote or checked this block; only a parenthetical
   mention of it existed here). In a **multi-arm wave**, run this once per START.md — each independently

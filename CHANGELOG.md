@@ -1,3 +1,25 @@
+- experiment-lifecycle 0.3.46 (2026-07-17): disambiguate the two visualization surfaces that kept getting
+  confused (#484). Real incident: "update the dashboard" routed into `visualize-results` (its trigger words
+  also captured dashboard requests) → editorial preview-claim machinery → the researcher corrected mid-flight
+  and the dashboard edit was done by hand instead. Two changes. (1) Rename `visualize-results` →
+  `update-site`, re-scoped in its frontmatter/body to the cross-experiment EDITORIAL `site/` surface only —
+  the recipe pointer names (`[recipes.visualization_preview]`/`[recipes.visualization_publish]`) are
+  unchanged, only the skill name/description moved; every cross-reference (design-experiment, the
+  byte-identical aar-profile `SCHEMA.md` triple, both `aar_profile_snapshot.sh` copies, README, marketplace,
+  the plugin manifest) is swept. (2) New skill `update-dashboard`: the researcher-driven, post-close edit
+  loop for ONE experiment's operational `dashboard/` page. It live-resolves `[recipes.viewer]` (a NEW live
+  reader of the SAME key `run-experiment`'s close leg already reads from its frozen `START.md` snapshot —
+  there is no locked brief left post-close to snapshot from) via a new `resolve_viewer_recipe.sh`, and
+  records the resolved recipe revision so a rebuild under a newer viewer recipe than the experiment's
+  original close is visible, not silent. Refuses (named BLOCK, points at `run-experiment`) unless the
+  experiment is already closed and a dashboard manifest/builder exists — an edit loop, not a first-build
+  path. Flow: resolve the record (`presentation_manifest.json` preferred) → read the viewer recipe doc →
+  edit the bespoke `build_<exp>_page.py` → rebuild page + gallery under the recipe's own interpreter/commands
+  → verify the served page renders (new section's heading text present; no `NaN` in the generated SVG) →
+  land the SOURCE only (builder + manifest, never generated `build/` output) via
+  `log-experiment.sh <dashboard-dir> --skip-ignored` (the note path). Both skills' frontmatter now states the
+  same routing rule, by destination/artifact rather than data scope (a single-experiment editorial story is
+  legitimate; a cross-experiment dashboard comparison still routes to `update-dashboard`).
 - experiment-lifecycle 0.3.45 (2026-07-14): revive #195's aar-profile discovery + START.md snapshot helper
   as a new `aar_profile_snapshot.sh` (`snapshot`/`check` verbs), and wire it into a real consumer, closing
   the #469 incident: three closed experiments (`csp1-author-sweep-1`, `csp1-orig250-attribution-1`,
