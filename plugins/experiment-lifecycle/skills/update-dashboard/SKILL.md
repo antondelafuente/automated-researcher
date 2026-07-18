@@ -6,8 +6,8 @@ description: >-
   exists post-close), records the resolved recipe revision so a rebuild under a newer viewer recipe than
   close-time is visible, edits the bespoke per-experiment `build_<exp>_page.py` builder, rebuilds the page
   + gallery, verifies the served page actually renders (heading text present, no NaN in generated SVG),
-  and lands the SOURCE change (builder + manifest, never generated `build/` output) via `log-experiment.sh
-  --skip-ignored`. Refuses (BLOCK, points at `run-experiment`) unless the experiment is already CLOSED and
+  and lands the SOURCE change (builder + manifest, never generated `build/` output) via the `log-experiment`
+  skill (`--skip-ignored`). Refuses (BLOCK, points at `run-experiment`) unless the experiment is already CLOSED and
   a dashboard manifest/builder already exists — this is an EDIT loop, not the first-build path. **Routing
   (destination/artifact, not data scope — a cross-experiment comparison still belongs here if it's landing
   on the dashboard):** a per-experiment OPERATIONAL page in `dashboard/` → this skill; a cross-experiment
@@ -62,7 +62,7 @@ improvise a dashboard location. An unconfigured `[recipes.viewer]` means the ins
 `run-experiment`'s publish leg) — there is no dashboard to edit, so this skill has nothing to do.
 
 **Record the resolved revision in the diff itself — don't let a newer recipe rebuild silently.** The
-printed `VIEWER_GIT_REF`/`VIEWER_SHA256` is the recipe **revision** live right now. `log-experiment.sh`
+printed `VIEWER_GIT_REF`/`VIEWER_SHA256` is the recipe **revision** live right now. `log-experiment`
 hard-codes its commit/PR messages by design (see Step 4) — this skill never touches that — so the revision
 is recorded a different way: maintain a header comment line at the top of the edited `build_<exp>_page.py`,
 
@@ -144,38 +144,35 @@ landing repo/directory when the doc's body omits one.
 Land **only the source** — the edited `build_<exp>_page.py` + `presentation_manifest.json` (if it changed)
 — never the generated `build/` output, which stays uncommitted per the dashboard repo's own `.gitignore`.
 
-`log-experiment.sh` must be invoked from a checkout of the dashboard's own repo — the repo the recipe
-**doc's body** names (Step 2, item 1), never `VIEWER_REPO` (that field only locates the recipe document
-itself, and may point at an entirely different repo) — on that repo's own gated landing **subdirectory**,
-never on a repo root. Resolve both the repo and the subdirectory from the recipe doc's body, then pass the
-subdirectory relative to the checkout root:
+**Invoke the `log-experiment` skill; let it resolve its own script** — never hardcode a path to another
+plugin's scripts (installs are version-pinned; the companion skill is the stable interface, the same
+convention `design-experiment`'s SKILL.md states for its own `verify-claims` dependency). Concretely: **invoke
+the `log-experiment` skill on the dashboard subdirectory (with `--skip-ignored`), from the research-repo
+checkout** — cwd/checkout is a checkout of the dashboard's own repo, the repo the recipe **doc's body** names
+(Step 2, item 1), never `VIEWER_REPO` (that field only locates the recipe document itself, and may point at
+an entirely different repo); the argument you pass it is that repo's own gated landing **subdirectory**,
+never a repo root. Resolve both the repo and the subdirectory from the recipe doc's body, then pass the
+subdirectory relative to the checkout root as the skill's registry-dir argument, plus `--skip-ignored`.
 
-```bash
-scripts/log-experiment.sh <dashboard-subdir> --skip-ignored
-```
+`log-experiment` computes the branch name from the input directory's path *relative to the checkout root*;
+passed the checkout root itself, that relative path is `.`, which is not a valid branch component.
+**Require the resolved path to be a real subdirectory (relative path != `.`)** before invoking the skill. If
+the recipe resolves the dashboard to the repo root itself — an instance whose dashboard IS its own repository
+root — that is a **recipe/instance-config gap, not something this skill improvises around**: emit a named
+BLOCK ("viewer recipe's landing path is the repo root, not a subdirectory — land this manually, or fix the
+recipe to name a subdirectory") and stop; never invent a branch name or restructure the checkout to force a
+subdirectory.
 
-(e.g. `scripts/log-experiment.sh dashboard` when the instance's dashboard lives at
-`<research-repo>/dashboard/`.) `log-experiment.sh` computes the branch name from the input directory's path
-*relative to the checkout root*; passed the checkout root itself, that relative path is `.`, which is not a
-valid branch component. **Require the resolved path to be a real subdirectory (relative path != `.`)**
-before invoking the script. If the recipe resolves the dashboard to the repo root itself — an instance whose
-dashboard IS its own repository root — that is a
-**recipe/instance-config gap, not something this skill improvises around**: emit a named BLOCK ("viewer
-recipe's landing path is the repo root, not a subdirectory — land this manually, or fix the recipe to name
-a subdirectory") and stop; never invent a branch name or restructure the checkout to force a subdirectory.
-
-(`log-experiment.sh` lives in the `log-experiment` skill; invoke it, don't reimplement its branch/PR/
-cross-family-approve/merge mechanics.) This is the **note** path — the dashboard subdirectory carries no
-`DESIGN.md`/`RESULTS.md`, so `log-experiment` classifies it as a note (deterministic secret scan only, no
-audit gate). `--skip-ignored` acknowledges the dashboard's own intentional gitignored caches
-(`data_cache`/`build/`-style exclusions) — it does **not** bypass `log-experiment`'s committed-claim check,
-so a doc that still claims an excluded file "is committed" still BLOCKs regardless. The committed diff must
-be builder source + manifest only; generated `build/` output stays out per the dashboard repo's own ignore
-rules. If the dashboard's repo (as the recipe doc's body names it) differs from the instance's default
-research repo (a genuinely separate viewer repo, the common case for a dashboard), set `RESEARCH_REPO` to
-that doc-named repo — never to `VIEWER_REPO`, which only locates the recipe document and may live in a
-wholly different repo from the dashboard itself — before invoking `log-experiment.sh`; its own
-`origin`-must-match-`RESEARCH_REPO` gate otherwise fails closed against the wrong repo.
+This is the **note** path — the dashboard subdirectory carries no `DESIGN.md`/`RESULTS.md`, so `log-experiment`
+classifies it as a note (deterministic secret scan only, no audit gate). `--skip-ignored` acknowledges the
+dashboard's own intentional gitignored caches (`data_cache`/`build/`-style exclusions) — it does **not**
+bypass `log-experiment`'s committed-claim check, so a doc that still claims an excluded file "is committed"
+still BLOCKs regardless. The committed diff must be builder source + manifest only; generated `build/` output
+stays out per the dashboard repo's own ignore rules. If the dashboard's repo (as the recipe doc's body names
+it) differs from the instance's default research repo (a genuinely separate viewer repo, the common case for
+a dashboard), set `RESEARCH_REPO` to that doc-named repo — never to `VIEWER_REPO`, which only locates the
+recipe document and may live in a wholly different repo from the dashboard itself — before invoking the
+skill; its own `origin`-must-match-`RESEARCH_REPO` gate otherwise fails closed against the wrong repo.
 
 ## Failure behavior — named BLOCKs only, never improvisation
 
