@@ -94,11 +94,24 @@ agentic-engineering#43).
   fact-checked the dispute's claimed `--skip-ignored` escape and it didn't exist, so an invented safeguard
   undermines the dispute worse than not disputing at all.
 - **Accepted residual risk:** the implementor agent executes repo-controlled code (tests, hooks) while
-  holding its API key and a short-lived write-scoped GitHub token. Acceptable on this private,
-  single-author repo; revisit before adding outside collaborators. `checks.yml`'s required-status job
+  holding its API key and a short-lived write-scoped GitHub token. `checks.yml`'s required-status job
   carries the same residual risk on the same basis: it passes the `ANTHROPIC_API_KEY` repo secret to
   `.aar-ci/checks.sh` (read-only `GITHUB_TOKEN`, no write permissions) so `fake_home_smoke.sh` can run
-  `claude plugin` headlessly on a GitHub runner (#396).
+  `claude plugin` headlessly on a GitHub runner (#396). **This repo is PUBLIC** (re-verified live
+  2026-07-18, #492) — the acceptance no longer rests on "private, single-author"; it rests on three
+  currently-true mechanisms instead: (a) GitHub withholds repo secrets from fork-PR `pull_request` runs
+  (`checks.yml` triggers on `pull_request`, never `pull_request_target`), so a fork PR cannot read
+  `ANTHROPIC_API_KEY` — its `checks` status fails/skips instead, so an outside PR can't go green without
+  maintainer involvement; (b) `implement-on-ready.yml` — the job that holds the write-scoped token — only
+  dispatches on `issues: labeled`, and its authorize step re-fetches the issue's live author + labels
+  (fresh, before any token is minted) against a hard-coded allowlist, so an outsider cannot trigger it by
+  labeling or by `workflow_dispatch`; (c) the implementor only ever executes code from branches a
+  collaborator or the two engineer bots pushed, never fork-controlled content. Fork-PR workflow-approval
+  is confirmed set to `all_external_contributors` (re-verified live 2026-07-18, #492) — stricter than the
+  `first_time_contributors` default, requiring maintainer approval before ANY outside-collaborator fork-PR
+  workflow run, not just a contributor's first. Outside *contributions* (fork PRs opened by non-collaborators)
+  are consequently not yet a supported path on this basis alone: before accepting them, re-audit which
+  secrets a green fork-PR run could reach and revisit this note.
 - **Re-entry / retry:** re-dispatch an issue by removing and re-adding `ready`, or via
   `workflow_dispatch`. Post-review fixes ride `address-review.yml`'s mention flow instead: an allowlisted
   `@claude-code-engineer` comment on the PR re-dispatches the pinned CLI onto the same PR branch

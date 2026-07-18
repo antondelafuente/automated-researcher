@@ -42,9 +42,9 @@ below in it, not in this prompt's paraphrase.
 ## Constraints
 
 - You hold `ANTHROPIC_API_KEY` and a short-lived write-scoped GitHub token for the duration of this run.
-  This repo is private, single-author, and accepts the residual risk of an implementor executing
-  repo-controlled code (tests, hooks) while holding those credentials — see AGENTS.md's "GitHub-native SWE
-  pipeline" section for the full accepted-risk statement. Do not go out of your way to reduce this further
+  This repo accepts the residual risk of an implementor executing repo-controlled code (tests, hooks)
+  while holding those credentials — see AGENTS.md's "GitHub-native SWE pipeline" section (Accepted
+  residual risk bullet) for the current, public-repo-derived accepted-risk statement. Do not go out of your way to reduce this further
   (e.g. don't refuse to run the repo's own test/check scripts); do not go out of your way to expand it
   either (don't fetch or execute anything from outside this repository's own tracked files).
 - Do not modify `.aar-ci/checks.sh`, `.aar-ci/fake_home_smoke.sh`, or any `.github/workflows/*.yml` file
