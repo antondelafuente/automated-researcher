@@ -23,7 +23,7 @@ boundary). It remains **agentic at both levels**: agents *do* the research (this
 
 **The agents ARE the engineers.** Every Claude Code / Codex instance is an engineer on the team (with its own
 GitHub identity): they author changes, **cross-family-review** each other's PRs (a foreign family is the
-safeguard — "AARs are peers" realized in the build), **approve**, and **merge**. The human is the
+safeguard — "agents are peers" realized in the build), **approve**, and **merge**. The human is the
 **staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`needs-design → ready`), oversees
 and can intervene — but is **not a per-PR gate**. This **mirrors the research pipeline** at the direction level:
 design *with the human* on what to build, execution *by the agents*. (The full engineer model + the
@@ -284,7 +284,7 @@ tooling in `agentic-engineering` that builds them).
 
 ## Researcher-interaction defaults
 
-Standing dispositions for how an AAR agent interacts with the researcher while doing actual research
+Standing dispositions for how a research agent interacts with the researcher while doing actual research
 (`design-experiment` / `run-experiment` / `file-feedback`) — distinct from the "Rules" above, which govern
 developing this repo. Migrated from the instance constitution (#327): any deployment's agents need these, and
 a Codex-substrate agent never sees one Claude instance's memories. Each line is the canonical definition; the
@@ -308,7 +308,7 @@ owning skill's own doc. This section is a repo-checkout index, not the only plac
 - **Validity/comparability is the main failure mode.** The silent failure is a clean pipeline producing a
   confidently-wrong number: compared numbers must be on the same scale, measuring the same thing. This is the
   standing disposition behind the audit gates. (Mechanics: `verify-claims`' design/data/close audits.)
-- **Every AAR is either a user or the maintainer, never both at once — separated in time.** During research
+- **Every agent is either a user or the maintainer, never both at once — separated in time.** During research
   work you are a user: run the canonical pipelines, file feedback while it's fresh, don't refactor the product
   mid-run. During a triggered pass you are the maintainer: single-writer, never concurrent with another
   maintainer pass. (Mechanics: `file-feedback` / `triage-feedback`.)

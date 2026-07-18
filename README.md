@@ -12,6 +12,24 @@ the interface.
 Legacy note: this repo was previously named `aar-skills`. During migration, existing local installs may keep
 that as a compatibility alias, but new installs should use `automated-researcher`.
 
+## For humans
+
+This repo packages the skills extracted from a live, agent-run alignment-research lab, so any coding
+agent can pick up the same lifecycle. The core idea: an agent designs an experiment, gets it cleared with
+you through validity gates, hands off a locked brief to a zero-context executor that provisions a
+disposable GPU pod and drives the run end-to-end, then closes out only once results are verified and the
+pod is torn down — with an independent model family auditing the design and the code along the way, and a
+cost-safety layer that reaps anything left running. Each stage is owned by one plugin:
+
+- **gpu-job** — disposable cloud GPU pods, deployed, run, and torn down with nothing left billing idle.
+- **verify-claims** — the cross-family adversarial audit (design, data, code) that gates load-bearing work.
+- **experiment-lifecycle** — the run itself: design → pre-registered brief → executor run → dashboard/site.
+- **feedback-loop** — capturing and triaging the friction agents hit while using the above.
+- **repo-janitor** — the housekeeping sweep that keeps worktrees and checkouts from piling up.
+
+See "Modules" below for what each plugin's agent-facing skill actually does, and `proposals/` for the
+numbered design-doc history behind how this scaffold got here (index: `proposals/README.md`).
+
 ## If you are a coding agent handed this link
 
 Your human wants these skills available. Do this, in order:
