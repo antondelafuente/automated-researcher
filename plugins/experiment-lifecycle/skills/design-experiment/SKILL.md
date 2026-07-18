@@ -64,8 +64,9 @@ are not.** Pin:
   one; the default is measurement.)
 - **What's measured + comparability (the load-bearing core).** The arms; the canonical metric with **EXACT eval
   definitions** (load-bearing); **comparability** — the anchor-gate and co-measurement on ONE scale; the confound controls
-  that corrupt *the number*; **pinning the independent variable**; the data-audit + manifest. This is the rigor that earns
-  its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
+  that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
+  varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
+  is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
 - **RESULTS describes the data, not a verdict.** `RESULTS.md` reports the numbers / the plot and **may include a
   lightweight, clearly-marked qualitative read** ("the data looks like X") that stays **separable from the numbers**. It
   must NOT make a rigorous pre-registered claim ("H confirmed / refuted at threshold") — the rigorous interpretation is the

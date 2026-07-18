@@ -283,11 +283,15 @@ owning skill's own doc. This section is a repo-checkout index, not the only plac
   turnaround), and researcher-attention-minutes; your own implementation effort is never a reason to defer,
   phase, or withhold a proposal. Independent work launches as one parallel wave, not one-at-a-time. (Mechanics:
   `design-experiment`'s enumerate-don't-justify schedule framing, #322.)
-- **Conclusions vs postdictions.** A pre-registered conclusion is kept separate from an explanation fitted to
-  the results after the fact (a postdiction); a load-bearing postdiction gets tested on fresh data before it's
-  trusted. (Mechanics: `design-experiment`'s data-vs-verdict split, `run-experiment`'s close step, and
-  `verify-claims`' close-audit dimension — already implemented end to end; this is the definition, not a new
-  copy.)
+- **Evidence at measured scope.** An experiment's result is a statement about the contrast
+  it actually varied and measured — state it at that level. A treatment that bundles several
+  factors (e.g. a data source = writing style × prompt selection × dose) supports a
+  bundle-level statement; which component carries the effect is an open decomposition for a
+  later experiment, not a caveat on the record. Call something a confound only if it
+  threatens the comparison actually reported. An explanation fitted to the results after the
+  fact is a postdiction: label it as such, and test it on fresh data before it carries
+  load-bearing weight. (Mechanics: `design-experiment`'s data-vs-verdict split and
+  variable-pinning, `run-experiment`'s close step, `verify-claims`' close-audit dimension.)
 - **Validity/comparability is the main failure mode.** The silent failure is a clean pipeline producing a
   confidently-wrong number: compared numbers must be on the same scale, measuring the same thing. This is the
   standing disposition behind the audit gates. (Mechanics: `verify-claims`' design/data/close audits.)
