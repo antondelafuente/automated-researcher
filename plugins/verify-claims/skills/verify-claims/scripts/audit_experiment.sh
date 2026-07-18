@@ -146,8 +146,11 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
 2. CONFOUNDS THAT CORRUPT THE NUMBER — are the planned comparisons matched; are the baselines and negative
    controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred? Is a nuisance
    variable (descriptor/length/format) confounded with the signal?
-3. VARIABLE-PINNING & HONEST REPORTING — is the independent variable actually pinned (only it varies across
-   arms)? Are components reported separately (not silently pooled), and parse%/coverage reported honestly?
+3. VARIABLE-PINNING & HONEST REPORTING — is the independent variable pinned at the level actually varied
+   (only it varies across arms; a bundled intervention — e.g. a data source = style × selection × dose — is
+   pinned as ONE named bundle)? Is the planned reporting stated at that same measured level — flag a design
+   that promises component attributions from a bundle-level contrast (overclaim), or that silently pools
+   arms/metrics its own spec said it would separate? Is parse%/coverage reported honestly?
 4. EXECUTION UNDER-SPECIFICATION — steps a zero-context executor would have to guess (datasets, composition
    of checkpoints, prompt formats), where a wrong guess silently changes the DATA.
 5. RIGHT / CHEAPEST DATA FOR THE PURPOSE — given what the design says the data is for, is THIS the right
