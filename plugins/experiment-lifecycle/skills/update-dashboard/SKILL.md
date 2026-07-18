@@ -6,8 +6,10 @@ description: >-
   exists post-close), records the resolved recipe revision so a rebuild under a newer viewer recipe than
   close-time is visible, edits the bespoke per-experiment `build_<exp>_page.py` builder, rebuilds the page
   + gallery, verifies the served page actually renders (heading text present, no NaN in generated SVG),
-  and lands the SOURCE change (builder + manifest, never generated `build/` output) via the `log-experiment`
-  skill (`--skip-ignored`). Refuses (BLOCK, points at `run-experiment`) unless the experiment is already CLOSED and
+  and lands the SOURCE change (builder + the dashboard's own manifest, never the registry record or
+  generated `build/` output) via the `log-experiment` skill (`--skip-ignored`). The experiment registry
+  record (`RESULTS.md`/`presentation_manifest.json`/`figures/*.csv`) is strictly READ-ONLY input here — this
+  skill writes only inside the dashboard directory it lands. Refuses (BLOCK, points at `run-experiment`) unless the experiment is already CLOSED and
   a dashboard manifest/builder already exists — this is an EDIT loop, not the first-build path. **Routing
   (destination/artifact, not data scope — a cross-experiment comparison still belongs here if it's landing
   on the dashboard):** a per-experiment OPERATIONAL page in `dashboard/` → this skill; a cross-experiment
@@ -98,6 +100,14 @@ Same discipline as any visualization pass: **prefer `presentation_manifest.json`
 headline figures, datasets) as the starting point over re-deriving structure from raw artifacts; verify any
 artifact you're about to reference in the edit actually exists at the path you cite.
 
+**Scope: the registry record is READ-ONLY input.** `RESULTS.md`, `presentation_manifest.json`, and
+`figures/*.csv` — and every other artifact in the experiment's registry dir — are read-only input to this
+skill: resolve titles, labels, headline figures, and datasets from them, but never edit them. This skill's
+only writable surface is inside the dashboard directory it lands: the per-experiment builder
+(`build_<exp>_page.py`) and the dashboard's own manifest (e.g. `manifests/<exp>.json`, if the recipe's
+viewer layout keeps one alongside the builder). **A desired change to the registry record itself is out of
+scope here — that is a separate `log-experiment` invocation on the registry experiment dir.**
+
 ## Step 2 — Read the viewer recipe doc
 
 The resolved fields (`VIEWER_REPO`/`VIEWER_PATH` for `kind=repo`, `VIEWER_URI` for `kind=uri`) locate the
@@ -141,8 +151,12 @@ landing repo/directory when the doc's body omits one.
 
 ## Step 4 — Land the source change
 
-Land **only the source** — the edited `build_<exp>_page.py` + `presentation_manifest.json` (if it changed)
-— never the generated `build/` output, which stays uncommitted per the dashboard repo's own `.gitignore`.
+Land **only the dashboard-directory source** — the edited `build_<exp>_page.py` and the dashboard's own
+manifest (if the recipe's viewer layout keeps one, e.g. `manifests/<exp>.json`) — never the generated
+`build/` output (stays uncommitted per the dashboard repo's own `.gitignore`), and never the registry's
+`presentation_manifest.json`: that file lives in the experiment's registry dir, is read-only input (Step
+1), and never travels in this landing. A desired change to it is a separate `log-experiment` invocation on
+the registry experiment dir, not part of this skill's scope.
 
 **Invoke the `log-experiment` skill; let it resolve its own script** — never hardcode a path to another
 plugin's scripts (installs are version-pinned; the companion skill is the stable interface, the same
@@ -167,7 +181,8 @@ This is the **note** path — the dashboard subdirectory carries no `DESIGN.md`/
 classifies it as a note (deterministic secret scan only, no audit gate). `--skip-ignored` acknowledges the
 dashboard's own intentional gitignored caches (`data_cache`/`build/`-style exclusions) — it does **not**
 bypass `log-experiment`'s committed-claim check, so a doc that still claims an excluded file "is committed"
-still BLOCKs regardless. The committed diff must be builder source + manifest only; generated `build/` output
+still BLOCKs regardless. The committed diff must be builder source + the dashboard's own manifest only
+(never the registry's `presentation_manifest.json` — out of scope per Step 1); generated `build/` output
 stays out per the dashboard repo's own ignore rules. If the dashboard's repo (as the recipe doc's body names
 it) differs from the instance's default research repo (a genuinely separate viewer repo, the common case for
 a dashboard), set `RESEARCH_REPO` to that doc-named repo — never to `VIEWER_REPO`, which only locates the
