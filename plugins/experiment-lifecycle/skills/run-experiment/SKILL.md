@@ -335,7 +335,7 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it per
   the ledger-status definition above (a gate stop is not automatically `technical-failure`; teardown urgency
   never depends on which) → **tear down (stop billing)** → notify the human → *then* discuss redesign. Do NOT
-  leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the AAR asked what
+  leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the agent asked what
   to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
   for a concrete, named debugging reason.
 - **The completion boundary (the safety gate):** tear down only once the upload is **verified** — *every artifact unique
