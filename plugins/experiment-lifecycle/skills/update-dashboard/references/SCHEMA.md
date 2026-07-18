@@ -34,9 +34,12 @@ for their own recipes — a second, narrowly-scoped live reader of this specific
 `run-experiment`'s snapshot-bound read of it.
 
 **The resolved recipe revision (`VIEWER_GIT_REF` for `kind=repo`, `VIEWER_SHA256` for `kind=uri`) is not
-just an implementation detail — the skill's own contract requires recording it** (see SKILL.md), so a
-dashboard rebuilt under a viewer recipe that has moved on since the experiment's original close is a visible
-fact in the commit/PR note, never a silent divergence.
+just an implementation detail — the skill's own contract requires recording it** (see SKILL.md's
+revision-tracking section): a `# viewer-recipe-rev: <git_ref or sha> (<ISO date>)` header comment line the
+skill maintains in the edited `build_<exp>_page.py`, updated on every edit pass — not the commit/PR message,
+which `log-experiment.sh` hard-codes by design. So a dashboard rebuilt under a viewer recipe that has moved
+on since the experiment's original close is a visible fact that travels with the landed source and its
+blame history, never a silent divergence.
 
 ## What this doc does NOT define
 

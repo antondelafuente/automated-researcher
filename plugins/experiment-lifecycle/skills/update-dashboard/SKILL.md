@@ -61,14 +61,23 @@ guessed repo, host, or worktree path. **A BLOCK here is a real stop**: report it
 improvise a dashboard location. An unconfigured `[recipes.viewer]` means the instance is manifest-only (see
 `run-experiment`'s publish leg) — there is no dashboard to edit, so this skill has nothing to do.
 
-**Record the resolved revision — don't let a newer recipe rebuild silently.** The printed
-`VIEWER_GIT_REF`/`VIEWER_SHA256` is the recipe **revision** live right now. Compare it against the
-experiment's own `START.md` `[recipes.viewer]` snapshot (from its original close, if the experiment went
-through `design-experiment`/`run-experiment`): if they differ, the dashboard is about to be rebuilt under a
-recipe that has moved on since close. Note this plainly in the commit/PR message ("viewer recipe advanced
-`<old-ref>` → `<new-ref>` since this experiment's close") — never rebuild silently as if nothing changed. No
-`START.md` to compare against (a pre-`design-experiment` record, or one predating the snapshot helper) is
-not a BLOCK; just record the live revision on its own.
+**Record the resolved revision in the diff itself — don't let a newer recipe rebuild silently.** The
+printed `VIEWER_GIT_REF`/`VIEWER_SHA256` is the recipe **revision** live right now. `log-experiment.sh`
+hard-codes its commit/PR messages by design (see Step 4) — this skill never touches that — so the revision
+is recorded a different way: maintain a header comment line at the top of the edited `build_<exp>_page.py`,
+
+```
+# viewer-recipe-rev: <git_ref or sha> (<ISO date>)
+```
+
+updated to the live-resolved revision and today's date on every edit pass (Step 3). That satisfies the
+visibility contract without new landing machinery: the revision travels with the landed source and its
+blame history, so a rebuild under a viewer recipe that has moved on since the experiment's original close is
+a visible fact, never a silent divergence. Compare the resolved revision against the experiment's own
+`START.md` `[recipes.viewer]` snapshot (from its original close, if the experiment went through
+`design-experiment`/`run-experiment`) for your own situational awareness while editing; no `START.md` to
+compare against (a pre-`design-experiment` record, or one predating the snapshot helper) is not a BLOCK —
+just write the live revision into the header line regardless.
 
 ## Preconditions — refuse if this looks like a first build, not an edit (guards against overlap with `run-experiment`'s close leg)
 
@@ -91,17 +100,22 @@ artifact you're about to reference in the edit actually exists at the path you c
 
 ## Step 2 — Read the viewer recipe doc
 
-The resolved fields point at a recipe **document** (repo + path + pinned commit, or a pinned URI) that is
-entirely instance-owned narrative. Read it; it names, at minimum (same four things `run-experiment`'s close
-leg requires of it):
-1. the viewer repo and its gated landing path;
+The resolved fields (`VIEWER_REPO`/`VIEWER_PATH` for `kind=repo`, `VIEWER_URI` for `kind=uri`) locate the
+recipe **document itself** — never the dashboard. **Never use those pointer fields as a landing target.**
+Read the resolved document's own body — entirely instance-owned narrative — to obtain the actual dashboard:
+it names, at minimum (same four things `run-experiment`'s close leg requires of it):
+1. **the dashboard's own viewer repo and its gated landing path (subdirectory)** — distinct from
+   `VIEWER_REPO`/`VIEWER_PATH` above, which only locate this document and may live in an entirely different
+   repo/path from the dashboard;
 2. the shared page-building library and at least one committed prior page as the pattern;
 3. the assemble → render → bundle → gallery-rebuild commands (or worked examples) — **and the interpreter**
    they run under;
 4. where per-experiment page source (`build_<exp>_page.py`) lives in the viewer repo.
 
-A resolved recipe missing any of these is a **named BLOCK** ("recipe doc does not name <which field>") —
-report it; do not improvise a build/interpreter/gallery command it didn't specify.
+A resolved recipe missing any of these — including a doc that never states a landing repo/directory — is a
+**named BLOCK** ("recipe doc does not name <which field>"); report it. Do not improvise a build/
+interpreter/gallery command it didn't specify, and never fall back to `VIEWER_REPO`/`VIEWER_PATH` as a
+landing repo/directory when the doc's body omits one.
 
 ## Step 3 — Edit the bespoke builder, rebuild, verify
 
@@ -109,7 +123,10 @@ report it; do not improvise a build/interpreter/gallery command it didn't specif
   generator; a template flattens the "tell this experiment's story" quality, same posture as `run-experiment`'s
   close leg and `update-site`). Missing the builder at the path the recipe names is a **named BLOCK**
   ("builder script not found at <path>") — this skill edits an existing builder, it does not scaffold one
-  from scratch (that gap belongs to `run-experiment`'s close leg or a first-build follow-up, not here).
+  from scratch (that gap belongs to `run-experiment`'s close leg or a first-build follow-up, not here). Add
+  or update the `# viewer-recipe-rev: <git_ref or sha> (<ISO date>)` header comment line to the live-resolved
+  revision from Step 2 as part of this edit — see "Record the resolved revision" above; this is the
+  revision-tracking mechanism, not a commit/PR message.
 - **Rebuild the page + gallery** with the recipe's own commands, under the recipe's named interpreter.
   Missing/unresolvable interpreter is a **named BLOCK** ("interpreter <name> not found") — never fall back
   to whatever `python`/`node`/etc. happens to be on `PATH`.
@@ -127,10 +144,11 @@ report it; do not improvise a build/interpreter/gallery command it didn't specif
 Land **only the source** — the edited `build_<exp>_page.py` + `presentation_manifest.json` (if it changed)
 — never the generated `build/` output, which stays uncommitted per the dashboard repo's own `.gitignore`.
 
-`log-experiment.sh` must be invoked from the RESEARCH-REPO checkout, on the dashboard's own
-**subdirectory** — never on a repo root. Resolve that subdirectory from the viewer recipe doc (Step 2's
-gated landing path, e.g. `VIEWER_PATH` from `resolve_viewer_recipe.sh`), then pass it relative to the
-checkout root:
+`log-experiment.sh` must be invoked from a checkout of the dashboard's own repo — the repo the recipe
+**doc's body** names (Step 2, item 1), never `VIEWER_REPO` (that field only locates the recipe document
+itself, and may point at an entirely different repo) — on that repo's own gated landing **subdirectory**,
+never on a repo root. Resolve both the repo and the subdirectory from the recipe doc's body, then pass the
+subdirectory relative to the checkout root:
 
 ```bash
 scripts/log-experiment.sh <dashboard-subdir> --skip-ignored
@@ -153,10 +171,11 @@ audit gate). `--skip-ignored` acknowledges the dashboard's own intentional gitig
 (`data_cache`/`build/`-style exclusions) — it does **not** bypass `log-experiment`'s committed-claim check,
 so a doc that still claims an excluded file "is committed" still BLOCKs regardless. The committed diff must
 be builder source + manifest only; generated `build/` output stays out per the dashboard repo's own ignore
-rules. If `[recipes.viewer]`'s repo differs from the instance's default research repo (a genuinely separate
-viewer repo, the common case for a dashboard), set `RESEARCH_REPO` to the recipe's resolved `VIEWER_REPO`
-before invoking `log-experiment.sh` — its own `origin`-must-match-`RESEARCH_REPO` gate otherwise fails
-closed against the wrong repo.
+rules. If the dashboard's repo (as the recipe doc's body names it) differs from the instance's default
+research repo (a genuinely separate viewer repo, the common case for a dashboard), set `RESEARCH_REPO` to
+that doc-named repo — never to `VIEWER_REPO`, which only locates the recipe document and may live in a
+wholly different repo from the dashboard itself — before invoking `log-experiment.sh`; its own
+`origin`-must-match-`RESEARCH_REPO` gate otherwise fails closed against the wrong repo.
 
 ## Failure behavior — named BLOCKs only, never improvisation
 
