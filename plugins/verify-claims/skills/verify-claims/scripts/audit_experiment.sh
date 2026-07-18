@@ -146,8 +146,11 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
 2. CONFOUNDS THAT CORRUPT THE NUMBER — are the planned comparisons matched; are the baselines and negative
    controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred? Is a nuisance
    variable (descriptor/length/format) confounded with the signal?
-3. VARIABLE-PINNING & HONEST REPORTING — is the independent variable actually pinned (only it varies across
-   arms)? Are components reported separately (not silently pooled), and parse%/coverage reported honestly?
+3. VARIABLE-PINNING & HONEST REPORTING — is the independent variable pinned at the level actually varied
+   (only it varies across arms; a bundled intervention — e.g. a data source = style × selection × dose — is
+   pinned as ONE named bundle)? Is the planned reporting stated at that same measured level — flag a design
+   that promises component attributions from a bundle-level contrast (overclaim), or that silently pools
+   arms/metrics its own spec said it would separate? Is parse%/coverage reported honestly?
 4. EXECUTION UNDER-SPECIFICATION — steps a zero-context executor would have to guess (datasets, composition
    of checkpoints, prompt formats), where a wrong guess silently changes the DATA.
 5. RIGHT / CHEAPEST DATA FOR THE PURPOSE — given what the design says the data is for, is THIS the right
@@ -275,7 +278,8 @@ and asserts NO pre-registered verdict is VALID and complete: do NOT flag it for 
 decision rule.' The most load-bearing standards: a fresh agent must reproduce the run and understand the DATA
 FROM THIS DIR ALONE; validity and comparability are the main failure mode; headline numbers must trace to
 durable, versioned code in the record, not ad-hoc steps. The interpretation backstop is CONDITIONAL: IF
-RESULTS *does* assert a rigorous claim/verdict, THEN it must not overclaim and its conclusions must be
+RESULTS *does* assert a rigorous claim/verdict, THEN it must not overclaim (including upgrading a bundle-level
+contrast into a component attribution the design never varied) and its conclusions must be
 separated from postdictions (fitted after).
 
 Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
@@ -294,7 +298,9 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    generator artifacts, or descriptor/format confounds in how the data was constructed? This is the
    'crappy generated data / confounded probe' failure class — inspect the rows, don't trust the JSON.
 5. CONCLUSIONS vs POSTDICTIONS — ONLY IF RESULTS asserts a verdict: are conclusions separated from
-   postdictions, postdictions flagged untested? A data-only RESULTS (numbers + lightweight read) needs none.
+   postdictions, postdictions flagged untested, and claims stated at the level the design actually varied
+   (not a bundle-level contrast upgraded into a component attribution)? A data-only RESULTS (numbers +
+   lightweight read) needs none.
 6. RECORDS SELF-SUFFICIENCY — could a fresh agent reproduce the headline results FROM THIS DIR ALONE
    (are the decisive artifacts/probes/logs present, not only referenced on remote storage)?
 7. HONEST BOUNDS — are the real limitations (n, single model/organism, in-sample fits, selected

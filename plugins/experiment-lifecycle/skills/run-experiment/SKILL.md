@@ -350,7 +350,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Write `RESULTS.md` FIRST — the experiment-close gate (do NOT skip).** Bar: *a fresh agent could reproduce this run
   and understand the data **from this dir alone**.* **Describe each arm's data (the numbers / the plot) per the DESIGN
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
-  assert a claim, separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm wave, not per-arm.
+  assert a claim, state it at the level the design varied — upgrading a bundle-level contrast into a component
+  attribution is overclaim — and separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm
+  wave, not per-arm.
 - **Write `presentation_manifest.json` next to `RESULTS.md` — unconditional, config-free.** Every close writes this file,
   whether or not an instance viewer is configured (a no-op consumer is fine — the manifest still stands alone as
   plain-language arm documentation). Required: `{title, labels: [{match, label}]}` (`title` — one plain sentence
@@ -535,7 +537,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   **Re-run finalists once** before believing them (best-of-N from noise fakes ≈ SE·√(2 ln N) — often bigger than the
   gaps you chase).
 - **Report the data `DESIGN.md` specifies** — don't move the goalposts post-hoc. Interpretation is the researcher's
-  separate step; if RESULTS *does* assert a claim, separate conclusions from postdictions (fitted after — unverified).
+  separate step; if RESULTS *does* assert a claim, state it at the level the design varied — upgrading a bundle-level
+  contrast into a component attribution is overclaim — and separate conclusions from postdictions (fitted after — unverified).
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
   autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
   human before launching.)
