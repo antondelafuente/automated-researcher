@@ -28,6 +28,9 @@ does **not** source `wf.sh`. (Why here: logging/auditing experiments is a resear
   `RESULTS.md` yet) should land as the design PR — the pre-launch leg of the two-PR flow.
 - A note/record (meeting notes, a gotcha, serving infra, a knowledge ingest) should land.
 - Anywhere you would otherwise hand-run "branch → PR → mint bot token → approve-as-bot → merge."
+- A quick interactive exploratory analysis should land as a note — see **`log-exploratory`** for the recipe
+  (run discipline, the `NOTE.md` skeleton, when to escalate to the audited pipeline instead); this skill is
+  what it invokes to actually land the result.
 
 ## How
 

@@ -353,6 +353,8 @@ design questions or steer the method — a real question still routes back to yo
 
 **When to keep the designer driving instead (per-experiment, reversible):** genuinely exploratory / iterative work where
 the design *is* the discovery and can't be fully pre-specified. For pre-registered, well-specified designs, dispatch it.
+For work that's deliberately below even that threshold — a quick interactive analysis that still deserves a durable
+record, not a locked design — see **`log-exploratory`** instead of running this skill's full pipeline.
 
 ## The feedback loop — the executor's gaps GRADE this skill
 

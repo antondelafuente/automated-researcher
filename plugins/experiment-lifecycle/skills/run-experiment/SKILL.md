@@ -584,3 +584,5 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - Your brief: `DESIGN.md` + `START.md` + `CHECKLIST.md` (produced by the `design-experiment` skill).
 - Backend: the **`gpu-job`** plugin (deploy / helpers / teardown). Gates: the **`verify-claims`** plugin
   (close audit + data audit). Instance specifics: your **execution profile**.
+- Work that's deliberately below this skill's threshold — a quick interactive experiment that still wants a
+  durable record, no locked brief, no close-audit — see **`log-exploratory`** instead.
