@@ -1,8 +1,9 @@
 # proposals/
 
 Historical design docs (ADR + PR description) for scaffold/product changes to this repo, one file per
-proposal, numbered by the GitHub Issue/PR they came from. Each was reviewed by the cross-family design
-review (`--scaffold`) before its change was built; they are a durable record of *why*, not living
+proposal, numbered by the GitHub Issue/PR they came from. Proposals generally received cross-family design
+review (`--scaffold`) before their change was built, with early bootstrap exceptions reviewed after the
+fact (`scaffold-design-review.md` documents its own); they are a durable record of *why*, not living
 documentation — see `AGENTS.md` / the module's own `SKILL.md` for current behavior.
 
 Historical note: older proposals and some script/path names use "AAR", from "Automated Alignment
