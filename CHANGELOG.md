@@ -17,7 +17,7 @@
   edit the bespoke `build_<exp>_page.py` → rebuild page + gallery under the recipe's own interpreter/commands
   → verify the served page renders (new section's heading text present; no `NaN` in the generated SVG) →
   land the SOURCE only (builder + manifest, never generated `build/` output) via
-  `log-experiment.sh <dashboard-dir> --skip-ignored` (the note path). Both skills' frontmatter now states the
+  `log-experiment.sh <dashboard-subdir> --skip-ignored` (the note path). Both skills' frontmatter now states the
   same routing rule, by destination/artifact rather than data scope (a single-experiment editorial story is
   legitimate; a cross-experiment dashboard comparison still routes to `update-dashboard`).
 - experiment-lifecycle 0.3.45 (2026-07-14): revive #195's aar-profile discovery + START.md snapshot helper

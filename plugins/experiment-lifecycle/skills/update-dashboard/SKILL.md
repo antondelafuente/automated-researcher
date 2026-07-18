@@ -127,20 +127,36 @@ report it; do not improvise a build/interpreter/gallery command it didn't specif
 Land **only the source** — the edited `build_<exp>_page.py` + `presentation_manifest.json` (if it changed)
 — never the generated `build/` output, which stays uncommitted per the dashboard repo's own `.gitignore`.
 
+`log-experiment.sh` must be invoked from the RESEARCH-REPO checkout, on the dashboard's own
+**subdirectory** — never on a repo root. Resolve that subdirectory from the viewer recipe doc (Step 2's
+gated landing path, e.g. `VIEWER_PATH` from `resolve_viewer_recipe.sh`), then pass it relative to the
+checkout root:
+
 ```bash
-scripts/log-experiment.sh <dashboard-dir> --skip-ignored
+scripts/log-experiment.sh <dashboard-subdir> --skip-ignored
 ```
 
+(e.g. `scripts/log-experiment.sh dashboard` when the instance's dashboard lives at
+`<research-repo>/dashboard/`.) `log-experiment.sh` computes the branch name from the input directory's path
+*relative to the checkout root*; passed the checkout root itself, that relative path is `.`, which is not a
+valid branch component. **Require the resolved path to be a real subdirectory (relative path != `.`)**
+before invoking the script. If the recipe resolves the dashboard to the repo root itself — an instance whose
+dashboard IS its own repository root — that is a
+**recipe/instance-config gap, not something this skill improvises around**: emit a named BLOCK ("viewer
+recipe's landing path is the repo root, not a subdirectory — land this manually, or fix the recipe to name
+a subdirectory") and stop; never invent a branch name or restructure the checkout to force a subdirectory.
+
 (`log-experiment.sh` lives in the `log-experiment` skill; invoke it, don't reimplement its branch/PR/
-cross-family-approve/merge mechanics.) This is the **note** path — a bare dashboard-repo directory carries
-no `DESIGN.md`/`RESULTS.md`, so `log-experiment` classifies it as a note (deterministic secret scan only, no
-audit gate). `--skip-ignored` acknowledges the dashboard's own `data_cache`/`build/`-style exclusions (the
-generated output this step deliberately never commits) — it does **not** bypass `log-experiment`'s
-committed-claim check, so a doc that still claims an excluded file "is committed" still BLOCKs regardless.
-If `[recipes.viewer]`'s repo differs from the instance's default research repo (a genuinely separate viewer
-repo, the common case for a dashboard), set `RESEARCH_REPO` to the recipe's resolved `VIEWER_REPO` before
-invoking `log-experiment.sh` — its own `origin`-must-match-`RESEARCH_REPO` gate otherwise fails closed
-against the wrong repo.
+cross-family-approve/merge mechanics.) This is the **note** path — the dashboard subdirectory carries no
+`DESIGN.md`/`RESULTS.md`, so `log-experiment` classifies it as a note (deterministic secret scan only, no
+audit gate). `--skip-ignored` acknowledges the dashboard's own intentional gitignored caches
+(`data_cache`/`build/`-style exclusions) — it does **not** bypass `log-experiment`'s committed-claim check,
+so a doc that still claims an excluded file "is committed" still BLOCKs regardless. The committed diff must
+be builder source + manifest only; generated `build/` output stays out per the dashboard repo's own ignore
+rules. If `[recipes.viewer]`'s repo differs from the instance's default research repo (a genuinely separate
+viewer repo, the common case for a dashboard), set `RESEARCH_REPO` to the recipe's resolved `VIEWER_REPO`
+before invoking `log-experiment.sh` — its own `origin`-must-match-`RESEARCH_REPO` gate otherwise fails
+closed against the wrong repo.
 
 ## Failure behavior — named BLOCKs only, never improvisation
 
