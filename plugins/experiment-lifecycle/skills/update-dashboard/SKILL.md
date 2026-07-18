@@ -64,18 +64,19 @@ improvise a dashboard location. An unconfigured `[recipes.viewer]` means the ins
 `run-experiment`'s publish leg) — there is no dashboard to edit, so this skill has nothing to do.
 
 **Record the resolved revision in the diff itself — don't let a newer recipe rebuild silently.** The
-printed `VIEWER_GIT_REF`/`VIEWER_SHA256` is the recipe **revision** live right now. `log-experiment`
-hard-codes its commit/PR messages by design (see Step 4) — this skill never touches that — so the revision
-is recorded a different way: maintain a header comment line at the top of the edited `build_<exp>_page.py`,
+`VIEWER_GIT_REF`/`VIEWER_SHA256` this resolver prints, and Step 2 then reads the recipe doc AT (never merely
+alongside), is the recipe **revision** live right now. `log-experiment` hard-codes its commit/PR messages by
+design (see Step 4) — this skill never touches that — so the revision is recorded a different way: maintain
+a header comment line at the top of the edited `build_<exp>_page.py`,
 
 ```
 # viewer-recipe-rev: <git_ref or sha> (<ISO date>)
 ```
 
-updated to the live-resolved revision and today's date on every edit pass (Step 3). That satisfies the
-visibility contract without new landing machinery: the revision travels with the landed source and its
-blame history, so a rebuild under a viewer recipe that has moved on since the experiment's original close is
-a visible fact, never a silent divergence. Compare the resolved revision against the experiment's own
+updated to the revision Step 2 actually verified and read (not merely what the resolver printed) and today's
+date, on every edit pass (Step 3). That satisfies the visibility contract without new landing machinery: the
+revision travels with the landed source and its blame history, so a rebuild under a viewer recipe that has
+moved on since the experiment's original close is a visible fact, never a silent divergence. Compare the resolved revision against the experiment's own
 `START.md` `[recipes.viewer]` snapshot (from its original close, if the experiment went through
 `design-experiment`/`run-experiment`) for your own situational awareness while editing; no `START.md` to
 compare against (a pre-`design-experiment` record, or one predating the snapshot helper) is not a BLOCK —
@@ -108,10 +109,24 @@ only writable surface is inside the dashboard directory it lands: the per-experi
 viewer layout keeps one alongside the builder). **A desired change to the registry record itself is out of
 scope here — that is a separate `log-experiment` invocation on the registry experiment dir.**
 
-## Step 2 — Read the viewer recipe doc
+## Step 2 — Read the viewer recipe doc, bound to its recorded revision
 
 The resolved fields (`VIEWER_REPO`/`VIEWER_PATH` for `kind=repo`, `VIEWER_URI` for `kind=uri`) locate the
 recipe **document itself** — never the dashboard. **Never use those pointer fields as a landing target.**
+
+**Bind the read to the exact revision `resolve_viewer_recipe.sh` resolved above — never the working-tree
+copy:**
+- **`kind=repo`**: read the doc with `git show <VIEWER_GIT_REF>:<VIEWER_PATH>` in a checkout of
+  `VIEWER_REPO` (fetch `VIEWER_GIT_REF` into that checkout first if it isn't already present locally).
+  Opening the file at that path in whatever branch the checkout happens to have checked out is not
+  equivalent — the working tree can be ahead of, behind, or on a different branch than the pinned commit,
+  which is exactly the drift the pin exists to prevent.
+- **`kind=uri`**: fetch the bytes at `VIEWER_URI`, compute their sha256, and verify it equals
+  `VIEWER_SHA256` **before** reading any of it as the recipe.
+- **A `git show` failure (ref unknown even after fetching, or the path doesn't exist at that ref) or a
+  sha256 mismatch is a named BLOCK** ("recipe doc unreadable at pinned revision `<ref/sha>`") — never fall
+  back to reading the working-tree copy instead.
+
 Read the resolved document's own body — entirely instance-owned narrative — to obtain the actual dashboard:
 it names, at minimum (same four things `run-experiment`'s close leg requires of it):
 1. **the dashboard's own viewer repo and its gated landing path (subdirectory)** — distinct from
