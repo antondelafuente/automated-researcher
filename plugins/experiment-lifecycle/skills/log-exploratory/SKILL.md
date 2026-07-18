@@ -71,10 +71,11 @@ warrant one; for a small note this is often just a link).
 
 ### 3. Land it — `log-experiment`
 
-Invoke `log-experiment` on the dir: `log-experiment.sh registry/<name>`. A dir with neither `DESIGN.md` nor
-`RESULTS.md` classifies as a **note** — the deterministic secret scan is the only gate, then cross-family bot
-approval and merge. No new landing machinery, no audit to run first — this is exactly why the recipe is
-cheap.
+Invoke the **`log-experiment` skill** on the dir (`registry/<name>` as its input) — it resolves its own
+`scripts/log-experiment.sh` path per its own SKILL.md; never call `log-experiment.sh` directly as if it were
+on PATH. A dir with neither `DESIGN.md` nor `RESULTS.md` classifies as a **note** — the deterministic secret
+scan is the only gate, then cross-family bot approval and merge. No new landing machinery, no audit to run
+first — this is exactly why the recipe is cheap.
 
 ### 4. Optional viewer leg — a curated dashboard page
 

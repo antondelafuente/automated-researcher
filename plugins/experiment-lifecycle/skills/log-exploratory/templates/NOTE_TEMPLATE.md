@@ -1,7 +1,7 @@
 # NOTE — <name>  (<one-line what this note is about>)
 
-> **Exploratory provenance:** this is a quick, interactive, exploratory pass — a single run, no
-> design-audit, no close-audit. Treat any number here as a lead, not a cleared result. If this needs to
+> **Exploratory provenance:** <one interactive run / N exploratory analyses, post-hoc logged>; no
+> design-audit, no close-audit; numbers are exploratory by construction. If this needs to
 > become load-bearing for a claim, design the audited version through `design-experiment`/`run-experiment`
 > instead of citing this note as if it were one.
 
