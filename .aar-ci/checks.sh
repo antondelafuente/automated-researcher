@@ -323,23 +323,38 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
-# 10d. visualize-results recipe-resolution smoke (#365, #369): the fail-closed resolution of
-#     [recipes.visualization_preview] (missing profile / missing recipe table / incomplete recipe all BLOCK),
-#     the explicit-publish boundary (default mode never resolves/emits [recipes.visualization_publish] or
-#     [recipes.viewer]; --publish resolves [recipes.visualization_publish] and fails closed with zero stdout
-#     leakage if it's unconfigured, and never resolves [recipes.viewer] in either mode), a distinct-
-#     destinations regression proving visualization_publish and viewer never cross-resolve, and a static grep
-#     for hardcoded instance values in the skill's own shipped files — behavior the JSON/syntax checks can't
-#     cover.
+# 10d. update-site recipe-resolution smoke (#365, #369; skill renamed from visualize-results by #484): the
+#     fail-closed resolution of [recipes.visualization_preview] (missing profile / missing recipe table /
+#     incomplete recipe all BLOCK), the explicit-publish boundary (default mode never resolves/emits
+#     [recipes.visualization_publish] or [recipes.viewer]; --publish resolves [recipes.visualization_publish]
+#     and fails closed with zero stdout leakage if it's unconfigured, and never resolves [recipes.viewer] in
+#     either mode), a distinct-destinations regression proving visualization_publish and viewer never
+#     cross-resolve, and a static grep for hardcoded instance values in the skill's own shipped files —
+#     behavior the JSON/syntax checks can't cover.
 #     Runs on ANY change under the skill dir (not just the scripts), since the instance-leak grep scans
 #     SKILL.md/references/ too — a leak added there alone must not bypass the guard (code-review F4).
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/visualize-results/'; then
-  VR_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/visualize-results/scripts/visualize_results_smoke.sh"
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/update-site/'; then
+  VR_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/update-site/scripts/update_site_smoke.sh"
   if [ -f "$VR_SMOKE" ]; then
-    echo "[checks] visualize-results recipe-resolution smoke" >&2
-    bash "$VR_SMOKE" "$ROOT" >&2 && ok "visualize-results recipe-resolution smoke" || err "visualize-results recipe-resolution smoke FAILED"
+    echo "[checks] update-site recipe-resolution smoke" >&2
+    bash "$VR_SMOKE" "$ROOT" >&2 && ok "update-site recipe-resolution smoke" || err "update-site recipe-resolution smoke FAILED"
   else
-    err "resolve_visualization_recipe.sh changed but visualize_results_smoke.sh missing — cannot verify the recipe resolver"
+    err "resolve_visualization_recipe.sh changed but update_site_smoke.sh missing — cannot verify the recipe resolver"
+  fi
+fi
+
+# 10e. update-dashboard viewer-recipe resolution smoke (#484): the fail-closed resolution of
+#     [recipes.viewer] (missing profile / missing recipe table / incomplete recipe / malformed fields all
+#     BLOCK, an unknown argument BLOCKs), and a static grep for hardcoded instance values in the skill's own
+#     shipped files — behavior the JSON/syntax checks can't cover. Runs on ANY change under the skill dir
+#     (not just the scripts), same instance-leak-scans-docs-too rationale as 10d.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/update-dashboard/'; then
+  UD_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/update-dashboard/scripts/update_dashboard_smoke.sh"
+  if [ -f "$UD_SMOKE" ]; then
+    echo "[checks] update-dashboard viewer-recipe resolution smoke" >&2
+    bash "$UD_SMOKE" "$ROOT" >&2 && ok "update-dashboard viewer-recipe resolution smoke" || err "update-dashboard viewer-recipe resolution smoke FAILED"
+  else
+    err "resolve_viewer_recipe.sh changed but update_dashboard_smoke.sh missing — cannot verify the recipe resolver"
   fi
 fi
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# visualize_results_smoke.sh — behavior smoke for the visualize-results skill (#365, #369).
+# update_site_smoke.sh — behavior smoke for the update-site skill (#365, #369; renamed from
+# visualize-results by #484).
 # Deterministic, fully offline: exercises resolve_visualization_recipe.sh's fail-closed resolution,
 # the explicit-publish boundary, and the distinct-destinations no-cross-resolution guarantee between
 # [recipes.visualization_publish] and [recipes.viewer], plus a static instance-leak check on the
@@ -9,7 +10,7 @@
 # failure.
 set -uo pipefail
 ROOT=${1:?repo root}
-SKILL_DIR="$ROOT/plugins/experiment-lifecycle/skills/visualize-results"
+SKILL_DIR="$ROOT/plugins/experiment-lifecycle/skills/update-site"
 RESOLVE="$SKILL_DIR/scripts/resolve_visualization_recipe.sh"
 
 fail=0
@@ -194,12 +195,12 @@ fi
 #    smoke script itself, whose own source necessarily quotes the forbidden literals as the pattern).
 LEAK_PATTERN='research-lab|/home/anton|cloudflare|\.trycloudflare\.com|:[0-9]{4,5}\b'
 leaked=$(grep -RinE "$LEAK_PATTERN" "$SKILL_DIR" --include='*.md' --include='*.sh' \
-  2>/dev/null | grep -v '/scripts/visualize_results_smoke\.sh:' || true)
+  2>/dev/null | grep -v '/scripts/update_site_smoke\.sh:' || true)
 if [ -n "$leaked" ]; then
-  err "instance-specific value(s) found in visualize-results skill source:"
+  err "instance-specific value(s) found in update-site skill source:"
   printf '%s\n' "$leaked" >&2
 else
-  ok "no hardcoded research-lab/home-anton/hostname-port/cloudflare values in visualize-results"
+  ok "no hardcoded research-lab/home-anton/hostname-port/cloudflare values in update-site"
 fi
 
-[ "$fail" = 0 ] && { echo "  smoke ok: visualize-results recipe resolution + publish boundary + distinct-destinations + no instance leak" >&2; exit 0; } || exit 1
+[ "$fail" = 0 ] && { echo "  smoke ok: update-site recipe resolution + publish boundary + distinct-destinations + no instance leak" >&2; exit 0; } || exit 1

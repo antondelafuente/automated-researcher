@@ -1,44 +1,68 @@
 ---
-name: visualize-results
+name: update-site
 description: >-
-  Enter a LOCAL-FIRST visualization/presentation loop for a finished experiment or note — resolve the
-  record + verified artifacts (preferring presentation_manifest.json when present), enter the instance's
-  configured visualization-preview recipe, create or iterate on the page + gallery entry, run its
-  prescribed build/browser checks, and return the stable preview URL. Keep iterating locally — no review,
-  no production deploy — until the researcher gives an EXPLICIT "publish" or "ship" instruction, which
-  alone transitions to the gated landing path and releases the preview claim. Use when asked to "visualize
-  this," "make plots for these results," "add this to the visualizations," "iterate on this page," or
-  "publish/ship the visualization." Distinct from `run-experiment`'s own close-time viewer publish leg
-  (#347), which is automatic/one-shot from a locked brief; this is the later, repeatable, researcher-driven
-  pass, live-resolving the instance recipe rather than reading a frozen snapshot.
+  Enter a LOCAL-FIRST visualization/presentation loop for a cross-experiment EDITORIAL STORY page in the
+  `site/` surface — resolve the record + verified artifacts (preferring presentation_manifest.json when
+  present), enter the instance's configured visualization-preview recipe, create or iterate on the page +
+  gallery entry, run its prescribed build/browser checks, and return the stable preview URL. Keep iterating
+  locally — no review, no production deploy — until the researcher gives an EXPLICIT "publish" or "ship"
+  instruction, which alone transitions to the gated landing path and releases the preview claim. **Routing
+  (destination/artifact, not data scope — a single-experiment editorial story is legitimate here):** an
+  editorial STORY page in `site/` → this skill; a per-experiment OPERATIONAL page in `dashboard/` →
+  `update-dashboard` instead, even for a cross-experiment comparison (destination wins). Use when asked to
+  "make a story page about X," "update the site," "publish the visualization," "visualize this" (as a new
+  story), or "make a story about one experiment." Distinct from `run-experiment`'s own close-time viewer
+  publish leg (#347), which is automatic/one-shot from a locked brief into the dashboard, and from
+  `update-dashboard`'s post-close per-experiment dashboard edit loop; this is the later, repeatable,
+  researcher-driven editorial pass, live-resolving the instance recipe rather than reading a frozen snapshot.
 ---
 
-# Visualizing results (the researcher-driven editorial loop)
+# Updating the site (the researcher-driven editorial loop)
 
-This is the **later** visualization step: a researcher looked at a finished experiment (or a note, a
-meeting readout, an ad hoc plot) and wants a page for it, or wants to keep shaping a page's story. It is
-**not** `run-experiment`'s close-time publish leg — that leg builds and lands a page unattended, once, from
-the exact arms `DESIGN.md`'s Presentation spec named, as part of closing out a locked brief. This skill runs
-whenever the researcher asks, as many times as they ask, and defaults to **local iteration** — nothing ships
-anywhere until they explicitly say so.
+This is the **later** visualization step for the **editorial site** (`site/`): a researcher looked at a
+finished experiment (or a note, a meeting readout, an ad hoc plot, a cross-experiment comparison) and wants
+a **story page** for it, or wants to keep shaping a page's story. It is **not** `run-experiment`'s close-time
+publish leg — that leg builds and lands a **dashboard** page unattended, once, from the exact arms
+`DESIGN.md`'s Presentation spec named, as part of closing out a locked brief. It is also **not**
+`update-dashboard` — that skill owns post-close edits to a single experiment's **operational** dashboard
+page. This skill runs whenever the researcher asks, as many times as they ask, and defaults to **local
+iteration** — nothing ships anywhere until they explicitly say so.
 
-> **The two seams this skill reads:** the instance's **visualization-preview recipe**
-> (`[recipes.visualization_preview]` in the instance's aar-profile), read always, plus, only on explicit
-> publish, its own **visualization-publish recipe** (`[recipes.visualization_publish]`) — a typed pointer
-> distinct from `[recipes.viewer]`, which `run-experiment`'s close-time publish leg reads instead, for the
-> operational dashboard (a different destination on instances where the two diverge). See
-> `references/SCHEMA.md`. This skill never reads or requires `[recipes.viewer]`, and never hardcodes a
-> publish-destination repo, worktree, or any instance networking/tunnel detail — those live only in the
-> instance's own profile + the recipe docs it points at.
+## Terminology + routing (read this first — the two surfaces are easy to confuse)
+
+- **`dashboard/`** = the per-experiment **operational** browser: one overview page per experiment, built
+  automatically at close (`run-experiment`'s publish leg) and edited afterward by `update-dashboard`.
+- **`site/`** = the cross-experiment **editorial** story pages this skill owns: researcher-driven narrative,
+  explicit publish gate.
+- **Routing is by DESTINATION/ARTIFACT, not by how many experiments the page covers** — a story about a
+  single experiment is still a `site/` page if that's where it's headed, and a comparison across experiments
+  is still a `update-dashboard` job if it's landing on the dashboard. Trigger-phrase examples:
+  - "update the dashboard" / "add `<figure>` to `<exp>`'s dashboard page" / "fix the experiment's page" /
+    "compare experiments on the dashboard" → **`update-dashboard`** (destination wins over cross-experiment
+    scope).
+  - "make a story page about X" / "update the site" / "publish the visualization" / "make a story about one
+    experiment" → **this skill (`update-site`)**.
+
+## The two seams this skill reads
+
+The instance's **visualization-preview recipe** (`[recipes.visualization_preview]` in the instance's
+aar-profile), read always, plus, only on explicit publish, its own **visualization-publish recipe**
+(`[recipes.visualization_publish]`) — a typed pointer distinct from `[recipes.viewer]`, which
+`run-experiment`'s close-time publish leg and `update-dashboard` read instead, for the operational dashboard
+(a different destination on instances where the two diverge). See `references/SCHEMA.md`. This skill never
+reads or requires `[recipes.viewer]`, and never hardcodes a publish-destination repo, worktree, or any
+instance networking/tunnel detail — those live only in the instance's own profile + the recipe docs it
+points at.
 
 ## Disposition — live-resolving, not a locked-brief executor
 
 Unlike `run-experiment`, this skill has no `START.md` snapshot to read: it's invoked live, ad hoc, on
 records that may be days old or may never have gone through `design-experiment` at all. So it resolves the
-instance's **live** profile itself — the same live-resolving role `design-experiment` already plays (see the
-aar-profile `SCHEMA.md`'s "who resolves live vs who reads the snapshot"). That rule's "the executor reads
-only the frozen snapshot" clause binds `run-experiment` specifically, because that skill's whole contract is
-reproducing a *locked* run from a *frozen* record; this skill has no such record to freeze from.
+instance's **live** profile itself — the same live-resolving role `design-experiment` (and `update-dashboard`,
+for `[recipes.viewer]`) already plays (see the aar-profile `SCHEMA.md`'s "who resolves live vs who reads the
+snapshot"). That rule's "the executor reads only the frozen snapshot" clause binds `run-experiment`
+specifically, because that skill's whole contract is reproducing a *locked* run from a *frozen* record; this
+skill has no such record to freeze from.
 
 ## Step 1 — Resolve the record
 
@@ -110,6 +134,10 @@ report it, don't clobber it — before proceeding.
   mechanically at the resolver, not just in prose.
 - **`scripts/resolve_visualization_recipe.sh`** — the recipe resolver (preview mode default; `--publish` for
   the explicit publish leg).
-- **`run-experiment`**'s publish leg — the sibling, automatic, close-time leg this skill is deliberately
-  distinct from; read it if you need the shape of a from-scratch page build (assemble → render → bundle →
-  gallery-rebuild), which this skill's Step 3/4 reuse via the same recipe-doc pattern rather than duplicating.
+- **`run-experiment`**'s publish leg — the sibling, automatic, close-time leg that builds the **dashboard**
+  page this skill is deliberately distinct from; read it if you need the shape of a from-scratch page build
+  (assemble → render → bundle → gallery-rebuild), which this skill's Step 3/4 reuse via the same recipe-doc
+  pattern rather than duplicating.
+- **`update-dashboard`** — the sibling skill for the OTHER surface: post-close edits to a single
+  experiment's operational `dashboard/` page. Route there instead when the destination is the dashboard, not
+  the site.

@@ -55,12 +55,17 @@ The discovery lookup above is **for the designer/init/validate side only**. The 
   fields it needs, and **snapshots the resolved values plus the file's content-hash (`profile_sha256`) into
   `START.md`** before the reviewed-brief commit (#153 decision 4). `aar-profile-init` / `aar-profile-validate`
   are the only other live readers (they write/check the file).
-- **`visualize-results` (#365) also resolves the live profile — a second, narrowly-scoped live reader.** It
-  reads `[recipes.visualization_preview]` (and, only on an explicit publish instruction,
-  `[recipes.visualization_publish]` — #369; it never reads `[recipes.viewer]`, in either mode) directly, for
-  the same reason `design-experiment` does: it is live, repeatable, researcher-steered work with no locked
-  brief to snapshot into — not the reproducibility-from-a-frozen-record contract `run-experiment` alone must
-  uphold. It writes nothing to the profile.
+- **`update-site` (#365, renamed from `visualize-results` by #484) also resolves the live profile — a
+  second, narrowly-scoped live reader.** It reads `[recipes.visualization_preview]` (and, only on an
+  explicit publish instruction, `[recipes.visualization_publish]` — #369; it never reads `[recipes.viewer]`,
+  in either mode) directly, for the same reason `design-experiment` does: it is live, repeatable,
+  researcher-steered work with no locked brief to snapshot into — not the reproducibility-from-a-frozen-record
+  contract `run-experiment` alone must uphold. It writes nothing to the profile.
+- **`update-dashboard` (#484) also resolves the live profile — a third, narrowly-scoped live reader.** It
+  reads `[recipes.viewer]` directly — the SAME key `run-experiment`'s close leg reads from its frozen
+  snapshot — because it is invoked post-close, live, ad hoc, with no locked brief left to read: the brief's
+  job already finished. It never reads `[recipes.visualization_preview]`/`[recipes.visualization_publish]`
+  (those are `update-site`'s own). It writes nothing to the profile.
 - **`run-experiment` (the zero-context executor) reads ONLY the frozen `START.md` snapshot.** It **never**
   re-reads the mutable live profile for any GitHub-lifecycle config — its world is the brief. The **one** narrow
   live step is minting a credential: it reads the env-var *name* the snapshot carries (`token_cmd_env`) and
@@ -171,26 +176,28 @@ Field semantics, normative (the parts not obvious from the table):
   landing path, the shared page lib + a prior-page pattern, the assemble/render/bundle/gallery commands, and
   where per-experiment page source lives — see `run-experiment`'s publish leg). Absent ⇒ closes are
   manifest-only. Same typed/pinned shape as every recipe; snapshotted into `START.md` like the rest — the
-  executor never resolves it live.
+  executor never resolves it live. Post-close, `update-dashboard` (#484) resolves this SAME key again,
+  LIVE (see that skill and the role-split note above) — a distinct reader for a distinct, later contract,
+  not a second recipe.
 
 - **`[recipes.visualization_preview]`** — OPTIONAL (#365); the instance's **local-first visualization-preview
-  recipe**, consumed by the `visualize-results` skill: the doc a researcher-driven visualization pass follows
-  to enter local iteration (the preview claim lifecycle — status/use/release — the stable per-page local
-  worktree + URL, and the shared page-style pattern). Distinct from `[recipes.viewer]` above: different key,
-  different trigger (an explicit, repeatable researcher request vs. automatic at experiment close), different
-  lifecycle (live iteration vs. one-shot). Absent ⇒ `visualize-results` fails closed rather than improvising.
-  Same typed/pinned shape as every recipe; resolved LIVE by `visualize-results` (see the role-split note
-  above), never snapshotted into a `START.md`.
+  recipe**, consumed by the `update-site` skill (renamed from `visualize-results` by #484): the doc a
+  researcher-driven visualization pass follows to enter local iteration (the preview claim lifecycle —
+  status/use/release — the stable per-page local worktree + URL, and the shared page-style pattern).
+  Distinct from `[recipes.viewer]` above: different key, different trigger (an explicit, repeatable
+  researcher request vs. automatic at experiment close), different lifecycle (live iteration vs. one-shot).
+  Absent ⇒ `update-site` fails closed rather than improvising. Same typed/pinned shape as every recipe;
+  resolved LIVE by `update-site` (see the role-split note above), never snapshotted into a `START.md`.
 
-- **`[recipes.visualization_publish]`** — OPTIONAL (#369); `visualize-results`'s **own** editorial
+- **`[recipes.visualization_publish]`** — OPTIONAL (#369); `update-site`'s **own** editorial
   publish-destination recipe, read only on an explicit publish/ship instruction: the editorial site's repo,
   its gated landing path, and the assemble/render/bundle/gallery commands (see
-  `visualize-results/references/SCHEMA.md`). Deliberately a **separate, independently-typed key from
+  `update-site/references/SCHEMA.md`). Deliberately a **separate, independently-typed key from
   `[recipes.viewer]`** above — a real instance found the two destinations genuinely distinct (the operational
-  dashboard `[recipes.viewer]` points at vs. the editorial site this key points at), so
-  `visualize-results --publish` resolves only this key and never `[recipes.viewer]`, in either mode. Absent ⇒
-  `visualize-results --publish` fails closed. Same typed/pinned shape as every recipe; resolved LIVE by
-  `visualize-results`, never snapshotted into a `START.md`.
+  dashboard `[recipes.viewer]` points at, also edited post-close by `update-dashboard`, vs. the editorial
+  site this key points at), so `update-site --publish` resolves only this key and never `[recipes.viewer]`,
+  in either mode. Absent ⇒ `update-site --publish` fails closed. Same typed/pinned shape as every recipe;
+  resolved LIVE by `update-site`, never snapshotted into a `START.md`.
 
 ### Product invariant — cross-family review is NOT a profile field (#153 decision 3a)
 
