@@ -147,10 +147,13 @@ Three obligations, maintained continuously (not at close):
   written through one product helper (atomic, fail-closed), not prose:
 
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
-  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `start <run-id>
-  > --handoff <TEMP.md path> --session-handle <opaque>` (marks the run **desired-active** and records the opaque,
-  > instance-owned handle that binds this run-id to your session — a tmux name / systemd unit / pid-file path; the
-  > product never interprets it). At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
+  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start, from **inside your own
+  > worktree**: `start <run-id> --handoff <TEMP.md path> --session-handle <opaque> --worktree <this worktree's
+  > path>` (marks the run **desired-active**, records the opaque, instance-owned handle that binds this run-id
+  > to your session — a tmux name / systemd unit / pid-file path; the product never interprets it — and binds
+  > this run-id to your own worktree path, the binding `reap_worktree.sh` checks at close so a clean-closed
+  > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2).
+  > At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
   > (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). Use
   > `status <run-id>` as compact checklist evidence. If you hit a case you can't resume in place (a usage-policy
   > block, a corrupted session): `request-relaunch <run-id> [--handoff <path>] [--reason …]` — a positive
@@ -452,6 +455,30 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   closed and flag it rather than write a non-terminal status to find out. **Re-check it's the RIGHT terminal
   value, not just A terminal one** — per the ledger-status definition above (#376): a `CHECKLIST.md` `FAIL`
   alone never justifies `technical-failure`.
+- **Tear down your own worktree — right after the record lands, right before session reap
+  (automated-researcher#532).** Compute already tears down (the lease reaper, above) and the session
+  self-reaps (next bullet) — the **workspace** was the missing member of that symmetry: this skill never
+  removed its own worktree, so dead ones accumulated silently (worktrees don't bill, so nothing forced the
+  issue — a 2026-07-19 sweep found ~46G of them under closed-experiment executor trees alone, every one
+  already durable on `main` + the artifact store with zero unique content). **Policy A (researcher-approved,
+  2026-07-19): close-time self-teardown, no grace window** — by this point in Close, upload is already
+  **verified** and `log-experiment` has already **merged** the record (both above), so the same durability
+  gates that already guard those steps are what make this one safe; a marker+deferred-reap alternative was
+  considered and rejected as a second mechanism where one suffices. Fires **only on a clean close** — the
+  SAME `is-closed` guard session reap uses below: a parked/blocked/crashed run leaves its worktree in place
+  for forensics (`repo-janitor`'s sweep is the backstop for that residue, not this step). `cd` OUT of the
+  worktree yourself FIRST (e.g. `$HOME` — never remove the tree your own shell is standing in), then
+  **immediately, in the same shell**, run `scripts/reap_worktree.sh <run-id> <this worktree's path>`: it
+  re-checks the clean-close guard, **requires the given path to match the run-supervision record's own
+  `worktree_path`** (bound at `start`, above — the actual run-id<->worktree binding, so a clean-closed run-id
+  can only ever reap the worktree IT bound, never a peer's) **and to equal `$OLDPWD`** (defense in depth —
+  refuses if you cd'd elsewhere first, or pass any path other than the one you just left), resolves the
+  shared checkout on its own via its git-dir, then `git worktree remove --force`s the tree (**`--force` is
+  required and
+  safe ONLY behind the upload-verified + log-experiment-merged gates above** — executor scratch is untracked
+  by design, so a plain `remove` would refuse every time). **Keep the branch ref** — the content already
+  landed via squash-merge, so the ref is cheap and preserves recoverability; this never touches the shared
+  checkout beyond that one call.
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:
@@ -586,6 +613,10 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
+- **Tear down your own worktree at a clean close** — the workspace member of the same teardown symmetry as
+  pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
+  verified AND `log-experiment` has merged the record, gated on the same clean-close `is-closed` check as
+  session reap, right before it (`reap_worktree.sh`). A parked/blocked/crashed run keeps its worktree for forensics.
 - **Reap your session at a clean close** — symmetric with pod-teardown: the finished executor frees its own process as
   the terminal action (`reap_session.sh`), only on a clean `close`, via the self-only instance seam. A parked/blocked
   run keeps its session for resume; no seam configured is a no-op.

@@ -142,6 +142,22 @@ if run session-handle nonesuch >/dev/null 2>&1; then no session-handle-missing-f
 # empty --session-handle value rejected (caller bug)
 if run update s1 --session-handle "" >/dev/null 2>&1; then no empty-session-handle-rejected; else ok empty-session-handle-rejected; fi
 
+# --- worktree-path: opaque, set on create, readable, overridable on update (automated-researcher#535
+# review round 2 — the run-id<->worktree binding reap_worktree.sh checks) ---
+run create w1 --handoff /art/w1/TEMP.md --worktree "/ws/run/w1" >/dev/null
+[ "$(run worktree-path w1)" = "/ws/run/w1" ] && ok worktree-path-create || no worktree-path-create
+run update w1 --worktree "/ws/run/w1-moved" >/dev/null
+[ "$(run worktree-path w1)" = "/ws/run/w1-moved" ] && ok worktree-path-update || no worktree-path-update
+# absent path -> exit 1, no output
+run create w2 >/dev/null
+if run worktree-path w2 >/dev/null 2>&1; then no worktree-path-absent-failclosed; else ok worktree-path-absent-failclosed; fi
+# missing record -> exit 1
+if run worktree-path nonesuch >/dev/null 2>&1; then no worktree-path-missing-failclosed; else ok worktree-path-missing-failclosed; fi
+# empty --worktree value rejected (caller bug)
+if run update w1 --worktree "" >/dev/null 2>&1; then no empty-worktree-rejected; else ok empty-worktree-rejected; fi
+# surplus arg rejected
+if run worktree-path w1 oops >/dev/null 2>&1; then no surplus-worktreepath-rejected; else ok surplus-worktreepath-rejected; fi
+
 # --- request-relaunch: sets the flag + reason; is-relaunch-requested reads it; supervisor clears it ---
 run create q1 --handoff /art/q1/TEMP.md >/dev/null
 if requested q1; then no fresh-no-request; else ok fresh-no-request; fi          # default: no request
@@ -205,6 +221,7 @@ run create q6 >/dev/null
 if run clear-relaunch q6 oops >/dev/null 2>&1; then no surplus-clear-rejected; else ok surplus-clear-rejected; fi
 if run is-relaunch-requested q6 oops >/dev/null 2>&1; then no surplus-isrequested-rejected; else ok surplus-isrequested-rejected; fi
 if run session-handle q6 oops >/dev/null 2>&1; then no surplus-sessionhandle-rejected; else ok surplus-sessionhandle-rejected; fi
+if run worktree-path q6 oops >/dev/null 2>&1; then no surplus-worktreepath-rejected2; else ok surplus-worktreepath-rejected2; fi
 if run request-relaunch q6 --reason "" >/dev/null 2>&1; then no empty-reason-rejected; else ok empty-reason-rejected; fi
 if run request-relaunch q6 --bogus x >/dev/null 2>&1; then no request-unknown-arg-rejected; else ok request-unknown-arg-rejected; fi
 
@@ -212,9 +229,10 @@ if run request-relaunch q6 --bogus x >/dev/null 2>&1; then no request-unknown-ar
 #     was asked to. A stray SET_RELAUNCH/SESSION_HANDLE in the caller's env must be ignored by a plain
 #     update/stop that didn't request them. (write_record reads explicit positional args, not env.) ---
 run create e1 --handoff /art/e1/TEMP.md >/dev/null
-SET_RELAUNCH=true SESSION_HANDLE="evil" RELAUNCH_REASON="injected" run update e1 --handoff /art/e1/TEMP2.md >/dev/null
+SET_RELAUNCH=true SESSION_HANDLE="evil" WORKTREE_PATH="/evil/wt" RELAUNCH_REASON="injected" run update e1 --handoff /art/e1/TEMP2.md >/dev/null
 if requested e1; then no ambient-no-relaunch-leak; else ok ambient-no-relaunch-leak; fi
 if run session-handle e1 >/dev/null 2>&1; then no ambient-no-handle-leak; else ok ambient-no-handle-leak; fi
+if run worktree-path e1 >/dev/null 2>&1; then no ambient-no-worktree-leak; else ok ambient-no-worktree-leak; fi
 # the update DID apply its own requested change (handoff)
 [ "$(jget e1 handoff_path)" = "/art/e1/TEMP2.md" ] && ok ambient-update-still-works || no ambient-update-still-works
 # a plain stop with stray ambient SET_RELAUNCH must still leave no request set
@@ -227,6 +245,7 @@ printf '{"run_id":"legacy","desired_active":true,"stopped":false,"closed":false,
 if active legacy; then ok legacy-active || true; else no legacy-active; fi
 if requested legacy; then no legacy-no-request; else ok legacy-no-request; fi
 if run session-handle legacy >/dev/null 2>&1; then no legacy-no-handle; else ok legacy-no-handle; fi
+if run worktree-path legacy >/dev/null 2>&1; then no legacy-no-worktree-path; else ok legacy-no-worktree-path; fi
 # an update of the legacy record backfills the new fields without disturbing existing ones, stays valid JSON
 run update legacy --session-handle "tmux:legacy" >/dev/null
 [ "$(run session-handle legacy)" = "tmux:legacy" ] && ok legacy-update-backfills || no legacy-update-backfills
@@ -235,9 +254,10 @@ printf '{"desired_active":true,"stopped":false,"closed":false,"handoff_path":"/a
 printf '%s\n' "$(run status noid)" | grep -qx 'run_id=' && ok status-missing-run-id-empty || no status-missing-run-id-empty
 
 # ===== agent-facing lifecycle aliases: same state machine, smaller executor vocabulary =====
-run start a1 --handoff /art/a1/TEMP.md --session-handle "tmux:a1" >/dev/null
+run start a1 --handoff /art/a1/TEMP.md --session-handle "tmux:a1" --worktree "/ws/run/a1" >/dev/null
 if active a1; then ok alias-start-active; else no alias-start-active; fi
 [ "$(run session-handle a1)" = "tmux:a1" ] && ok alias-start-session-handle || no alias-start-session-handle
+[ "$(run worktree-path a1)" = "/ws/run/a1" ] && ok alias-start-worktree-path || no alias-start-worktree-path
 run checkpoint a1 --handoff /art/a1/TEMP2.md --lease-pod podZ >/dev/null
 [ "$(jget a1 handoff_path)" = "/art/a1/TEMP2.md" ] && ok alias-checkpoint-handoff || no alias-checkpoint-handoff
 [ "$(run show a1 | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin)["lease_pod_ids"]))')" = "podZ" ] \
@@ -247,6 +267,7 @@ printf '%s\n' "$status" | grep -qx 'state=active' && ok status-state || no statu
 printf '%s\n' "$status" | grep -qx 'desired_active=true' && ok status-desired-active-bool || no status-desired-active-bool
 printf '%s\n' "$status" | grep -qx 'handoff_path=/art/a1/TEMP2.md' && ok status-handoff || no status-handoff
 printf '%s\n' "$status" | grep -qx 'session_handle=tmux:a1' && ok status-session-handle || no status-session-handle
+printf '%s\n' "$status" | grep -qx 'worktree_path=/ws/run/a1' && ok status-worktree-path || no status-worktree-path
 printf '%s\n' "$status" | grep -qx 'lease_pod_ids=podZ' && ok status-pods || no status-pods
 printf '%s\n' "$status" | grep -qx 'relaunch_requested=false' && ok status-relaunch-bool || no status-relaunch-bool
 

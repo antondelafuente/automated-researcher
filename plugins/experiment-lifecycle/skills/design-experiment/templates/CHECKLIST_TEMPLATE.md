@@ -43,10 +43,11 @@
       silently skipped; a healthy long run must never silently outlive its lease expiry (#293).      ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
-      bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque>`) — the
-      `<opaque>` handle RESOLVED to a concrete instance value by the dispatch/launcher (a tmux name, systemd
-      unit, pid-file path), NOT left as the literal placeholder, so the supervisor can find this run's session;
-      live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
+      bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque> --worktree
+      <this worktree's path>`) — the `<opaque>` handle RESOLVED to a concrete instance value by the
+      dispatch/launcher (a tmux name, systemd unit, pid-file path), NOT left as the literal placeholder, so the
+      supervisor can find this run's session; `--worktree` is set by the executor itself, from inside its own
+      worktree, at start — the run-id<->worktree binding `reap_worktree.sh` checks at close; live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
       and EACH live pod registered for reaping via the `gpu-job` pod lease (the sole backstop since the
       per-pod watchdog was retired, #266) AND kept fresh by the self-wake heartbeat above for as long as the run
       is actively driven.                                                                      ev: run_supervision_record.sh status <run-id>
@@ -91,6 +92,14 @@
       `run_supervision_record.sh close <run-id>` (finished) or `stop <run-id>` (deliberate /quit, never
       relaunch) — AFTER the close audit, so a finished run can't be resurrected and an early clear can't
       orphan a still-billing pod.                                                                 ev: run_supervision_record.sh status <run-id>
+- ☐ [BLOCK] Workspace teardown READY (own worktree, NOT removed early, automated-researcher#532): R2 upload
+      verified (above) AND log-experiment has merged the record — the same two gates that make `git worktree
+      remove --force` safe (untracked executor scratch would otherwise be lost). `reap_worktree.sh` also
+      requires the record's own `worktree_path` bound at `start` (the Resume contract gate above) — the actual
+      run-id<->worktree binding, so a clean-closed run-id can only ever reap the worktree IT bound, never a
+      peer's. Then run the finalizer — `cd` OUT of the worktree first, `reap_worktree.sh <run-id>
+      <worktree-path>` (fires only on a clean close via the same `is-closed` guard; branch ref kept) — right
+      before session reap. N.A. only if this run was never given its own dedicated worktree.       ev: git worktree list
 - ☐ Retro filed via feedback-loop's file-feedback when installed/configured; otherwise recorded
       through the consuming instance's feedback guidance.                                         ev:
 
