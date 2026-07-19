@@ -29,6 +29,20 @@ name: reconcile-prs
 #     or a dispatch mention that silently failed to post, strands the PR with no further pipeline event ever
 #     arriving. This third leg re-derives the same round count submit-verdict uses and re-posts (or
 #     escalates past) the same auto-dispatch mention.
+#   - `needs-senior-engineer` present with the label (or, if newer, the most recent senior-engineer-agent[bot]
+#     adjudication comment) older than a grace window (automated-researcher#529, round-2 review fix): the
+#     label alone doesn't prove a summons ran, or is even still in flight -- a workflow_dispatch that failed
+#     after the label landed (or whose rollback below also failed) strands the PR labeled with nothing behind
+#     it. A comment newer than the label does NOT prove the run finished successfully either: the
+#     senior-engineer agent posts its guidance/escalation comment directly via its own `gh` call mid-run, so a
+#     crash or timeout right after posting -- before the workflow's own verify/clear steps run -- leaves the
+#     label stranded with a comment already sitting in front of it. Since every successful completion path
+#     (the adjudicate job's clear step, or loop-guard-escalate's label swap) removes needs-senior-engineer, the
+#     label still being present is the authoritative "not yet finished" signal regardless of comments; a
+#     comment only extends the in-flight grace window, it never suppresses recovery indefinitely. The sweep
+#     used to skip every needs-senior-engineer PR unconditionally, which left a stranded one deadlocked
+#     forever (it can never regain a pipeline event on its own). This leg re-dispatches senior-engineer.yml
+#     (same `summoned_by=reconciler` marker as the conflict leg above) instead of leaving it stranded.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
 #
 # automated-researcher#513: GitHub emits no event when a PR becomes conflicted, but the event that CAUSES
@@ -101,6 +115,11 @@ jobs:
           # Third leg (automated-researcher#515): a dispatch mention here also fires address-review.yml, so
           # the same in-flight window as the conflict leg's mention applies -- same idiom, same value.
           STRANDED_GRACE_SECONDS=$CONFLICT_GRACE_SECONDS
+          # Fourth leg (automated-researcher#529): comfortably above senior-engineer.yml's own 30-minute
+          # Claude-CLI timeout on its `adjudicate` job -- needs-senior-engineer activity (the label
+          # application, or a later adjudication comment) more recent than this is treated as a summons
+          # still in flight, not yet stranded.
+          SENIOR_ENGINEER_GRACE_SECONDS=$((40 * 60))
           # Shared budget with review-on-pr.yml's submit-verdict step (its LIMIT=3) -- this leg re-derives
           # and re-acts on the SAME consecutive-CHANGES_REQUESTED count, not a separate counter, so a PR
           # can't get extra rounds just because this leg is the one dispatching them.
@@ -130,6 +149,63 @@ jobs:
               add // [] | map(select(((.user.login | canon_login) == "codex-engineer[bot]") and ((.body // "") | startswith($marker))))
                 | sort_by(.created_at) | last
             '
+          }
+
+          # handle_stranded_senior_engineer (automated-researcher#529, round-2 review fix): decouples the
+          # sweep's needs-senior-engineer skip from the label's mere presence -- but a senior-engineer-agent
+          # adjudication comment newer than the label does NOT by itself prove the run finished (see the
+          # header comment above this job's steps for why: the agent posts that comment directly via its own
+          # `gh` call mid-run, so a crash or timeout right after posting -- before senior-engineer.yml's own
+          # verify/clear steps run -- leaves the label stranded behind a comment that already exists).
+          # needs-senior-engineer being present at all is the authoritative "not yet finished" signal (every
+          # successful completion path removes it); a comment only extends the in-flight grace window from
+          # its own timestamp rather than the label's, since a run that comments late is still plausibly
+          # finishing up. Once the later of the label application and the last adjudication comment is older
+          # than SENIOR_ENGINEER_GRACE_SECONDS with the label still present, re-dispatch rather than leaving
+          # the PR deadlocked.
+          handle_stranded_senior_engineer() {
+            local n="$1"
+
+            # Same errexit-disabled-by-`if !`-caller hazard as the other handlers below: check each read's
+            # exit status explicitly and skip this PR for this tick on failure rather than treating it as
+            # absence (which would trigger a spurious re-dispatch).
+            local label_ts
+            if ! label_ts=$(gh api "repos/$REPO/issues/$n/events" --paginate | jq -s '
+              add // [] | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | sort_by(.created_at) | last | .created_at // empty
+            '); then
+              echo "::warning::PR #$n: reading needs-senior-engineer label history failed; skipping this tick"
+              return 1
+            fi
+            if [ -z "$label_ts" ]; then
+              echo "PR #$n: needs-senior-engineer set but no labeled event found in its timeline; skipping this tick"
+              return
+            fi
+
+            local comment_ts
+            if ! comment_ts=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s '
+              def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+              add // [] | map(select((.user.login | canon_login) == "senior-engineer-agent[bot]")) | sort_by(.created_at) | last | .created_at // empty
+            '); then
+              echo "::warning::PR #$n: reading senior-engineer-agent comment history failed; skipping this tick"
+              return 1
+            fi
+
+            local reference_ts="$label_ts"
+            if [ -n "$comment_ts" ] && [[ "$comment_ts" > "$label_ts" ]]; then
+              reference_ts="$comment_ts"
+            fi
+
+            local elapsed=$(( now_epoch - $(date -u -d "$reference_ts" +%s) ))
+            if [ "$elapsed" -lt "$SENIOR_ENGINEER_GRACE_SECONDS" ]; then
+              echo "PR #$n: needs-senior-engineer activity (label applied at $label_ts, most recent adjudication comment at ${comment_ts:-none}) as recently as ${elapsed}s ago; treating as still in flight, skipping this tick"
+              return
+            fi
+
+            echo "PR #$n: needs-senior-engineer applied at $label_ts (most recent adjudication comment at ${comment_ts:-none}) with no activity in the last ${elapsed}s and the label still present -- that summons appears stranded (e.g. a dispatch that failed, a run that crashed or timed out after posting its comment, or a label-removal that itself failed); re-dispatching senior-engineer.yml"
+            if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+              echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; leaving needs-senior-engineer in place for a later tick to retry"
+              return 1
+            fi
           }
 
           handle_conflicted() {
@@ -180,10 +256,9 @@ jobs:
               # read race the label write -- or miss it entirely on an unchecked write failure -- so the
               # loop guard's count could never be trusted either direction (double-counted if the write
               # landed first, or never reached 3 if the write silently failed every time). If the label
-              # write succeeds but the dispatch itself then fails, roll the label back so the PR isn't
-              # permanently stranded labeled-but-unsummoned -- this reconciler skips any PR already
-              # carrying needs-senior-engineer on later ticks, so a stuck label with no run behind it
-              # would otherwise never be retried.
+              # write succeeds but the dispatch itself then fails, roll the label back so this PR goes
+              # straight back through the normal CONFLICTING budget path on the next tick rather than
+              # sitting labeled with nothing behind it in the meantime.
               if ! gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer; then
                 echo "::warning::PR #$n: failed to add needs-senior-engineer; not dispatching this tick so the next tick retries"
                 return 1
@@ -191,7 +266,12 @@ jobs:
               if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
                 echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed after labeling; removing needs-senior-engineer so the next tick retries instead of leaving it stranded"
                 if ! gh pr edit "$n" --repo "$REPO" --remove-label needs-senior-engineer; then
-                  echo "::error::PR #$n: also failed to roll back needs-senior-engineer after a failed dispatch -- PR is labeled with no adjudication summoned and no further reconciler tick will retry it; needs manual attention"
+                  # automated-researcher#529: this used to need manual attention, since the sweep skipped
+                  # every needs-senior-engineer PR unconditionally -- a stranded one had no path back to a
+                  # pipeline event. It no longer does: handle_stranded_senior_engineer below re-dispatches
+                  # any needs-senior-engineer PR with no newer adjudication comment past its grace window,
+                  # so a later tick retries this PR even with the label stuck in place.
+                  echo "::error::PR #$n: also failed to roll back needs-senior-engineer after a failed dispatch -- left labeled with no adjudication summoned; the sweep's stranded-label leg will retry it on a later tick"
                 fi
                 return 1
               fi
@@ -390,11 +470,30 @@ jobs:
 
             # needs-senior-engineer/needs-human (automated-researcher#438) mean the in-flight judgment layer
             # is already working this PR or has already escalated it to a person -- the reconciler must not
-            # pile a duplicate resolution-dispatch round on top of that.
+            # pile a duplicate resolution-dispatch round on top of that. needs-senior-engineer is no longer
+            # an unconditional skip (automated-researcher#529): handle_stranded_senior_engineer re-dispatches
+            # it if the label has no adjudication comment behind it past its grace window, instead of
+            # leaving a stranded one deadlocked forever. needs-human stays a plain skip -- it's a terminal
+            # state only a human clears. Branch ORDER below is load-bearing: both labels can coexist --
+            # senior-engineer.yml's adjudicate job can verify/add needs-human and then have its "Clear
+            # needs-senior-engineer" step fail (its failure() step deliberately leaves the stale label in
+            # place), and loop-guard-escalate's single `--add-label needs-human --remove-label
+            # needs-senior-engineer` can have the add land while the remove fails -- so needs-human must be
+            # matched FIRST (a bash `case` takes the first matching branch), or a PR carrying both labels
+            # would be routed to handle_stranded_senior_engineer and re-dispatched instead of parked for a
+            # human, contradicting the terminal-skip contract above. Recovery consequence: once a human
+            # clears needs-human, the stale needs-senior-engineer becomes visible to this sweep again and is
+            # re-dispatched after its grace window -- that is the intended self-heal for the leftover label,
+            # not a bug.
             labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
             case ",$labels," in
-              *,needs-senior-engineer,*) echo "PR #$n: needs-senior-engineer already set, skipping"; continue ;;
               *,needs-human,*) echo "PR #$n: needs-human already set, skipping"; continue ;;
+              *,needs-senior-engineer,*)
+                if ! handle_stranded_senior_engineer "$n"; then
+                  echo "::warning::PR #$n: stranded needs-senior-engineer handling failed this tick"
+                fi
+                continue
+                ;;
             esac
 
             mergeable=$(jq -r '.mergeable' <<<"$pr")

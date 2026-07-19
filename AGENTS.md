@@ -152,12 +152,18 @@ agentic-engineering#43).
   allowlisted `@claude-code-engineer` mention path (re-dispatching the implementor via `address-review.yml`,
   whose allowlist includes `senior-engineer-agent[bot]` for exactly this) and clears `needs-senior-engineer`; when
   it escalates instead, it applies `needs-human` with a structured comment (the decision needed, the
-  options, its own lean, and what happens by default if unanswered) and stops. **Loop guard:** it never
-  dispatches more than once per label application, and if `needs-senior-engineer` REAPPEARS on the same PR
-  N=2 times (a 3rd+ total application — counted from the issue's own `labeled` event timeline), it escalates
-  straight to `needs-human` instead of running another round, since a converging guidance loop wouldn't need
-  to be re-labeled. Fails gracefully (a clear skip log line, no error) while the dedicated App and its two
-  secrets don't exist yet.
+  options, its own lean, and what happens by default if unanswered) and stops. **Loop guard
+  (automated-researcher#529 redesign):** the label serves as the summons trigger only — it is not the
+  guard's counter. The guard counts `senior-engineer-agent[bot]`-authored adjudication comments (direct
+  evidence a summons actually ran) since whichever is more recent of the last APPROVED codex review or the
+  last `needs-human` removal, and escalates straight to `needs-human` once that count reaches 2 (a 3rd round
+  without convergence) instead of running another round. Counting comments instead of `labeled` timeline
+  events means a transport failure — the label applied, then rolled back because the dispatch that was
+  supposed to summon this workflow failed — produces no comment and so cannot advance the count; label
+  churn with no adjudication behind it is harmless bookkeeping, not budget consumption (the coupled defect
+  this replaced: two such transport failures could make a genuine third summons look like the trip point and
+  escalate prematurely — agentic-engineering#65 rounds 9-10). Fails gracefully (a clear skip log line, no
+  error) while the dedicated App and its two secrets don't exist yet.
 - **Review re-fire actuator:** `review-on-pr.yml` also accepts `workflow_dispatch` (input: `pr_number`),
   running the same authorize→review→verdict path against the PR's CURRENT head — same actor allowlist as
   implement-on-ready's dispatch path (re-verified fresh via `gh pr view`: same-repo, bot-authored, open).
@@ -173,9 +179,18 @@ agentic-engineering#43).
   `@claude-code-engineer` resolution-dispatch mention (round-budgeted; escalates to `needs-senior-engineer`
   instead of nudging forever once the head stops moving — automated-researcher#438, see the senior-engineer
   leg below); `mergeable == MERGEABLE` with no completed codex review at the current head → re-fire
-  `review-on-pr.yml` via the actuator above (the residual true-event-loss case, if one exists). It also skips
-  any PR already carrying `needs-senior-engineer` or `needs-human` — those mean another leg of the pipeline
-  (or a person) is already handling it.
+  `review-on-pr.yml` via the actuator above (the residual true-event-loss case, if one exists). It skips a
+  PR already carrying `needs-human` — that's a person's call to clear. `needs-senior-engineer` is not an
+  unconditional skip (automated-researcher#529): the label being present at all is the authoritative
+  "not yet finished" signal (every successful completion path removes it), so the sweep skips only while
+  the label application, or a later `senior-engineer-agent[bot]` adjudication comment, is within a grace
+  window of now. A comment does not by itself prove the run finished — the agent posts it directly via its
+  own `gh` call mid-run, so a crash or timeout right after posting (before senior-engineer.yml's own
+  verify/clear steps run) would otherwise strand the label behind a comment that looks like completed work;
+  a comment only extends the in-flight grace window from its own timestamp instead of suppressing recovery
+  indefinitely. Once the later of the two is older than the grace window with the label still present, the
+  summons that was supposed to run behind it never produced verified adjudication, and the sweep
+  re-dispatches `senior-engineer.yml` itself rather than leaving the PR permanently stranded.
 - **Label lifecycle:** a ticket rests unlabeled until a triager pass assesses it (#437's original batch
   design, evolved by #497 into a per-ticket event-driven leg plus a backstop sweep leg: proposes a flip,
   posted as an on-ticket assessment comment, for the researcher to confirm; v2: acts autonomously within the
