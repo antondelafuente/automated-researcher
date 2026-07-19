@@ -46,14 +46,15 @@ gh issue list -R "$FEEDBACK_PRODUCT_REPO" --state open --limit 100 --search "<te
 
 If an Issue exists, add a recurrence comment instead of duplicating it (check it's still live first — see
 Etiquette). If not, file a new Issue with a type label
-(`bug`, `enhancement`, `documentation`, or `onboarding`) and exactly `needs-design` as the disposition
-label — nothing else. Never self-assign `ready`, `blocked`, `parked`, or `other`: those are
-researcher/triage-applied statuses, not filing-time choices. If you believe the filing is blocked on a
-prerequisite or better parked than actioned, say so in the issue body (e.g. a `blocked-by: #N` line or a
-one-line note) and let the triage pass act on it. Read `references/DISPOSITIONS.md` for the label contract.
+(`bug`, `enhancement`, `documentation`, or `onboarding`) and no disposition label — unlabeled is the resting
+state every newly filed Issue starts in, awaiting a triager assessment and then a researcher decision. Never
+self-assign `ready`, `blocked`, `parked`, or `other`: those are researcher/triage-applied statuses, not
+filing-time choices. If you believe the filing is blocked on a prerequisite or better parked than actioned,
+say so in the issue body (e.g. a `blocked-by: #N` line or a one-line note) and let the triage pass act on it.
+Read `references/DISPOSITIONS.md` for the label contract.
 
 Every Issue filed through this skill (never a hand-filed one — that's the researcher's own filing, not this
-skill's) also carries exactly one **provenance label**, alongside the type and `needs-design` labels above.
+skill's) also carries exactly one **provenance label**, alongside the type label above.
 This is structural attribution — the triager weighs an incident-driven agent report differently from a
 researcher directive, and a label is machine-readable where prose is not:
 
@@ -84,7 +85,7 @@ Posted via `wf.sh issue <claude|codex> create`.
 Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
 
 ```bash
-wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <disposition> -l <provenance>
+wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <provenance>
 wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
 ```
 
@@ -95,7 +96,7 @@ repository owner's identity instead of the agent's — that is exactly what happ
 owner's identity because a box without an `aar-engineering` checkout let a raw-`gh` fallback through. When
 `wf.sh issue` is genuinely unavailable or unconfigured, do not write with the ambient credential as a
 workaround. Instead, persist the fully-drafted Issue — title, body (including the provenance line above),
-and labels (type + disposition + provenance) — to a durable location you already have (the run's artifact
+and labels (type + provenance) — to a durable location you already have (the run's artifact
 store, or the close handoff notes), and surface it LOUDLY in your close summary: state plainly that filing was
 deferred and a properly-credentialed session needs to run `wf.sh issue create` with the persisted draft. The
 draft is the deliverable; the write waits for the right identity.
@@ -149,4 +150,4 @@ researcher's clearance.
   triage queue, not a notebook: the researcher (never the filing agent) applies `ready` after triage, and on
   a deployment with fast auto-implementation a `ready` issue can close within the hour. If it is closed or
   in flight, file a new small ticket linking the old one instead: a comment there is a dead letter the
-  implementor never sees. Shaping comments on an open `needs-design` issue remain the intended flow.
+  implementor never sees. Shaping comments on an open, still-unlabeled issue remain the intended flow.

@@ -14,23 +14,25 @@ guidance. AGENTS.md holds the issue contract, not local workflow paths.
   dispatcher session naming it); the precise boundary of which `ready` Issues get acted on with less
   oversight (especially by blast radius) is undecided, and will be revisited if/when a standing
   auto-handler is actually proposed.
-- **`needs-design`** — default resting state for every newly filed Issue: awaiting a researcher triage/shaping
-  pass before it can be flipped to `ready`. This covers both a plain untriaged item and a direction too vague
-  to start, scoped into `ready` (possibly a few `ready` tickets) through a conversation with the researcher —
-  one resting label, not two. (The former `needs-shaping` label is retired, folded in here: same disposition,
-  one name. Backlog swept 2026-07-11 — no open Issue should carry the old label.)
 - **`blocked`** — decided but gated on a prerequisite; carries a `blocked-by: #N` body line. (When the
   blocker closes, triage clears the label so it's re-dispositioned, usually to `ready`.)
 - **`parked`** — real but deliberately not-now; revisit later. (Distinct from `wontfix` = never.)
 - **`other`** — doesn't fit the others; a recurring `other` is the signal to evolve the vocabulary.
 
-**`needs-design → ready` is the researcher's transition, in every lane.** An agent records the flip only on
+**Unlabeled is the resting state.** Every newly filed Issue stays unlabeled — awaiting a triager assessment
+(posted as an on-ticket comment, automated-researcher#497) and, on the back of it, a researcher decision —
+until it is flipped to one of the labels above. `needs-design` is retired (#497): that resting state is now
+simply the absence of a disposition label, not a separate label of its own. (The former `needs-shaping` label
+was already folded into it the same way, 2026-07-11.)
+
+**`unlabeled → ready` is the researcher's transition, in every lane.** An agent records the flip only on
 the back of an actual researcher conversation, and the flip must **cite it** — a comment on the issue
-summarizing/linking the shaping discussion. An agent asked to *implement* an issue never flips its disposition
+summarizing/linking the shaping discussion (the triager's assessment comment, when one already exists, is
+exactly this citation). An agent asked to *implement* an issue never flips its disposition
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
 close) is that lane's own concern to build out. An Issue an agent files (including via `file-feedback`, see
-#405) carries exactly `needs-design` plus a type label plus, when an agent is the filer, exactly one
+#405) carries exactly a type label plus, when an agent is the filer, exactly one
 provenance label (`agent-filed` or `human-requested` — see `file-feedback`'s filing instructions for
 the class contract) — nothing else besides those: never self-apply `ready`, and never
 self-apply `blocked`, `parked`, or `other` either. Those three remain valid dispositions but are
@@ -38,6 +40,6 @@ researcher/triage-applied only, same reasoning as never self-applying `ready` �
 decision. An agent that believes a filing is blocked or parkable says so in the issue body, for the triage
 pass to act on.
 
-**Invariant:** every open Issue is EITHER unlabeled (= untriaged, awaiting triage — distinct from
-`needs-design`) OR carries **exactly one** disposition. Enforcement flags only an Issue with two-or-more.
+**Invariant:** every open Issue is EITHER unlabeled (= awaiting a disposition decision) OR carries
+**exactly one** disposition. Enforcement flags only an Issue with two-or-more.
 <!-- DISPOSITIONS:END -->

@@ -24,7 +24,7 @@ boundary). It remains **agentic at both levels**: agents *do* the research (this
 **The agents ARE the engineers.** Every Claude Code / Codex instance is an engineer on the team (with its own
 GitHub identity): they author changes, **cross-family-review** each other's PRs (a foreign family is the
 safeguard — "agents are peers" realized in the build), **approve**, and **merge**. The human is the
-**staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`needs-design → ready`), oversees
+**staff-engineer / PM**: sets direction (the Issue backlog) and shapes it (`unlabeled → ready`), oversees
 and can intervene — but is **not a per-PR gate**. This **mirrors the research pipeline** at the direction level:
 design *with the human* on what to build, execution *by the agents*. (The full engineer model + the
 merge-safety properties live with the pipeline in agentic-engineering.)
@@ -166,10 +166,12 @@ agentic-engineering#43).
   `review-on-pr.yml` via the actuator above (the residual true-event-loss case, if one exists). It also skips
   any PR already carrying `needs-senior-engineer` or `needs-human` — those mean another leg of the pipeline
   (or a person) is already handling it.
-- **Label lifecycle:** a ticket rests at `needs-design` until a triager pass assesses it (v1, #437:
-  proposes a flip for the researcher to confirm; v2: acts autonomously within the autonomous-flip class
-  below) → a `ready` flip carries a citation of the shaping conversation plus, when the triager edited the
-  body, a one-line delta summary of what changed → once implementation opens a PR, `needs-senior-engineer`
+- **Label lifecycle:** a ticket rests unlabeled until a triager pass assesses it (#437's original batch
+  design, evolved by #497 into a per-ticket event-driven leg plus a backstop sweep leg: proposes a flip,
+  posted as an on-ticket assessment comment, for the researcher to confirm; v2: acts autonomously within the
+  autonomous-flip class below) → a `ready` flip carries a citation of the shaping conversation (the
+  assessment comment, when the triager already produced one) plus, when the triager edited the body, a
+  one-line delta summary of what changed → once implementation opens a PR, `needs-senior-engineer`
   summons the senior engineer (#438) for in-flight adjudication → `needs-human` parks an escalation the
   senior engineer (or any lane) can't resolve itself, for interactive researcher review. `needs-human` is
   pull-based — no reminders: an unanswered ASK degrades to SKIP, and SKIP is a legitimate outcome, not a stall.
@@ -185,7 +187,7 @@ agentic-engineering#43).
   all (see Reconciler above) — so when same-file siblings batch and one merges, every other open sibling on
   that file goes conflicted and silent until the reconciler or a human notices.
 - **Autonomous-flip class** (v2 forward-reference — the triager doesn't act autonomously until v2, #437,
-  lands): a `needs-design → ready` flip is autonomous when the change is both-models-DO (both review
+  lands): an `unlabeled → ready` flip is autonomous when the change is both-models-DO (both review
   families would independently choose to build it), doc/guidance-level (no product-shape decision), and
   inside the flip budget; a workflow/trust-gate/heuristic ticket may still autonomously flip but is
   senior-engineer-flagged for a closer look in review; a flip where the two models disagree, or that changes
@@ -329,23 +331,25 @@ guidance. AGENTS.md holds the issue contract, not local workflow paths.
   dispatcher session naming it); the precise boundary of which `ready` Issues get acted on with less
   oversight (especially by blast radius) is undecided, and will be revisited if/when a standing
   auto-handler is actually proposed.
-- **`needs-design`** — default resting state for every newly filed Issue: awaiting a researcher triage/shaping
-  pass before it can be flipped to `ready`. This covers both a plain untriaged item and a direction too vague
-  to start, scoped into `ready` (possibly a few `ready` tickets) through a conversation with the researcher —
-  one resting label, not two. (The former `needs-shaping` label is retired, folded in here: same disposition,
-  one name. Backlog swept 2026-07-11 — no open Issue should carry the old label.)
 - **`blocked`** — decided but gated on a prerequisite; carries a `blocked-by: #N` body line. (When the
   blocker closes, triage clears the label so it's re-dispositioned, usually to `ready`.)
 - **`parked`** — real but deliberately not-now; revisit later. (Distinct from `wontfix` = never.)
 - **`other`** — doesn't fit the others; a recurring `other` is the signal to evolve the vocabulary.
 
-**`needs-design → ready` is the researcher's transition, in every lane.** An agent records the flip only on
+**Unlabeled is the resting state.** Every newly filed Issue stays unlabeled — awaiting a triager assessment
+(posted as an on-ticket comment, automated-researcher#497) and, on the back of it, a researcher decision —
+until it is flipped to one of the labels above. `needs-design` is retired (#497): that resting state is now
+simply the absence of a disposition label, not a separate label of its own. (The former `needs-shaping` label
+was already folded into it the same way, 2026-07-11.)
+
+**`unlabeled → ready` is the researcher's transition, in every lane.** An agent records the flip only on
 the back of an actual researcher conversation, and the flip must **cite it** — a comment on the issue
-summarizing/linking the shaping discussion. An agent asked to *implement* an issue never flips its disposition
+summarizing/linking the shaping discussion (the triager's assessment comment, when one already exists, is
+exactly this citation). An agent asked to *implement* an issue never flips its disposition
 label as a step of implementing it — that would let it triage its own way in. This is a norm every lane
 follows; a lane's mechanical *enforcement* of it (e.g. a pre-flight before work starts, vs. a gate only at
 close) is that lane's own concern to build out. An Issue an agent files (including via `file-feedback`, see
-#405) carries exactly `needs-design` plus a type label plus, when an agent is the filer, exactly one
+#405) carries exactly a type label plus, when an agent is the filer, exactly one
 provenance label (`agent-filed` or `human-requested` — see `file-feedback`'s filing instructions for
 the class contract) — nothing else besides those: never self-apply `ready`, and never
 self-apply `blocked`, `parked`, or `other` either. Those three remain valid dispositions but are
@@ -353,6 +357,6 @@ researcher/triage-applied only, same reasoning as never self-applying `ready` �
 decision. An agent that believes a filing is blocked or parkable says so in the issue body, for the triage
 pass to act on.
 
-**Invariant:** every open Issue is EITHER unlabeled (= untriaged, awaiting triage — distinct from
-`needs-design`) OR carries **exactly one** disposition. Enforcement flags only an Issue with two-or-more.
+**Invariant:** every open Issue is EITHER unlabeled (= awaiting a disposition decision) OR carries
+**exactly one** disposition. Enforcement flags only an Issue with two-or-more.
 <!-- DISPOSITIONS:END -->

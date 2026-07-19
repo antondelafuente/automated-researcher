@@ -1,3 +1,31 @@
+- automated-researcher (2026-07-19): triager v1.1 — event-driven per-ticket assessment, on-ticket proposals,
+  backstop sweep, fix the scheduled-actor failure, retire `needs-design` (#497). `triage-assess.yml` now
+  triggers on `issues: [opened, reopened]` and assesses the ONE triggering ticket (still the same two-model
+  blind → sighted-adjudication protocol, artifacts archived per run) instead of waiting for a weekly batch
+  that gathered `needs-design` issues nobody actually labeled. Output moves onto the ticket: one
+  idempotency-marked assessment comment per issue (both blind verdicts, the sighted verdict, reasoning, the
+  proposed body edit as an explicit replacement block) that a re-run edits in place rather than stacking.
+  `workflow_dispatch` now optionally takes a single `issue_number`. The weekly `schedule` leg becomes a
+  backstop sweep (issues that are not `ready`/`needs-human`/`needs-senior-engineer` and carry no assessment
+  comment yet) that also posts a compact rollup digest on #414 listing every open, still-undispositioned
+  issue that already has an assessment, re-derived from that comment's own marker fields (never from
+  in-memory run state) so it's correct across runs; posted only when non-empty. Fixes the root cause of
+  scheduled runs failing silently since 2026-07-13 (found by reading openai/codex-action's own
+  `checkActorPermissions.ts`): on a `schedule` event `github.actor` is a bare login with no `[bot]` suffix,
+  so codex-action's `allow-bot-users` bypass (gated on its own `isBotActor()`) never engaged and fell through
+  to a collaborator-permission lookup that 404s for an App identity; switched to `allow-users`, which matches
+  the actor string directly with no bot-suffix precondition. A failed run now posts a one-line notice (to the
+  triggering issue, or #414 for the sweep) instead of failing silently. Every entry path is actor-gated to
+  the pipeline's usual allowlist — the `issues` trigger additionally checks the issue's own author, since
+  this repo is public and an unguarded event trigger would let any outside filer spend paid API credits and
+  get a bot comment on their own issue for free. `needs-design` is retired from AGENTS.md's disposition
+  contract and its two `DISPOSITIONS.md` copies: unlabeled is now simply the resting state, not a separate
+  label (existing `needs-design`-labeled issues are left as-is, picked up naturally by the sweep's
+  no-assessment-comment predicate; no backlog re-labeling).
+- feedback-loop 0.1.10 (2026-07-19): stop instructing agents to self-apply `needs-design` at filing time
+  (#497's retirement of that label) — `file-feedback` now files with a type label + provenance label only,
+  leaving the Issue unlabeled (the new resting state); `triage-feedback`'s classify list and both packaged
+  `DISPOSITIONS.md` copies drop the label the same way.
 - experiment-lifecycle 0.3.46 (2026-07-17): disambiguate the two visualization surfaces that kept getting
   confused (#484). Real incident: "update the dashboard" routed into `visualize-results` (its trigger words
   also captured dashboard requests) → editorial preview-claim machinery → the researcher corrected mid-flight

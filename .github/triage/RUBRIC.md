@@ -1,9 +1,10 @@
 # Triage rubric (v2)
 
-Read from this repo's base ref by `triage-assess.yml` (automated-researcher#437 — the "Triager, v1" stage of
-the design synthesized on #414). Applied identically by both blind assessors (Fable, Sol) and by the sighted
-adjudication pass. Researcher-locked as-is on 2026-07-12 — edit only on the back of an actual researcher
-conversation, same norm as a `needs-design -> ready` disposition flip (AGENTS.md).
+Read from this repo's base ref by `triage-assess.yml` (automated-researcher#437's original "Triager, v1"
+design synthesized on #414, evolved by #497 into a per-ticket event-driven leg plus a backstop sweep leg).
+Applied identically by both blind assessors (Fable, Sol) and by the sighted adjudication pass.
+Researcher-locked as-is on 2026-07-12 — edit only on the back of an actual researcher conversation, same norm
+as an `unlabeled -> ready` disposition flip (AGENTS.md).
 
 ## The three questions
 

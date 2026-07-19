@@ -1,36 +1,81 @@
 name: triage-assess
 
-# GitHub-native SWE pipeline, triager leg v1 (automated-researcher#437 — the "Triager, v1" stage of the
-# design synthesized on #414). Scheduled + workflow_dispatch: assesses the open `needs-design` backlog and
-# proposes, but writes NOTHING to any assessed issue — v1 deliberately has no label/body permissions, and
-# creates no Issues of any kind. Both blind assessments (Fable, Sol — same cross-family split
-# review-on-pr.yml already uses) and the sighted adjudication's full proposal (verdicts + proposed body
-# edits + proposed wave composition) are archived as run artifacts for auditability; a bounded summary
-# (counts + per-ticket verdict table + a link back to the run artifact), marker-prefixed and chunked into
-# sequential "part k/N" comments if it would ever outgrow one comment, is posted to #414. All three model
-# outputs — both blind assessments and the adjudication — have their returned ticket set asserted to
+# GitHub-native SWE pipeline, triager leg v1.1 (automated-researcher#497, evolving the v1 batch design from
+# #437/#414 without granting any new write powers — still assess-and-propose, zero label/body writes). Fixes
+# three verified v1 defects:
+#   1. v1 gathered open `needs-design` issues, but tickets are filed unlabeled in practice — a v1 run assessed
+#      nothing. This leg is event-driven (`issues: [opened, reopened]`) and assesses the ONE triggering ticket
+#      regardless of its labels, plus a scheduled backstop sweep (see below) that no longer filters by label.
+#   2. A weekly batch mismatched the pipeline's own event-summoned-never-polling rule. Assessment now happens
+#      per-ticket, within minutes of filing.
+#   3. Scheduled runs failed silently since 2026-07-13: on a `schedule` event `github.actor` is the bare login
+#      of whoever last modified this workflow file (no `[bot]` suffix for an App identity), so
+#      openai/codex-action's `allow-bot-users` bypass (which requires `isBotActor()` — an actor ending in
+#      `[bot]` — before it even looks at the allowlist) never engaged; execution fell through to a
+#      collaborator-permission lookup for that bare login, which 404s (an App isn't a listed collaborator
+#      under that form) and rejects the run. Root-caused by reading codex-action's own
+#      `src/checkActorPermissions.ts` (pinned SHA below) rather than guessing. Fixed by passing the SAME
+#      dynamic actor value via `allow-users` instead: it matches the actor string directly, with no
+#      bot-suffix precondition, so it engages correctly under every trigger type's representation of the
+#      actor (bare login on `schedule`, `<slug>[bot]` on `issues`/human `workflow_dispatch`) with one line, no
+#      per-event branching needed. A failed run is now also VISIBLE (see post-failure-notice) — silent
+#      failure is what hid this defect for five days.
+#
+# Both blind assessments (Fable, Sol — same cross-family split review-on-pr.yml already uses) and the sighted
+# adjudication's full proposal (verdicts + proposed body edits + proposed wave composition) are archived as
+# run artifacts for auditability, same as v1. Output moves ONTO the ticket now instead of a digest-only
+# comment on #414 (#497 design item 2): each assessed ticket gets exactly one idempotency-marked comment
+# (`<!-- TRIAGE-ASSESSMENT-VERDICT: ... -->` as its first line; a re-run for the same ticket — a manual
+# `workflow_dispatch` re-request, or a `reopened` re-trigger — edits that comment in place rather than
+# stacking a new one) carrying both blind verdicts, the sighted verdict, reasoning, and the proposed body
+# edit as an explicit replacement block. All three model outputs have their returned ticket set asserted to
 # exactly match the gathered set (.github/triage/validate_coverage.sh) immediately after parsing; on any
-# mismatch the run fails closed at that point and posts nothing, so a corrupt blind pass never even reaches
-# adjudication. The adjudication output additionally gets a semantic wave-assignment check (--check-wave):
-# DO verdict requires an integer wave >= 1, SKIP/ASK verdict requires a null wave, same fail-closed path.
-# The blind-vs-sighted agreement signal is this design's audit anchor, so it is computed, never asserted
-# (PR #456 P0/round 4): the adjudicator contributes only a per-ticket final verdict + rationale + proposed
-# body edit — no `disagreement` field and no self-reported aggregate `summary` exist in its schema at all.
-# post-digest derives per-ticket disagreement (Fable blind verdict != Sol blind verdict) and every DO/SKIP/
-# ASK/disagreement count itself, script-side, from the three validated model outputs.
-# See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for
-# the rubric every assessment/adjudication pass applies. v2 (write actions: body edits, budgeted flips,
-# ASK parking) is a separate ticket, filed only after v1's proposals prove out for a batch or two.
+# mismatch the run fails closed at that point, so a corrupt blind pass never even reaches adjudication (same
+# invariant v1 established, PR #456). The adjudication output additionally gets the same semantic
+# wave-assignment check (--check-wave).
+#
+# The weekly `schedule` leg is now a BACKSTOP SWEEP (#497 design item 3), not the primary path: it gathers
+# open issues that are NOT `ready`, NOT `needs-human`/`needs-senior-engineer`, and carry NO assessment comment
+# yet (event-missed stragglers — including, on its first run, today's entire unlabeled backlog) and assesses
+# each through the identical blind/adjudicate pipeline. It additionally posts (or updates) one compact ROLLUP
+# digest comment on #414 — every open, still-undispositioned issue that already carries an assessment comment
+# (from this run or any earlier one), i.e. "awaiting researcher action" — only when that set is non-empty
+# (#497 design item 4). `workflow_dispatch` accepts an optional `issue_number`: given, it re-runs the
+# single-ticket path against that issue's current state (a manual re-request); omitted, it runs the sweep.
+#
+# Every entry path is actor-gated to the same allowlist every other actuator in this pipeline uses
+# (researcher + the two engineer bots, both App-identity representations — automated-researcher#381's
+# dual-representation precedent). This repo is public (AGENTS.md), so `issues: opened/reopened` fires on ANY
+# GitHub user's issue — without this gate, an outside filer could trigger paid model calls and a bot-authored
+# comment on their own issue for free (openai/codex-action's own docs/security.md warns about exactly this
+# class of abuse). An issue filed by anyone else still gets picked up by the backstop sweep, just on the
+# sweep's own (non-attacker-controlled) cadence instead of within minutes.
+#
+# Concurrency is per-issue (#497 design item 7): bulk filings assess in parallel, keyed by issue number; the
+# sweep uses its own single group so it doesn't race a concurrent sweep, but never blocks on (or is blocked
+# by) any per-issue run.
+#
+# See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for the
+# rubric every assessment/adjudication pass applies.
 
 on:
+  issues:
+    types: [opened, reopened]
   schedule:
-    # Weekly; cadence is not load-bearing at current backlog volume (issue #437 acceptance) and GitHub
-    # throttles aggressive crons anyway (observed on automated-researcher#431's reconciler).
+    # Weekly backstop; cadence is not load-bearing (issue #437 acceptance) since the event path now handles
+    # same-day assessment and this leg exists only to catch stragglers.
     - cron: '0 15 * * 1'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Assess this one issue (its current state). Leave blank to run the backstop sweep instead."
+        required: false
+        type: number
 
 concurrency:
-  group: triage-assess
+  # Per-issue group so bulk filings assess in parallel without racing each other; the sweep (no issue number
+  # in play) gets its own fixed group instead of colliding with — or blocking on — any per-issue run.
+  group: triage-assess-${{ github.event.issue.number || github.event.inputs.issue_number || 'sweep' }}
   cancel-in-progress: true
 
 permissions:
@@ -38,56 +83,100 @@ permissions:
   issues: read
 
 env:
-  # Fixed digest destination (issue #437's design: "post the whole proposal as a single comment on #414").
+  # Fixed rollup destination (issue #437's design, reused by #497's sweep leg).
   DIGEST_ISSUE: 414
+  # First line of every posted assessment comment — used identically to detect "already assessed" (gather's
+  # straggler exclusion and the rollup's awaiting-action scan) and to find-or-edit the comment in post-results.
+  # Keep this literal in sync across all three uses if it's ever changed.
+  ASSESSMENT_MARKER_PREFIX: "<!-- TRIAGE-ASSESSMENT-VERDICT:"
 
 jobs:
   gather:
     name: gather
     runs-on: ubuntu-latest
-    # Coarse pre-filter on workflow_dispatch, mirroring the other pipeline workflows' actor allowlist (this
-    # run's last job mints a write-capable engineer token to post the digest comment, so the same
-    # defense-in-depth applies even though this workflow's blast radius is much smaller than the
-    # implementor/reviewer legs — it makes zero mutations to any assessed issue). A `schedule` event has no
-    # meaningful actor to check, so it is always allowed. Downstream jobs all key off `needs: gather`, so
-    # gating this one job gates the whole chain.
+    # Coarse pre-filter (mirrors every other actuator's job-level `if:` in this pipeline). `schedule` has no
+    # meaningful actor and is always allowed (it's not attacker-controlled timing). `issues` is gated on the
+    # EVENT SENDER (spoof-resistant — the event payload field, not a guessable title/label match) so an
+    # outside actor on this public repo can't trigger a privileged run by opening OR reopening an issue;
+    # their ticket still reaches the backstop sweep. Deliberately `sender`, not `issue.user` (the original
+    # filer): for `reopened` those can differ (an allowlisted person reopening someone else's old issue for
+    # reassessment must still work), and `sender` is the correct "who caused this event" check either way —
+    # for `opened` it's the same identity as the filer. `workflow_dispatch` is gated on the triggering actor,
+    # same allowlist as every other manual lever in this pipeline.
     if: |
       github.event_name == 'schedule' ||
+      (github.event_name == 'issues' &&
+        contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.event.sender.login)) ||
       (github.event_name == 'workflow_dispatch' &&
         contains(fromJSON('["antondelafuente","claude-code-engineer[bot]","codex-engineer[bot]","app/claude-code-engineer","app/codex-engineer"]'), github.actor))
+    outputs:
+      mode: ${{ steps.build.outputs.mode }}
+      issue_number: ${{ steps.build.outputs.issue_number }}
+      ticket_count: ${{ steps.build.outputs.ticket_count }}
     steps:
       - name: Checkout base branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
           persist-credentials: false
 
-      # Builds one packet per open `needs-design` issue: title, body, labels, age, the full comment thread
-      # (triage-relevant context often lives there, e.g. a later comment narrowing scope), and
-      # `referenced_issues` (a #NNN-mention scan across body+comments — a hint toward linked incidents, not
-      # an authoritative link graph).
-      - name: Build ticket packets
+      # Single-ticket mode (an `issues` event, or `workflow_dispatch` with issue_number set) builds a one-entry
+      # packet for exactly the triggering/requested issue, unconditionally — its current labels never gate
+      # whether it gets assessed. Sweep mode (schedule, or workflow_dispatch with no issue_number) builds one
+      # packet per open issue that is NOT `ready`, NOT `needs-human`/`needs-senior-engineer`, and carries no
+      # assessment comment yet (the event-missed-stragglers predicate, #497 design item 3) — deliberately NOT
+      # excluding `blocked`/`parked`/`other` here: those are rare, and once assessed once they carry the
+      # marker comment too, so the no-marker clause already keeps them from being reassessed forever.
+      - name: Build ticket packet(s)
         id: build
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_ISSUE_INPUT: ${{ github.event.inputs.issue_number }}
         run: |
           set -euo pipefail
           NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          if ! gh issue list --repo "$REPO" --label needs-design --state open \
-              --json number,title,body,labels,createdAt,comments --limit 300 > /tmp/raw_issues.json; then
-            echo "::error::gh issue list failed"
-            exit 1
+          if [ "$EVENT_NAME" = "issues" ]; then
+            MODE=single
+            ISSUE_NUMBER="$EVENT_ISSUE_NUMBER"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$DISPATCH_ISSUE_INPUT" ]; then
+            MODE=single
+            ISSUE_NUMBER="$DISPATCH_ISSUE_INPUT"
+          else
+            MODE=sweep
           fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          [ "$MODE" = single ] && echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
 
-          # No pagination in v1 (issue #437 acceptance) — but a silently truncated gathered set would then
-          # pass exact-set coverage validation against itself, masking the truncation instead of catching
-          # it. If the query saturates the --limit, fail loudly instead (PR #456 P1/round 4); raise the
-          # limit (or add pagination) once the backlog is actually within range of it.
-          raw_count=$(jq 'length' /tmp/raw_issues.json)
-          if [ "$raw_count" -eq 300 ]; then
-            echo "::error::gh issue list returned exactly 300 ticket(s) — backlog exceeds gather limit — raise it"
-            exit 1
+          if [ "$MODE" = single ]; then
+            if ! gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
+                --json number,title,body,labels,createdAt,comments > /tmp/raw_issue.json; then
+              echo "::error::gh issue view $ISSUE_NUMBER failed"
+              exit 1
+            fi
+            jq -s '.' /tmp/raw_issue.json > /tmp/candidates.json
+          else
+            if ! gh issue list --repo "$REPO" --state open \
+                --json number,title,body,labels,createdAt,comments --limit 300 > /tmp/raw_issues.json; then
+              echo "::error::gh issue list failed"
+              exit 1
+            fi
+            # No pagination in v1 (issue #437 acceptance) — a silently truncated fetch must not pass
+            # coverage validation against itself, so fail loudly instead of masking it.
+            raw_count=$(jq 'length' /tmp/raw_issues.json)
+            if [ "$raw_count" -eq 300 ]; then
+              echo "::error::gh issue list returned exactly 300 open issue(s) — backlog exceeds gather limit — raise it"
+              exit 1
+            fi
+            jq --arg marker "$ASSESSMENT_MARKER_PREFIX" '
+              [ .[] | select(
+                  (.labels | map(.name) | any(. == "ready" or . == "needs-human" or . == "needs-senior-engineer")) | not
+                ) | select(
+                  ([.comments[].body // ""] | any(startswith($marker))) | not
+                ) ]
+            ' /tmp/raw_issues.json > /tmp/candidates.json
           fi
 
           jq --arg now "$NOW" '
@@ -108,10 +197,10 @@ jobs:
                 referenced_issues: refs( ((.body // "") + "\n" + ([.comments[].body // ""] | join("\n"))); .number )
               } ]
             }
-          ' /tmp/raw_issues.json > triage-packets.json
+          ' /tmp/candidates.json > triage-packets.json
 
           ticket_count=$(jq '.tickets | length' triage-packets.json)
-          echo "gathered $ticket_count open needs-design ticket(s)"
+          echo "mode=$MODE gathered $ticket_count ticket(s)"
           echo "ticket_count=$ticket_count" >> "$GITHUB_OUTPUT"
 
       - name: Upload packets artifact
@@ -235,7 +324,13 @@ jobs:
           # only as review-on-pr.yml's own conscious change, never as a side effect of touching this file.
           model: gpt-5.6-sol
           effort: medium
-          allow-bot-users: ${{ github.actor }}
+          # automated-researcher#497 root cause (see this file's header): `allow-bot-users` only bypasses the
+          # collaborator-permission check when codex-action's own isBotActor() sees an actor ending in
+          # `[bot]` — true for `issues`/human `workflow_dispatch` runs, but NOT for `schedule` runs, where
+          # `github.actor` is the bare login of whoever last modified this workflow file. `allow-users`
+          # matches the actor string directly with no bot-suffix precondition, so passing the same dynamic
+          # value through it instead covers every trigger type's actor representation uniformly.
+          allow-users: ${{ github.actor }}
           prompt: ${{ steps.render_prompt.outputs.prompt }}
           output-file: triage-blind-sol.json
           output-schema: |
@@ -307,7 +402,7 @@ jobs:
       # The backfill (issue #437's design): the two 2026-07-11 dry runs' recommendations live only in
       # #414's comment thread. Pinned to those two specific comment IDs — not a fetch of the whole
       # thread — so this stays constant-size by construction and can never accumulate this same
-      # workflow's own later digest comments on #414 (PR #456 P0: self-accumulating backfill context).
+      # workflow's own later assessment/rollup comments (PR #456 P0: self-accumulating backfill context).
       - name: Fetch backfill recommendations from #414 (pinned dry-run comments)
         id: backfill
         env:
@@ -377,22 +472,22 @@ jobs:
           path: triage-adjudication.json
           retention-days: 90
 
-      # A confidently incomplete digest is worse than no digest (PR #456 P0/round 2): assert the returned
+      # A confidently incomplete assessment is worse than none (PR #456 P0/round 2): assert the returned
       # ticket-number set is EXACTLY the gathered set, no omissions/duplicates/invented numbers, using the
       # same shared check the two blind-assess jobs already ran on their own outputs. On any mismatch, fail
-      # loudly with the diff in the log and post nothing — post-digest is gated on `needs: adjudicate`, so
-      # a failure here already prevents any comment; a scheduled run retries next cycle.
+      # loudly with the diff in the log and post nothing — post-results is gated on `needs: adjudicate`, so
+      # a failure here already prevents any comment; post-failure-notice makes that failure visible.
       # --check-wave (PR #456 round 5) additionally enforces DO => integer wave >= 1, SKIP/ASK => null wave
       # — only this call site passes it, since the blind-assessment schema has no `wave` field to check.
       - name: Validate adjudication ticket coverage
         run: .github/triage/validate_coverage.sh "adjudication" triage-packets.json triage-adjudication.json .tickets --check-wave
 
-  post-digest:
-    name: post-digest
-    needs: adjudicate
-    # Fresh runner, no repo checkout — same rationale as implement-on-ready's enable-automerge job: only
-    # ever talks to the GitHub API, using its own freshly minted token, never whatever host state a prior
-    # agent-running job left behind.
+  post-results:
+    name: post-results
+    needs: [gather, blind-assess-fable, blind-assess-sol, adjudicate]
+    # Fresh runner, no repo checkout — same rationale as the old post-digest job: only ever talks to the
+    # GitHub API, using its own freshly minted token, never whatever host state a prior agent-running job
+    # left behind.
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -416,17 +511,14 @@ jobs:
         with:
           name: triage-blind-sol
 
-      # v1 creates no issues (PR #456 P0: an unbounded issue-creation fallback both can't actually stay
-      # under the same 65536-char limit it exists to dodge, and violates the agent-filed-Issue labeling
-      # rules). Split the render in two: `full` (everything, including proposed body edits, which can be
-      # arbitrarily large) always goes to a run artifact; `summary` (counts + per-ticket verdict table +
-      # a link back to this run's artifact) is the bounded piece that goes to #414 as a comment.
-      #
-      # Per-ticket `disagreement` and every DO/SKIP/ASK/disagreement count are computed HERE, from the two
-      # validated blind passes' own recorded verdicts and the validated adjudication array — never taken
-      # from the adjudicator's self-report (PR #456 P0/round 4: the blind-vs-sighted agreement signal is
-      # this design's audit anchor, so it must be mechanical, not asserted).
-      - name: Render digest markdown (full artifact + bounded #414 summary)
+      # Per-ticket `disagreement` is computed HERE, from the two validated blind passes' own recorded
+      # verdicts — never taken from the adjudicator's self-report (PR #456 P0/round 4: the blind-vs-sighted
+      # agreement signal is this design's audit anchor, so it must be mechanical, not asserted). The rendered
+      # body's first line is the machine-parseable marker (verdict) the rollup step below re-reads back off
+      # the issue later; the second line carries the escaped one-line notes the same way. The (only
+      # practically unbounded) proposed-body-edit block is dropped in favor of a run-artifact pointer if the
+      # full comment would exceed GitHub's 65536-char comment cap.
+      - name: Render per-ticket assessment comments
         id: render
         env:
           SERVER_URL: ${{ github.server_url }}
@@ -439,61 +531,40 @@ jobs:
           jq -n --slurpfile packets triage-packets.json --slurpfile adj triage-adjudication.json \
                 --slurpfile fable triage-blind-fable.json --slurpfile sol triage-blind-sol.json \
                 --arg run_url "$RUN_URL" '
-            # Model-authored free text (title, notes) can contain a literal "|" or embedded newline, either
-            # of which would corrupt a markdown table row — escape both before interpolating into one.
-            def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
-            ($packets[0].tickets | map({(.number|tostring): .title}) | add // {}) as $titles |
-            ($fable[0].assessments | map({(.number|tostring): .verdict}) | add) as $fable_verdicts |
-            ($sol[0].assessments | map({(.number|tostring): .verdict}) | add) as $sol_verdicts |
-            ( $adj[0].tickets | map(. + {
-                disagreement: ($fable_verdicts[(.number|tostring)] != $sol_verdicts[(.number|tostring)])
-              }) | sort_by(.number)
-            ) as $tickets |
-            ( $tickets | map(select(.verdict == "DO")) | length ) as $do_count |
-            ( $tickets | map(select(.verdict == "SKIP")) | length ) as $skip_count |
-            ( $tickets | map(select(.verdict == "ASK")) | length ) as $ask_count |
-            ( $tickets | map(select(.disagreement)) | length ) as $disagreement_count |
-            ( ($do_count|tostring) + " DO, " + ($skip_count|tostring) + " SKIP, " + ($ask_count|tostring) +
-              " ASK. " + ($disagreement_count|tostring) + " ticket(s) show disagreement between the two " +
-              "blind passes (computed from Fable'"'"'s and Sol'"'"'s recorded blind verdicts, not the " +
-              "adjudicator'"'"'s report)."
-            ) as $computed_summary |
-            ( "# Triage digest (" + $packets[0].generated_at + ")\n\n" +
-              "Assessed " + ($packets[0].tickets | length | tostring) + " open `needs-design` ticket(s). " +
-              "Assess-and-propose only (automated-researcher#437 v1) — no label or body writes were made by this run.\n\n" +
-              $computed_summary + "\n\n" +
-              "| # | Title | Verdict | Disagreement | Wave | Notes |\n" +
-              "|---|-------|---------|--------------|------|-------|\n" +
-              ( $tickets | map(
-                  "| #" + (.number|tostring) + " | " + (($titles[(.number|tostring)] // "?") | esc) + " | " + .verdict +
-                  " | " + (if .disagreement then "yes" else "" end) +
-                  " | " + ((.wave // "") | tostring) +
-                  " | " + (.notes | esc) + " |"
-                ) | join("\n") )
-            ) as $header_and_table |
-            {
-              summary: ($header_and_table + "\n\nFull digest (verdicts + proposed body edits): " + $run_url + "\n"),
-              full: ($header_and_table + "\n\n## Proposed body edits\n\n" +
-                ( ($tickets | map(select(.proposed_body_edit != null))) as $edits |
-                  if ($edits | length) == 0 then "None proposed this run.\n"
-                  else ($edits | map(
-                      "### #" + (.number|tostring) + "\n\n<details><summary>proposed replacement body</summary>\n\n```\n" + .proposed_body_edit + "\n```\n\n</details>\n"
-                    ) | join("\n"))
-                  end
-                ) + "\n"
-              )
-            }
-          ' > digest-rendered.json
-
-          jq -r '.full' digest-rendered.json > digest-full.md
-          jq -r '.summary' digest-rendered.json > digest-summary.md
-
-      - name: Upload full digest artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
-        with:
-          name: triage-digest-full
-          path: digest-full.md
-          retention-days: 90
+            # HTML-comment-safe: a literal "-->" in model-authored text would otherwise terminate the
+            # marker comment early; collapse to one line so the marker stays a single scannable line.
+            def esc_marker: gsub("-->"; "- >") | gsub("\n"; " ");
+            ($fable[0].assessments | map({(.number|tostring): .}) | add // {}) as $fable_by_num |
+            ($sol[0].assessments   | map({(.number|tostring): .}) | add // {}) as $sol_by_num |
+            ( $adj[0].tickets | map(
+                (.number|tostring) as $k |
+                $fable_by_num[$k] as $f |
+                $sol_by_num[$k] as $s |
+                ($f.verdict != $s.verdict) as $disagreement |
+                ( "<!-- TRIAGE-ASSESSMENT-VERDICT: " + .verdict + " -->\n" +
+                  "<!-- TRIAGE-ASSESSMENT-NOTES: " + (.notes | esc_marker) + " -->\n\n" +
+                  "# Triage assessment\n\n" +
+                  "**Sighted verdict: " + .verdict + "** · blind verdicts: Fable=" + $f.verdict +
+                  ", Sol=" + $s.verdict + (if $disagreement then " (blind assessors disagreed)" else "" end) +
+                  "\n\n" + .notes + "\n\n" +
+                  "<details><summary>Fable blind assessment (importance: " + $f.importance + ")</summary>\n\n" +
+                  $f.reasoning + "\n\n</details>\n\n" +
+                  "<details><summary>Sol blind assessment (importance: " + $s.importance + ")</summary>\n\n" +
+                  $s.reasoning + "\n\n</details>\n\n"
+                ) as $head |
+                (if .proposed_body_edit != null then
+                   "## Proposed replacement body\n\n<details><summary>proposed replacement body</summary>\n\n```\n" +
+                   .proposed_body_edit + "\n```\n\n</details>\n\n"
+                 else "" end) as $edit_block |
+                ($head + $edit_block + "Full run: " + $run_url + "\n") as $full_body |
+                ( if ($full_body | length) > 64000 then
+                    ($head + "Proposed replacement body omitted here (too large for a single comment) — see the full run artifact: " + $run_url + "\n")
+                  else $full_body end
+                ) as $final_body |
+                {(.number|tostring): $final_body}
+              ) | add // {}
+            )
+          ' > ticket-comments.json
 
       - name: Mint claude engineer App token
         id: mint_claude_token
@@ -504,57 +575,148 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      # Every comment this workflow posts on #414 is prefixed with a fixed marker (PR #456 P0:
-      # self-accumulation) so it is recognizable as this workflow's own output at a glance; the backfill
-      # step above no longer fetches the #414 thread at all (it reads two pinned comment IDs), so this
-      # marker doesn't gate anything today, but keeping every digest comment self-identifying is cheap and
-      # future-proofs any later reader of that thread.
-      - name: Post digest summary comment(s) on #414
+      # Idempotent per-ticket upsert: find an existing marker comment on the issue (there is at most one, by
+      # construction — every write here goes through this same find-or-create) and PATCH it in place; only
+      # create a new comment when none exists yet. This is what makes a re-run for the same ticket (a manual
+      # workflow_dispatch re-request, or a `reopened` re-trigger) edit its prior comment instead of stacking.
+      - name: Post/update per-ticket assessment comments
         env:
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          MARKER='<!-- TRIAGE-DIGEST -->'
-          LIMIT=64000
+          numbers=$(jq -r 'keys[]' ticket-comments.json)
+          if [ -z "$numbers" ]; then
+            echo "no tickets to assess this run"
+          fi
+          for n in $numbers; do
+            body=$(jq -r --arg k "$n" '.[$k]' ticket-comments.json)
+            # `gh api --jq` has no `--arg` (it's a query-string-only flag, unlike the standalone jq
+            # binary) — the marker constant is spliced into the query string directly instead; it's a
+            # workflow-defined literal, not untrusted input.
+            existing_id=$(gh api "repos/$REPO/issues/$n/comments" --paginate \
+              --jq ".[] | select(.body | startswith(\"$ASSESSMENT_MARKER_PREFIX\")) | .id" \
+              | head -n1)
+            if [ -n "$existing_id" ]; then
+              gh api "repos/$REPO/issues/comments/$existing_id" -X PATCH -f body="$body" > /dev/null
+              echo "updated existing assessment comment on #$n (comment $existing_id)"
+            else
+              gh issue comment "$n" --repo "$REPO" --body "$body"
+              echo "posted new assessment comment on #$n"
+            fi
+          done
 
-          summary=$(cat digest-summary.md)
-          single="${MARKER}"$'\n\n'"${summary}"
+      # Rollup (sweep leg only, #497 design item 4): re-list open issues AFTER the writes above (so a
+      # straggler assessed by THIS run already shows up), find every one that carries no disposition/
+      # escalation label yet (still awaiting a researcher decision) AND already has an assessment comment,
+      # and re-derive its verdict/notes straight off that comment's own marker lines — never off this run's
+      # in-memory adjudication, so a ticket assessed in an EARLIER run (event-driven or a prior sweep) is
+      # represented correctly too. Posted only when non-empty; skipped entirely otherwise (design item 4).
+      - name: Build + post rollup digest on #414 (sweep only)
+        if: needs.gather.outputs.mode == 'sweep'
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          if ! gh issue list --repo "$REPO" --state open \
+              --json number,title,labels,comments --limit 300 > /tmp/all_open.json; then
+            echo "::error::gh issue list (rollup) failed"
+            exit 1
+          fi
 
-          if [ "${#single}" -le "$LIMIT" ]; then
-            gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$single"
+          jq --arg marker "$ASSESSMENT_MARKER_PREFIX" '
+            def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
+            [ .[] | select(
+                (.labels | map(.name) | any(. == "ready" or . == "blocked" or . == "parked" or . == "other"
+                  or . == "needs-human" or . == "needs-senior-engineer")) | not
+              ) | (.comments | map(.body // "") | map(select(startswith($marker))) | first) as $m
+              | select($m != null)
+              | {
+                  number, title,
+                  verdict: ($m | capture($marker + " (?<v>[A-Z]+) -->") .v),
+                  notes: ($m | capture("TRIAGE-ASSESSMENT-NOTES: (?<n>.*) -->") .n)
+                }
+            ] | sort_by(.number)
+          ' /tmp/all_open.json > awaiting-action.json
+
+          count=$(jq 'length' awaiting-action.json)
+          if [ "$count" -eq 0 ]; then
+            echo "no open, undispositioned, already-assessed tickets — skipping rollup (design item 4: only when non-empty)"
             exit 0
           fi
 
-          echo "digest summary is ${#single} chars (> ${LIMIT}); chunking into sequential '#${DIGEST_ISSUE}' comments"
+          jq -r --arg url "${SERVER_URL}/${REPO}" '
+            def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
+            "# Triage rollup (" + (now | strftime("%Y-%m-%dT%H:%M:%SZ")) + ")\n\n" +
+            (length | tostring) + " open ticket(s) already assessed and awaiting a researcher decision.\n\n" +
+            "| # | Title | Verdict | Notes |\n|---|-------|---------|-------|\n" +
+            ( map(
+                "| [#" + (.number|tostring) + "](" + $url + "/issues/" + (.number|tostring) + ") | " +
+                (.title | esc) + " | " + .verdict + " | " + (.notes | esc) + " |"
+              ) | join("\n") )
+          ' awaiting-action.json > digest-body.md
 
-          # Reserve room for the marker + "part k/N" header added to every chunk, then pack line-by-line
-          # (never mid-line) so a chunk never cuts a markdown table row in half; a single line that alone
-          # exceeds the budget (not expected at current ticket-note lengths) is hard-split as a last
-          # resort so every posted chunk still respects the hard cap.
-          HEADER_BUDGET=200
-          BUDGET=$((LIMIT - HEADER_BUDGET))
-          jq -Rs --argjson budget "$BUDGET" '
-            (split("\n") as $lines |
-             reduce $lines[] as $line ([""];
-               (if .[-1] == "" then $line else .[-1] + "\n" + $line end) as $candidate |
-               if (.[-1] | length) > 0 and ($candidate | length) > $budget
-               then . + [$line]
-               else (.[0:-1] + [$candidate])
-               end
-             )
-            ) as $packed |
-            [ $packed[] |
-              if length <= $budget then [.]
-              else [range(0; length; $budget) as $i | .[$i:$i+$budget]]
-              end
-            ] | flatten
-          ' digest-summary.md > /tmp/digest-chunks.json
+          MARKER='<!-- TRIAGE-DIGEST -->'
+          body="${MARKER}"$'\n\n'"$(cat digest-body.md)"
 
-          total=$(jq 'length' /tmp/digest-chunks.json)
-          for i in $(seq 0 $((total - 1))); do
-            n=$((i + 1))
-            chunk=$(jq -r --argjson i "$i" '.[$i]' /tmp/digest-chunks.json)
-            body="${MARKER}"$'\n\n'"part ${n}/${total}"$'\n\n'"${chunk}"
+          # Same `gh api --jq` has-no-`--arg` constraint as post-results' per-ticket upsert — splice the
+          # (workflow-defined) marker literal into the query string directly.
+          existing_id=$(gh api "repos/$REPO/issues/${DIGEST_ISSUE}/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$MARKER\")) | .id" | head -n1)
+          if [ -n "$existing_id" ]; then
+            gh api "repos/$REPO/issues/comments/$existing_id" -X PATCH -f body="$body" > /dev/null
+            echo "updated rollup digest comment on #${DIGEST_ISSUE} (comment $existing_id)"
+          else
             gh issue comment "$DIGEST_ISSUE" --repo "$REPO" --body "$body"
-          done
+            echo "posted new rollup digest comment on #${DIGEST_ISSUE}"
+          fi
+
+  post-failure-notice:
+    name: post-failure-notice
+    needs: [gather, blind-assess-fable, blind-assess-sol, adjudicate, post-results]
+    # failure() is true only when a job in the chain actually ran and failed — a job skipped by its own
+    # (unauthorized-actor) `if:` propagates as a skip, not a failure, so a rejected/unauthorized attempt
+    # correctly produces no noise here. This is the visibility fix for defect 3: a run that gets this far
+    # and then fails must not fail silently the way the scheduled actor-gate bug did for five days.
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Recomputed independently from event context (not from `gather`'s outputs, which may not exist if
+      # gather itself is the job that failed): `issues` → the triggering issue; `workflow_dispatch` with
+      # issue_number → that issue; otherwise (schedule, or a sweep-mode dispatch) → the sweep leg, notice
+      # goes to #414 (design item 5: "the triggering issue (event path) or #414 (sweep path)").
+      - name: Post one-line failure notice
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_ISSUE_INPUT: ${{ github.event.inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          RUN_URL="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+
+          if [ "$EVENT_NAME" = "issues" ]; then
+            TARGET="$EVENT_ISSUE_NUMBER"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$DISPATCH_ISSUE_INPUT" ]; then
+            TARGET="$DISPATCH_ISSUE_INPUT"
+          else
+            TARGET="$DIGEST_ISSUE"
+          fi
+
+          gh issue comment "$TARGET" --repo "$REPO" \
+            --body "Triage assessment run failed: ${RUN_URL}"
