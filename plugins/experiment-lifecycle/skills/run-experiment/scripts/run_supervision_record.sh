@@ -6,13 +6,15 @@
 # interprets it).
 #
 # WHAT IT IS: a tiny per-run JSON record carrying RELAUNCH-scoped state only —
-#   desired_active / stopped / closed / handoff_path / lease_pod_ids / session_handle /
+#   desired_active / stopped / closed / handoff_path / lease_pod_ids / session_handle / worktree_path /
 #   relaunch_requested / relaunch_reason / timestamps. It LINKS to the gpu-job pod lease(s) (the #54
 #   child-2 record) by pod id; it never holds pod-DELETION policy (that is the lease's domain). The
 #   model-free supervisor reads `is-desired-active` to decide whether a gone session should be
 #   relaunched (desired-active, not stopped, not closed) or left alone (a deliberate /quit or a
 #   finished run), reads `is-relaunch-requested` for the positive agent-declared "relaunch me" signal,
-#   and reads `session-handle` for the opaque instance binding telling it WHICH session a run maps to.
+#   reads `session-handle` for the opaque instance binding telling it WHICH session a run maps to, and
+#   reads `worktree-path` (bound at `start`) for the run-id<->worktree binding `reap_worktree.sh` checks
+#   before it will remove a worktree (automated-researcher#535 review round 2).
 #
 # WHY A HELPER, NOT PROSE: the record is genuinely stateful, so one product implementation owns the
 #   atomic-write + monotonic-state semantics rather than every consumer (claude-pane-loop.sh, the
@@ -45,6 +47,11 @@
 #              (absent/invalid/stopped/active all fail closed). The reap guard: only a finished run is
 #              reapable, so a parked/blocked (desired-active) run's session is never torn down.
 #   session-handle -> print the opaque instance handle ("" + exit 1 if unset/missing).
+#   worktree-path -> print the run's own worktree path, bound at `start`/`checkpoint` via `--worktree PATH`
+#              ("" + exit 1 if unset/missing). This is the run-id<->worktree BINDING `reap_worktree.sh`
+#              checks (automated-researcher#535 review, round 2): the record is written from INSIDE the
+#              run's own worktree at start, so a clean-closed run-id can only ever name its OWN worktree
+#              path here, never a peer's.
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
 #   the terminal-state guard runs INSIDE that lock — so a concurrent `update` cannot read-modify-write
@@ -52,8 +59,8 @@
 #   lock, so a crash mid-write never leaves a half-written record.
 #
 # USAGE:
-#   run_supervision_record.sh start|create <run-id> [--handoff PATH] [--session-handle H]
-#   run_supervision_record.sh checkpoint|update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H]
+#   run_supervision_record.sh start|create <run-id> [--handoff PATH] [--session-handle H] [--worktree PATH]
+#   run_supervision_record.sh checkpoint|update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H] [--worktree PATH]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
 #   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
@@ -62,6 +69,7 @@
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-closed             <run-id>  # exit 0/1, no output (0 iff finished/closed)
 #   run_supervision_record.sh session-handle        <run-id>  # print opaque handle (exit 1 if unset)
+#   run_supervision_record.sh worktree-path         <run-id>  # print bound worktree path (exit 1 if unset)
 #   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
 #
@@ -140,14 +148,16 @@ PY
 #   <relaunch_reason> free-text reason recorded with a set request (cleared with the request)
 #   <require_handoff> "true" -> after merging, FAIL CLOSED (exit 4, no write) if handoff_path is null/empty
 #                     (used by request-relaunch: the recover-me signal needs a handoff for the successor path)
+#   <worktree_path>  non-empty -> bind the run's own worktree path (the run-id<->worktree binding
+#                     `reap_worktree.sh` checks); "" -> leave
 # Preserves existing fields it doesn't touch. For any non-create mutation, malformed existing JSON fails
 # CLOSED (exit 3) rather than being treated as empty.
-write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff>]
+write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff> <worktree_path>]
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
-  local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-} require_handoff=${10:-}
+  local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-} require_handoff=${10:-} worktree_path=${11:-}
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
   SESSION_HANDLE="$session_handle" SET_RELAUNCH="$set_relaunch" RELAUNCH_REASON="$relaunch_reason" \
-  REQUIRE_HANDOFF="$require_handoff" \
+  REQUIRE_HANDOFF="$require_handoff" WORKTREE_PATH="$worktree_path" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -178,6 +188,7 @@ if creating:
         "session_handle": None,
         "relaunch_requested": False,
         "relaunch_reason": None,
+        "worktree_path": None,
         "created_at": now,
     }
 rec.setdefault("desired_active", True)
@@ -187,6 +198,7 @@ rec.setdefault("lease_pod_ids", [])
 rec.setdefault("session_handle", None)
 rec.setdefault("relaunch_requested", False)
 rec.setdefault("relaunch_reason", None)
+rec.setdefault("worktree_path", None)
 
 handoff = os.environ.get("HANDOFF", "")
 if handoff:
@@ -194,6 +206,9 @@ if handoff:
 session_handle = os.environ.get("SESSION_HANDLE", "")
 if session_handle:
     rec["session_handle"] = session_handle
+worktree_path = os.environ.get("WORKTREE_PATH", "")
+if worktree_path:
+    rec["worktree_path"] = worktree_path
 add_pods = [p for p in os.environ.get("ADD_PODS", "").splitlines() if p]
 if add_pods:
     seen = list(rec.get("lease_pod_ids") or [])
@@ -273,11 +288,12 @@ require_val(){ # <flag> <value>
 
 cmd_create(){
   local id=$1; shift
-  local handoff="" got_handoff=0 session_handle=""
+  local handoff="" got_handoff=0 session_handle="" worktree=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --handoff)        require_val --handoff "${2:-}";        handoff=$2; got_handoff=1; shift 2;;
       --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;         shift 2;;
+      --worktree)       require_val --worktree "${2:-}";       worktree=$2;                shift 2;;
       *) die "create: unknown arg '$1'";;
     esac
   done
@@ -293,18 +309,19 @@ cmd_create(){
     invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" ""
+  write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" "" "" "$worktree"
   echo "created run-supervision record: $file (desired-active)"
 }
 
 cmd_update(){
   local id=$1; shift
-  local handoff="" pods="" session_handle=""
+  local handoff="" pods="" session_handle="" worktree=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --handoff)        require_val --handoff "${2:-}";        handoff=$2;             shift 2;;
       --lease-pod)      require_val --lease-pod "${2:-}";      pods="${pods}${2}"$'\n'; shift 2;;
       --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;      shift 2;;
+      --worktree)       require_val --worktree "${2:-}";       worktree=$2;             shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
   done
@@ -319,7 +336,7 @@ cmd_update(){
     active)  : ;;
     *)       die "update: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" ""
+  write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" "" "" "$worktree"
   echo "updated run-supervision record: $file"
 }
 
@@ -463,6 +480,18 @@ cmd_session_handle(){
   printf '%s\n' "$h"
 }
 
+# worktree-path: print the run's own worktree path bound at start/checkpoint via --worktree; exit 1 (no
+# output) if the record or the path is absent. This is the run-id<->worktree BINDING `reap_worktree.sh`
+# checks (automated-researcher#535 review round 2): bound from INSIDE the run's own worktree at start, so
+# a clean-closed run-id can only ever resolve to its OWN worktree path here, never a peer's.
+cmd_worktree_path(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local w; w=$(get_field "$file" worktree_path)
+  [ -n "$w" ] || exit 1
+  printf '%s\n' "$w"
+}
+
 cmd_show(){
   local id=$1; local file; file=$(record_path "$id")
   [ -f "$file" ] || die "show: no record for '$id'"
@@ -498,6 +527,7 @@ print(f"state={state}")
 print(f"desired_active={fmt_bool(rec.get('desired_active'))}")
 print(f"handoff_path={rec.get('handoff_path') or ''}")
 print(f"session_handle={rec.get('session_handle') or ''}")
+print(f"worktree_path={rec.get('worktree_path') or ''}")
 print(f"lease_pod_ids={','.join(str(p) for p in pods)}")
 print(f"relaunch_requested={fmt_bool(rec.get('relaunch_requested'))}")
 reason = rec.get("relaunch_reason")
@@ -510,15 +540,15 @@ main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|status|show)
+    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show)
       validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|status|show> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle)
+    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
@@ -530,11 +560,13 @@ main(){
     close)                 with_lock "$id" cmd_close            "$id";;
     request-relaunch)      with_lock "$id" cmd_request_relaunch "$id" "$@";;
     clear-relaunch)        with_lock "$id" cmd_clear_relaunch   "$id";;
-    # the is-* predicates + session-handle exit 0/1 from inside with_lock; preserve that exit code
+    # the is-* predicates + session-handle/worktree-path exit 0/1 (or print+exit) from inside with_lock;
+    # preserve that exit code
     is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
     is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
     is-closed)             with_lock "$id" cmd_is_closed             "$id";;
     session-handle)        with_lock "$id" cmd_session_handle        "$id";;
+    worktree-path)         with_lock "$id" cmd_worktree_path         "$id";;
     status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;
   esac

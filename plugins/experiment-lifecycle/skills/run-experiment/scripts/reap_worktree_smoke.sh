@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Smoke for reap_worktree.sh — the workspace self-reap close action (automated-researcher#532). Behavior the
 # deterministic JSON/syntax checks can't catch: the clean-close guard (only closed-AND-not-stopped reaps —
-# a parked/blocked or deliberately-stopped run is never reaped), the $OLDPWD self-only binding (a
-# clean-closed run-id must still match the worktree the caller just cd'd out of — automated-researcher#535
-# review), the actual `git worktree remove --force` (branch ref kept, untracked scratch removed), and
-# refusal on a path that isn't a real worktree. Uses a real throwaway git repo under TMP — no network, no
-# real experiment state touched.
+# a parked/blocked or deliberately-stopped run is never reaped), the run-id<->worktree binding via the
+# run-supervision record's own `worktree_path` (a clean-closed run-id must resolve to the SAME worktree it
+# bound at its own start, never a peer's — automated-researcher#535 review round 2) plus the $OLDPWD
+# self-only sequencing check kept alongside it, the actual `git worktree remove --force` (branch ref kept,
+# untracked scratch removed), and refusal on a path that isn't a real worktree. Uses a real throwaway git
+# repo under TMP — no network, no real experiment state touched.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,9 +24,9 @@ ok(){ echo "ok   $1"; }
 no(){ echo "FAIL $1"; fails=1; }
 rec(){ bash "$REC" "$@"; }
 # Invoke reap_worktree.sh the way the skill actually calls it: cd INTO the worktree, then OUT of it, so
-# $OLDPWD is exactly the worktree path when the script runs (the self-only binding it now enforces) —
-# propagates the script's exit code. Forwards ALL args (not just id/wt) so arg-count validation tests
-# below still reach the script unchanged; only cd's when $2 is an existing directory to cd into.
+# $OLDPWD is exactly the worktree path when the script runs (the self-only sequencing gate) — propagates
+# the script's exit code. Forwards ALL args (not just id/wt) so arg-count validation tests below still
+# reach the script unchanged; only cd's when $2 is an existing directory to cd into.
 reap(){
   local wt=${2:-}
   if [ -n "$wt" ] && [ -d "$wt" ]; then
@@ -48,9 +49,10 @@ new_worktree(){ # <name> -> prints the worktree path
   printf '%s' "$wt"
 }
 
-# --- clean close -> removes the worktree (untracked scratch and all), keeps the branch ref, exit 0 ---
+# --- clean close, own worktree bound in the record -> removes the worktree (untracked scratch and all),
+# keeps the branch ref, exit 0 ---
 WT1=$(new_worktree c1)
-rec create c1 >/dev/null; rec close c1 >/dev/null
+rec create c1 --worktree "$WT1" >/dev/null; rec close c1 >/dev/null
 if reap c1 "$WT1" >/dev/null 2>&1; then ok reap-clean-exit0; else no reap-clean-exit0; fi
 [ -d "$WT1" ] && no "reap-clean-removed-dir (still present)" || ok reap-clean-removed-dir
 git -C "$REPO" show-ref --verify --quiet "refs/heads/run/c1" && ok reap-clean-branch-kept || no reap-clean-branch-kept
@@ -58,17 +60,17 @@ git -C "$REPO" worktree list | grep -q "wt-c1" && no reap-clean-worktree-list-cl
 
 # --- GUARD: never reap a run that isn't a CLEAN close — worktree must survive ---
 WT2=$(new_worktree g_active)
-rec create g_active >/dev/null                                                                # active
+rec create g_active --worktree "$WT2" >/dev/null                                              # active
 if reap g_active "$WT2" >/dev/null 2>&1; then no reap-active-refused; else ok reap-active-refused; fi
 [ -d "$WT2" ] && ok reap-active-worktree-survives || no reap-active-worktree-survives
 
 WT3=$(new_worktree g_stop)
-rec create g_stop >/dev/null; rec stop g_stop >/dev/null                                       # stopped-only
+rec create g_stop --worktree "$WT3" >/dev/null; rec stop g_stop >/dev/null                     # stopped-only
 if reap g_stop "$WT3" >/dev/null 2>&1; then no reap-stopped-refused; else ok reap-stopped-refused; fi
 [ -d "$WT3" ] && ok reap-stopped-worktree-survives || no reap-stopped-worktree-survives
 
 WT4=$(new_worktree g_sc)
-rec create g_sc >/dev/null; rec stop g_sc >/dev/null; rec close g_sc >/dev/null                # stop->close
+rec create g_sc --worktree "$WT4" >/dev/null; rec stop g_sc >/dev/null; rec close g_sc >/dev/null  # stop->close
 if reap g_sc "$WT4" >/dev/null 2>&1; then no reap-stopclose-refused; else ok reap-stopclose-refused; fi
 [ -d "$WT4" ] && ok reap-stopclose-worktree-survives || no reap-stopclose-worktree-survives
 
@@ -81,23 +83,40 @@ printf 'not json{' > "$AAR_RUN_SUPERVISION_DIR/g_broken.json"                   
 if reap g_broken "$WT6" >/dev/null 2>&1; then no reap-corrupt-refused; else ok reap-corrupt-refused; fi
 [ -d "$WT6" ] && ok reap-corrupt-worktree-survives || no reap-corrupt-worktree-survives
 
-# --- SELF-ONLY BINDING: $OLDPWD unset -> refuses, worktree survives (raw invocation, bypassing the
+# --- RUN-ID<->WORKTREE BINDING: a clean-closed run-id with NO worktree_path bound at all -> refused
+# (fail closed — nothing to verify against), worktree survives ---
+WT7=$(new_worktree g_no_binding)
+rec create g_no_binding >/dev/null; rec close g_no_binding >/dev/null                           # no --worktree
+if reap g_no_binding "$WT7" >/dev/null 2>&1; then no reap-nobinding-refused; else ok reap-nobinding-refused; fi
+[ -d "$WT7" ] && ok reap-nobinding-worktree-survives || no reap-nobinding-worktree-survives
+
+# --- RUN-ID<->WORKTREE BINDING: a clean-closed run-id whose recorded worktree_path is a DIFFERENT (peer)
+# tree -> refused even though $OLDPWD matches the SUPPLIED path exactly (this is the round-2 review finding:
+# the prior $OLDPWD-only check didn't bind the run-id itself to the path, so a caller could cd out of a
+# peer's worktree and pair it with any other clean-closed run-id) -> refused, victim worktree survives ---
+WT8=$(new_worktree victim)
+WT8OWN=$(new_worktree g_bound_elsewhere_owner)
+rec create g_bound_elsewhere --worktree "$WT8OWN" >/dev/null; rec close g_bound_elsewhere >/dev/null
+if reap g_bound_elsewhere "$WT8" >/dev/null 2>&1; then no reap-wrongbinding-refused; else ok reap-wrongbinding-refused; fi
+[ -d "$WT8" ] && ok reap-wrongbinding-worktree-survives || no reap-wrongbinding-worktree-survives
+
+# --- SELF-ONLY SEQUENCING: $OLDPWD unset -> refuses, worktree survives (raw invocation, bypassing the
 # reap() wrapper's cd dance, since this test is exactly about that dance being absent) ---
-WT7=$(new_worktree g_oldpwd_unset)
-rec create g_oldpwd_unset >/dev/null; rec close g_oldpwd_unset >/dev/null
-if (unset OLDPWD; bash "$R" g_oldpwd_unset "$WT7") >/dev/null 2>&1; then no reap-oldpwd-unset-refused; else ok reap-oldpwd-unset-refused; fi
-[ -d "$WT7" ] && ok reap-oldpwd-unset-worktree-survives || no reap-oldpwd-unset-worktree-survives
+WT9=$(new_worktree g_oldpwd_unset)
+rec create g_oldpwd_unset --worktree "$WT9" >/dev/null; rec close g_oldpwd_unset >/dev/null
+if (unset OLDPWD; bash "$R" g_oldpwd_unset "$WT9") >/dev/null 2>&1; then no reap-oldpwd-unset-refused; else ok reap-oldpwd-unset-refused; fi
+[ -d "$WT9" ] && ok reap-oldpwd-unset-worktree-survives || no reap-oldpwd-unset-worktree-survives
 
-# --- SELF-ONLY BINDING: $OLDPWD set but pointing at a DIFFERENT dir (e.g. a peer's worktree, or a plain
-# copy/paste mistake) -> refuses, worktree survives ---
-WT8=$(new_worktree g_oldpwd_mismatch)
-rec create g_oldpwd_mismatch >/dev/null; rec close g_oldpwd_mismatch >/dev/null
-if OLDPWD="$TMP" bash "$R" g_oldpwd_mismatch "$WT8" >/dev/null 2>&1; then no reap-oldpwd-mismatch-refused; else ok reap-oldpwd-mismatch-refused; fi
-[ -d "$WT8" ] && ok reap-oldpwd-mismatch-worktree-survives || no reap-oldpwd-mismatch-worktree-survives
+# --- SELF-ONLY SEQUENCING: $OLDPWD set but pointing at a DIFFERENT dir (e.g. a plain copy/paste mistake)
+# -> refuses, worktree survives ---
+WT10=$(new_worktree g_oldpwd_mismatch)
+rec create g_oldpwd_mismatch --worktree "$WT10" >/dev/null; rec close g_oldpwd_mismatch >/dev/null
+if OLDPWD="$TMP" bash "$R" g_oldpwd_mismatch "$WT10" >/dev/null 2>&1; then no reap-oldpwd-mismatch-refused; else ok reap-oldpwd-mismatch-refused; fi
+[ -d "$WT10" ] && ok reap-oldpwd-mismatch-worktree-survives || no reap-oldpwd-mismatch-worktree-survives
 
-# --- a clean close but a path that ISN'T actually a worktree -> refuses, no crash ---
-rec create c_notwt >/dev/null; rec close c_notwt >/dev/null
+# --- a clean close, worktree bound in the record, but a path that ISN'T actually a worktree -> refuses, no crash ---
 NOTWT="$TMP/just-a-dir"; mkdir -p "$NOTWT"
+rec create c_notwt --worktree "$NOTWT" >/dev/null; rec close c_notwt >/dev/null
 if reap c_notwt "$NOTWT" >/dev/null 2>&1; then no reap-notworktree-refused; else ok reap-notworktree-refused; fi
 
 # --- arg validation ---

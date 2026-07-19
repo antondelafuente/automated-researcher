@@ -147,10 +147,13 @@ Three obligations, maintained continuously (not at close):
   written through one product helper (atomic, fail-closed), not prose:
 
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
-  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start: `start <run-id>
-  > --handoff <TEMP.md path> --session-handle <opaque>` (marks the run **desired-active** and records the opaque,
-  > instance-owned handle that binds this run-id to your session — a tmux name / systemd unit / pid-file path; the
-  > product never interprets it). At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
+  > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start, from **inside your own
+  > worktree**: `start <run-id> --handoff <TEMP.md path> --session-handle <opaque> --worktree <this worktree's
+  > path>` (marks the run **desired-active**, records the opaque, instance-owned handle that binds this run-id
+  > to your session — a tmux name / systemd unit / pid-file path; the product never interprets it — and binds
+  > this run-id to your own worktree path, the binding `reap_worktree.sh` checks at close so a clean-closed
+  > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2).
+  > At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
   > (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). Use
   > `status <run-id>` as compact checklist evidence. If you hit a case you can't resume in place (a usage-policy
   > block, a corrupted session): `request-relaunch <run-id> [--handoff <path>] [--reason …]` — a positive
@@ -466,10 +469,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   for forensics (`repo-janitor`'s sweep is the backstop for that residue, not this step). `cd` OUT of the
   worktree yourself FIRST (e.g. `$HOME` — never remove the tree your own shell is standing in), then
   **immediately, in the same shell**, run `scripts/reap_worktree.sh <run-id> <this worktree's path>`: it
-  re-checks the clean-close guard, **requires the given path to equal `$OLDPWD`** (the self-only binding —
-  refuses if you cd'd elsewhere first, or pass any path other than the one you just left, so a clean-closed
-  run-id can never be paired with an unrelated worktree), resolves the shared checkout on its own via its
-  git-dir, then `git worktree remove --force`s the tree (**`--force` is required and
+  re-checks the clean-close guard, **requires the given path to match the run-supervision record's own
+  `worktree_path`** (bound at `start`, above — the actual run-id<->worktree binding, so a clean-closed run-id
+  can only ever reap the worktree IT bound, never a peer's) **and to equal `$OLDPWD`** (defense in depth —
+  refuses if you cd'd elsewhere first, or pass any path other than the one you just left), resolves the
+  shared checkout on its own via its git-dir, then `git worktree remove --force`s the tree (**`--force` is
+  required and
   safe ONLY behind the upload-verified + log-experiment-merged gates above** — executor scratch is untracked
   by design, so a plain `remove` would refuse every time). **Keep the branch ref** — the content already
   landed via squash-merge, so the ref is cheap and preserves recoverability; this never touches the shared
