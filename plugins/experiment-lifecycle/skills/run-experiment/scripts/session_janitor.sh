@@ -25,8 +25,9 @@
 #                   - an INCONCLUSIVE idleness read on an otherwise-reapable candidate (never a license
 #                     to kill; report-and-retry next sweep, same as pod_reaper's legacy-keepalive read)
 #                   - a MALFORMED run-supervision record file
-#                   - more than one CLOSED record bound to the SAME session-handle (registry ambiguity —
-#                     which one actually owns it? never guess)
+#                   - more than one CLOSED record bound to the SAME session-handle, OR a closed record
+#                     sharing a handle with an active/stopped one (registry ambiguity — which one
+#                     actually owns it? never guess)
 #
 # SEAM DESIGN — this CANNOT reuse reap_session.sh's EXPERIMENT_SESSION_REAP_CMD: that seam is SELF-ONLY
 #   BY CONTRACT (it must verify the current session's own identity == the handle and fail closed on a
@@ -73,21 +74,34 @@ list_sessions(){ $SESSION_JANITOR_LIST_CMD; }             # one live handle per 
 idle_state(){ $SESSION_JANITOR_IDLE_CMD "$1"; }           # idle|active|"" (inconclusive)
 kill_session(){ $SESSION_JANITOR_KILL_CMD "$1"; }         # exit 0 on accepted kill
 
+# `list`'s state column collapses a stopped-then-closed record to "closed" too (classify_record checks
+# closed before stopped); is-closed is the only reliable "genuine clean close" predicate (closed &&
+# !stopped). A record must never be treated as reapable off the list state alone.
+is_clean_close(){ bash "$REC" is-closed "$1" >/dev/null 2>&1; } # <run-id>
+
 reaped=0; kept=0; reported=0; retried=0
 
-# --- live session inventory (read once; re-read after an actual kill to verify) -------------------
+# --- live session inventory (read once; re-read after an actual kill to verify) --------------------
+# A failed listing must never be silently read as "no live sessions" — that would misreport a live
+# desired-active session as the deeper-crash anomaly, and misreport a live unknown session as absent.
+# Abort loudly instead of sweeping on an inventory we can't trust.
 declare -A LIVE
-while read -r h; do
+LIVE_OUT=$(list_sessions) || { echo "session_janitor: SESSION_JANITOR_LIST_CMD failed — aborting sweep (refusing to make reap decisions without a reliable live-session inventory)" >&2; exit 1; }
+while IFS= read -r h; do
   [ -n "${h:-}" ] || continue
   LIVE["$h"]=1
-done < <(list_sessions)
+done <<< "$LIVE_OUT"
 
 # --- run-supervision record registry ---------------------------------------------------------------
 mapfile -t RECORDS < <(bash "$REC" list)
 
-# Pre-count how many CLOSED records are bound to each session-handle (Finding-parity with pod_reaper's
-# duplicate-active-lease guard): >1 means the registry itself is ambiguous about who owns that session.
-declare -A CLOSED_HANDLE_COUNT KNOWN_HANDLE
+# Pre-classify every record's handle binding so the reap path can catch registry ambiguity: how many
+# GENUINE clean-close records are bound to a handle (Finding-parity with pod_reaper's duplicate-active-
+# lease guard: >1 means the registry itself is ambiguous about who owns that session), and separately
+# whether ANY non-clean-close record (active, stopped, or stopped-then-closed) also claims that same
+# handle — a reused handle split between a closed record and a still-active/stopped one must never let
+# the closed record kill a session the other record still owns.
+declare -A CLOSED_HANDLE_COUNT KNOWN_HANDLE OTHER_HANDLE
 for line in "${RECORDS[@]}"; do
   [ -n "$line" ] || continue
   id=${line%% *}; state=${line#* }
@@ -95,7 +109,11 @@ for line in "${RECORDS[@]}"; do
   h=$(bash "$REC" session-handle "$id" 2>/dev/null || true)
   [ -n "$h" ] || continue
   KNOWN_HANDLE["$h"]=1
-  [ "$state" = closed ] && CLOSED_HANDLE_COUNT["$h"]=$(( ${CLOSED_HANDLE_COUNT["$h"]:-0} + 1 ))
+  if [ "$state" = closed ] && is_clean_close "$id"; then
+    CLOSED_HANDLE_COUNT["$h"]=$(( ${CLOSED_HANDLE_COUNT["$h"]:-0} + 1 ))
+  else
+    OTHER_HANDLE["$h"]=1
+  fi
 done
 
 # Decide for one record.
@@ -105,11 +123,15 @@ consider_record(){ # <run-id> <state>
     log "report-only (MALFORMED run-supervision record — inspect): run-id=$id"; reported=$((reported+1)); return
   fi
   local h; h=$(bash "$REC" session-handle "$id" 2>/dev/null || true)
-  if [ "$state" != closed ]; then
-    # Not a clean close: reap_session.sh's own guard already keeps these forever (parked/blocked/stopped
-    # never reap). The one anomaly the janitor CAN observe here, with no external/main-branch knowledge,
-    # is a still-desired-active record whose bound handle is no longer live at all — the executor died
-    # before ever reaching close (self-reap never had a chance to run either). Report it, never guess.
+  if [ "$state" != closed ] || ! is_clean_close "$id"; then
+    # Not a GENUINE clean close: never yet closed, OR a stopped-then-closed terminal record (the
+    # deliberate-quit finalize — `list`'s state column collapses that to "closed" too, but is-closed
+    # correctly excludes it). reap_session.sh's own guard already keeps these forever (parked/blocked/
+    # stopped/stopped-then-closed never reap). The one anomaly the janitor CAN observe here, with no
+    # external/main-branch knowledge, is a still-desired-active record whose bound handle is no longer
+    # live at all — the executor died before ever reaching close (self-reap never had a chance to run
+    # either). Report it, never guess. (is-desired-active itself already excludes stopped/closed records,
+    # so a stopped-then-closed record falls through to the plain "kept" branch, never reported.)
     if [ -n "$h" ] && [ -z "${LIVE[$h]:-}" ] && bash "$REC" is-desired-active "$id" >/dev/null 2>&1; then
       log "report-only (desired-active record, session NOT live — never reached close, the deeper crash class): run-id=$id handle=$h"
       reported=$((reported+1))
@@ -118,15 +140,15 @@ consider_record(){ # <run-id> <state>
     fi
     return
   fi
-  # From here on: a clean close.
+  # From here on: a genuine clean close (closed && !stopped).
   if [ -z "$h" ]; then
     kept=$((kept+1)); return    # nothing recorded to reap — mirrors reap_session.sh's own no-handle no-op
   fi
   if [ -z "${LIVE[$h]:-}" ]; then
     kept=$((kept+1)); return    # already gone — the common path (self-reap already ran)
   fi
-  if [ "${CLOSED_HANDLE_COUNT[$h]:-0}" -gt 1 ]; then
-    log "report-only (DUPLICATE closed records bound to session $h — registry ambiguity, NOT killing): run-id=$id"
+  if [ "${CLOSED_HANDLE_COUNT[$h]:-0}" -gt 1 ] || [ -n "${OTHER_HANDLE[$h]:-}" ]; then
+    log "report-only (AMBIGUOUS records bound to session $h — registry ambiguity, NOT killing): run-id=$id"
     reported=$((reported+1)); return
   fi
   local idle; idle=$(idle_state "$h")
@@ -140,12 +162,17 @@ consider_record(){ # <run-id> <state>
     log "DRY-RUN would reap: run-id=$id handle=$h"; reaped=$((reaped+1)); return
   fi
   if kill_session "$h"; then
-    local -A LIVE2
-    while read -r hh; do [ -n "${hh:-}" ] && LIVE2["$hh"]=1; done < <(list_sessions)
-    if [ -z "${LIVE2[$h]:-}" ]; then
-      log "REAPED: run-id=$id handle=$h (kill accepted + verified gone)"; reaped=$((reaped+1))
+    local relist
+    if relist=$(list_sessions); then
+      local -A LIVE2
+      while IFS= read -r hh; do [ -n "${hh:-}" ] && LIVE2["$hh"]=1; done <<< "$relist"
+      if [ -z "${LIVE2[$h]:-}" ]; then
+        log "REAPED: run-id=$id handle=$h (kill accepted + verified gone)"; reaped=$((reaped+1))
+      else
+        log "RETRY: run-id=$id handle=$h kill accepted but session still listed live — next sweep will retry"; retried=$((retried+1))
+      fi
     else
-      log "RETRY: run-id=$id handle=$h kill accepted but session still listed live — next sweep will retry"; retried=$((retried+1))
+      log "RETRY: run-id=$id handle=$h kill accepted but post-kill listing failed — cannot verify gone, next sweep will retry"; retried=$((retried+1))
     fi
   else
     log "RETRY: run-id=$id handle=$h kill not accepted — next sweep will retry"; retried=$((retried+1))

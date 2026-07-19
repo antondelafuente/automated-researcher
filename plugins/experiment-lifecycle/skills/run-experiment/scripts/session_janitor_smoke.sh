@@ -12,6 +12,8 @@
 #   - report-only: a still-desired-active record whose handle is NOT live (the deeper crash class)
 #   - report-only: a MALFORMED run-supervision record file
 #   - report-only: two CLOSED records bound to the SAME handle (registry ambiguity)
+#   - report-only: a CLOSED record sharing a handle with an ACTIVE record (registry ambiguity)
+#   - keep: a STOP-then-CLOSE (deliberate-quit finalize) record, live + idle -> never reaped
 #   - a kill that's accepted but the session is STILL listed live afterward -> retried, not reaped
 #   - a kill that's NOT accepted -> retried, not reaped
 #   - --dry-run kills nothing
@@ -135,7 +137,25 @@ live_add "tmux:dup"; idle_set "tmux:dup" idle
 : > "$KILL_LOG"
 OUT=$(janitor 2>&1)
 killed "tmux:dup" && no dup-handle-killed || ok dup-handle-not-killed
-echo "$OUT" | grep -q "DUPLICATE closed records bound to session tmux:dup" && ok dup-handle-reported || no dup-handle-reported
+echo "$OUT" | grep -q "AMBIGUOUS records bound to session tmux:dup" && ok dup-handle-reported || no dup-handle-reported
+
+# === fixture: report-only — a CLOSED record sharing a handle with an ACTIVE record (registry ambiguity) ===
+rec create e1 --session-handle "tmux:reuse" >/dev/null; rec close e1 >/dev/null
+rec create e2 --session-handle "tmux:reuse" >/dev/null
+live_add "tmux:reuse"; idle_set "tmux:reuse" idle
+: > "$KILL_LOG"
+OUT=$(janitor 2>&1)
+killed "tmux:reuse" && no reused-handle-killed || ok reused-handle-not-killed
+echo "$OUT" | grep -q "AMBIGUOUS records bound to session tmux:reuse" && ok reused-handle-reported || no reused-handle-reported
+
+# === fixture: keep — a STOP-then-CLOSE (deliberate-quit finalize) record, live + idle -> NEVER reaped ===
+# `list`'s state column collapses this to "closed" too; only is-closed correctly excludes it.
+rec create sc --session-handle "tmux:sc" >/dev/null; rec stop sc >/dev/null; rec close sc >/dev/null
+live_add "tmux:sc"; idle_set "tmux:sc" idle
+: > "$KILL_LOG"
+OUT=$(janitor 2>&1)
+killed "tmux:sc" && no stop-then-close-killed || ok stop-then-close-not-killed
+echo "$OUT" | grep -q "run-id=sc" && no stop-then-close-unexpectedly-reported || ok stop-then-close-not-reported
 
 # === fixture: kill accepted but the session is STILL listed live afterward -> retried, not reaped ===
 rec create s8 --session-handle "tmux:s8" >/dev/null; rec close s8 >/dev/null
@@ -160,6 +180,16 @@ DOUT=$(janitor --dry-run 2>&1)
 killed "tmux:sd" && no dryrun-killed || ok dryrun-kills-nothing
 echo "$DOUT" | grep -q "DRY-RUN would reap: run-id=sd handle=tmux:sd" && ok dryrun-logged || no dryrun-logged
 grep -qxF "tmux:sd" "$LIVE_FILE" && ok dryrun-session-untouched || no dryrun-session-untouched
+
+# === a FAILING SESSION_JANITOR_LIST_CMD aborts the sweep loudly, never read as "no live sessions" ===
+cat > "$TMP/list_fail.sh" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$TMP/list_fail.sh"
+if SESSION_JANITOR_LIST_CMD="bash $TMP/list_fail.sh" bash "$J" >/dev/null 2>&1; then no list-cmd-failure-accepted; else ok list-cmd-failure-rejected; fi
+FOUT=$(SESSION_JANITOR_LIST_CMD="bash $TMP/list_fail.sh" bash "$J" 2>&1)
+echo "$FOUT" | grep -q "SESSION_JANITOR_LIST_CMD failed" && ok list-cmd-failure-logged || no list-cmd-failure-logged
 
 # === unset SESSION_JANITOR_LIST_CMD -> the whole sweep is a documented no-op ===
 if env -u SESSION_JANITOR_LIST_CMD bash "$J" >/dev/null 2>&1; then ok unset-list-noop; else no unset-list-noop; fi
