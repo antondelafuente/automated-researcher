@@ -119,7 +119,9 @@
 
 ## CONDITIONAL  (keep + instantiate the invariant for THIS experiment, or ☑ N.A. with a reason)
 - ☐ [BLOCK] Full input/training-data samples READ (actual text, not aggregates): masking, format,
-      leakage, length all sane.                                                                   ev:
+      leakage, length all sane. Train/eval leakage: the DEFAULT screen is semantic-embedding cosine
+      similarity, cross-battery AND within-pool (SKILL.md's "Train/eval leakage screen" — a token-overlap
+      screen alone misses real near-duplicates), not N.A. whenever training and eval domains overlap. ev:
 - ☐ [BLOCK] Cheapest REPRESENTATIVE smoke passed for any NEW code / dataset / save-load path
       (first-batches, or a small-model path) before the real run — no OOM / format / save error.  ev:
 - ☐ [BLOCK] Anchor-gate: the base/reference reproduces its standing value (and any loaded released

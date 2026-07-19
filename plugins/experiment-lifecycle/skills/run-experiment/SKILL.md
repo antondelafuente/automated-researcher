@@ -258,6 +258,16 @@ specific (arm, seed) pairs into ANY wave, caught only when a pooled per-arm numb
 data missing). This generalizes the SUCCESS-aware done-check above from per-row/per-arm completeness to
 across-the-whole-fan-out completeness.
 
+**Same completeness discipline applies to a launch-time glob, not just the eval done-check above: count-check
+the expansion against the expected arm count before launching.** A shell driver that launches one job per
+matched file (`for f in "$SETS"/train_*.jsonl; do ...; done`) has the identical no-signal-on-skip failure mode
+as reactive eval batching — a glob that silently matches fewer files than expected launches fewer jobs than
+expected, with no error and no log line (a real incident: 9 of 10 expected arm files launched, the 10th simply
+absent from the list, root cause undiagnosed but plausibly a basename/glob interaction with a suffixed sibling
+file — e.g. `train_arm3.jsonl.pre_dedup_fix` — sitting in the same directory). Before trusting a glob-driven
+launch loop, compare the matched-file count against the expected arm count, and watch for suffixed sibling
+files sharing the same directory and base pattern as the files you mean to glob.
+
 **Use the `gpu-job` helpers** — its driver library owns the foot-guns (GPU-stage handoffs that wait for the prior runner
 and poll until VRAM frees; port/serve waits; artifact-exists checks; liveness; safe process-tree kills; LoRA merges
 through a mandatory diff gate). Hand-rolling these is how validity bugs breed. **Two kill rules, three incidents each:**
@@ -598,7 +608,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   rollouts are where parse/truncation/empty-`<think>`/grader-failure bugs live): the **`verify-claims`** deterministic
   `audit_data.py` (full pool + a stratified high-risk sample) on each surface ALWAYS, **then** its cross-family `--data`
   on each surface vs the design intent — **always, no N.A.; the rollouts every run** (generated fresh). A 2-sample
-  self-smoke is exactly what misses a truncation bug. **Always pass `--label-field`** when auditing a surface where
+  self-smoke is exactly what misses a truncation bug. When training and eval domains overlap, this includes the
+  train/eval leakage screen — DEFAULT to `design-experiment` SKILL.md's semantic-embedding near-dup recipe
+  (cross-battery + within-pool), not a token-overlap screen alone. **Always pass `--label-field`** when auditing a surface where
   an added/edited subset sits inside a much larger unchanged base (ablations, add-back waves, targeted edits) — the
   default sample can otherwise oversample the unchanged majority and miss the subset the gate actually cares about.
 - **An all-null/all-zero join or aggregation result is (almost) never a real finding — treat it as a loud bug
