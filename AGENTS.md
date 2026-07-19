@@ -248,8 +248,13 @@ tooling in `agentic-engineering` that builds them).
   (or comments on one), author it as the `*-engineer[bot]` identity, never the ambient/human `gh` auth
   (raw `gh issue create` falls back to the human owner). The canonical interface is **`wf.sh issue
   <claude|codex> create|comment …`** — the Issue-side counterpart to `wf.sh comment`, reusing the SWE
-  pipeline's one engineer-token path (`WF_ENGINEER_TOKEN_CMD_*`). An instance may keep a thin
-  `gh-as-engineer` alias that delegates to it, but there's a single token implementation. The rule covers
+  pipeline's one engineer-token path (`WF_ENGINEER_TOKEN_CMD_*`). On a box with no `aar-engineering`
+  checkout (no `wf.sh` on `PATH`), the product-shipped fallback is
+  `plugins/feedback-loop/skills/file-feedback/scripts/engineer_gh_issue.sh` (#454) — same
+  `WF_ENGINEER_TOKEN_CMD_*` seam, same fixed create/comment verb surface, nothing more. The single token
+  *implementation* is the instance-owned `WF_ENGINEER_TOKEN_CMD_*` minter both wrappers consume; an
+  instance may still keep a thin `gh-as-engineer` alias, but it delegates to one of these two, never
+  minting on its own. The rule covers
   *every* Issue an agent opens (ad-hoc backlog, decompositions, follow-ups). Backfilling existing
   human-authored Issues is not possible (GitHub can't reauthor) and not attempted.
 - **The ambient agent GitHub credential MUST be read-only — by construction, not by convention.** This is

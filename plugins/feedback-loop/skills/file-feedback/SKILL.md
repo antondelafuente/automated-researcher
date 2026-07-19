@@ -71,7 +71,7 @@ class:
 
 ```
 Filed autonomously by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback
-skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex> create`.
+skill, not hand-written by the researcher. Posted via `<authoring path used>`.
 ```
 
 `researcher-requested`:
@@ -79,27 +79,42 @@ skill, not hand-written by the researcher. Posted via `wf.sh issue <claude|codex
 ```
 Filed by a <substrate> <skill-name> executor (session <session-id>) via the file-feedback skill on the
 researcher's explicit request (<what was asked, and when/where>), not hand-written by the researcher.
-Posted via `wf.sh issue <claude|codex> create`.
+Posted via `<authoring path used>`.
 ```
 
-Use the engineer-safe authoring path when `aar-engineering` is available and the host is configured for it:
+`<authoring path used>` is whichever of the two engineer-identity paths below actually ran — e.g.
+`wf.sh issue claude create` or `scripts/engineer_gh_issue.sh claude create`.
 
-```bash
-wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <provenance>
-wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
-```
-
-Always pass `-R "$FEEDBACK_PRODUCT_REPO"`. `wf.sh issue` is the required path: it is never fine to fall back to
-raw `gh issue create` for product feedback. The ambient agent GitHub credential is read-only by construction
-(see AGENTS.md); a bare `gh` write either fails closed or, on a non-conforming box, silently succeeds under the
+Use an engineer-safe authoring path — always pass `-R "$FEEDBACK_PRODUCT_REPO"`, and never fall back to raw
+`gh issue create` for product feedback. The ambient agent GitHub credential is read-only by construction (see
+AGENTS.md); a bare `gh` write either fails closed or, on a non-conforming box, silently succeeds under the
 repository owner's identity instead of the agent's — that is exactly what happened in #447, filed under the
-owner's identity because a box without an `aar-engineering` checkout let a raw-`gh` fallback through. When
-`wf.sh issue` is genuinely unavailable or unconfigured, do not write with the ambient credential as a
-workaround. Instead, persist the fully-drafted Issue — title, body (including the provenance line above),
-and labels (type + provenance) — to a durable location you already have (the run's artifact
-store, or the close handoff notes), and surface it LOUDLY in your close summary: state plainly that filing was
-deferred and a properly-credentialed session needs to run `wf.sh issue create` with the persisted draft. The
-draft is the deliverable; the write waits for the right identity.
+owner's identity because a box without an `aar-engineering` checkout let a raw-`gh` fallback through. Try, in
+order:
+
+1. **`wf.sh issue`, when `aar-engineering` is installed and configured:**
+
+   ```bash
+   wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <provenance>
+   wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
+   ```
+
+2. **`scripts/engineer_gh_issue.sh`, when `wf.sh` isn't installed but the box has the #149
+   `WF_ENGINEER_TOKEN_CMD_<CLAUDE|CODEX>` seam configured.** This skill ships its own minimal, self-contained
+   engineer-identity wrapper (automated-researcher#454) precisely so a box without an `aar-engineering`
+   checkout still has an engineer-safe path instead of having to defer every filing:
+
+   ```bash
+   scripts/engineer_gh_issue.sh <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <provenance>
+   scripts/engineer_gh_issue.sh <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
+   ```
+
+3. **Defer, only when NEITHER of the above is available/configured.** Do not write with the ambient
+   credential as a workaround. Instead, persist the fully-drafted Issue — title, body (including the
+   provenance line above), and labels (type + provenance) — to a durable location you already have (the
+   run's artifact store, or the close handoff notes), and surface it LOUDLY in your close summary: state
+   plainly that filing was deferred and a properly-credentialed session needs to run one of the two paths
+   above with the persisted draft. The draft is the deliverable; the write waits for the right identity.
 
 Deployment-only feedback is local to the consuming instance: a lab path, account quirk, local runner, deployment
 changelog, private pipeline, or coordination convention that an outside adopter would not share. Do not write to

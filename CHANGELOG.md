@@ -1,3 +1,13 @@
+- feedback-loop 0.1.12 (2026-07-19): add `engineer_gh_issue.sh` — a minimal, self-contained engineer-identity
+  Issue filer for boxes that lack an `aar-engineering` checkout, so `wf.sh` isn't on PATH (#454). Mints a
+  short-lived token via the instance-owned `WF_ENGINEER_TOKEN_CMD_<CLAUDE|CODEX>` seam (#149) and execs
+  `gh issue create`/`gh issue comment` under it — never the ambient credential. Fixed verb surface only
+  (create/comment), no arbitrary `gh` passthrough, mirroring `wf.sh issue`'s own contract. `file-feedback`'s
+  SKILL.md now tries `wf.sh issue` first, this wrapper second, and only defers (persist + surface loudly) when
+  neither engineer-identity path is available/configured — previously any box without `aar-engineering` had
+  to defer every single filing. Stage 2 of #454 (ambient read-only conformance for the box's `GH_TOKEN`) is
+  instance-side and out of scope here. AGENTS.md's engineer-identity rule now names `engineer_gh_issue.sh`
+  as the sanctioned wf.sh-absent fallback, closing the wording gap PR #511's round-1 review flagged.
 - automated-researcher (2026-07-19): triager v1.1 — event-driven per-ticket assessment, on-ticket proposals,
   backstop sweep, fix the scheduled-actor failure, retire `needs-design` (#497). `triage-assess.yml` now
   triggers on `issues: [opened, reopened]` and assesses the ONE triggering ticket (still the same two-model
