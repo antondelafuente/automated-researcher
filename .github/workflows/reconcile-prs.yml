@@ -68,6 +68,13 @@ concurrency:
 
 permissions:
   contents: read
+  # automated-researcher#540: the two `gh workflow run senior-engineer.yml` calls below need this to
+  # succeed. They deliberately use the workflow's own `github.token` (see the step-local override at the
+  # "Reconcile open bot PRs" step), not the minted codex-engineer App token -- that App installation has no
+  # Actions permission at all, so every dispatch attempt through it 403s deterministically. `workflow_dispatch`
+  # is one of the documented exceptions to GitHub's "events from GITHUB_TOKEN don't trigger new runs"
+  # recursion guard, so this is safe: the dispatched senior-engineer run fires normally.
+  actions: write
 
 jobs:
   reconcile:
@@ -98,6 +105,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
+          # automated-researcher#540: the minted codex-engineer App token above has no Actions permission,
+          # so `gh workflow run senior-engineer.yml` 403s deterministically through it. The two dispatch
+          # call sites below override GH_TOKEN to this workflow's own github.token (granted `actions:
+          # write` in this workflow's permissions block) for just that one invocation instead -- every
+          # other call in this step (comments, labels) keeps the minted App token unchanged, since the
+          # allowlist/loop-guard conventions those rely on are keyed off the commenting/labeling identity.
+          RECONCILER_ACTIONS_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
@@ -202,7 +216,7 @@ jobs:
             fi
 
             echo "PR #$n: needs-senior-engineer applied at $label_ts (most recent adjudication comment at ${comment_ts:-none}) with no activity in the last ${elapsed}s and the label still present -- that summons appears stranded (e.g. a dispatch that failed, a run that crashed or timed out after posting its comment, or a label-removal that itself failed); re-dispatching senior-engineer.yml"
-            if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+            if ! GH_TOKEN="$RECONCILER_ACTIONS_TOKEN" gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
               echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; leaving needs-senior-engineer in place for a later tick to retry"
               return 1
             fi
@@ -263,7 +277,7 @@ jobs:
                 echo "::warning::PR #$n: failed to add needs-senior-engineer; not dispatching this tick so the next tick retries"
                 return 1
               fi
-              if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+              if ! GH_TOKEN="$RECONCILER_ACTIONS_TOKEN" gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
                 echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed after labeling; removing needs-senior-engineer so the next tick retries instead of leaving it stranded"
                 if ! gh pr edit "$n" --repo "$REPO" --remove-label needs-senior-engineer; then
                   # automated-researcher#529: this used to need manual attention, since the sweep skipped
