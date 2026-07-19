@@ -474,16 +474,26 @@ jobs:
             # an unconditional skip (automated-researcher#529): handle_stranded_senior_engineer re-dispatches
             # it if the label has no adjudication comment behind it past its grace window, instead of
             # leaving a stranded one deadlocked forever. needs-human stays a plain skip -- it's a terminal
-            # state only a human clears.
+            # state only a human clears. Branch ORDER below is load-bearing: both labels can coexist --
+            # senior-engineer.yml's adjudicate job can verify/add needs-human and then have its "Clear
+            # needs-senior-engineer" step fail (its failure() step deliberately leaves the stale label in
+            # place), and loop-guard-escalate's single `--add-label needs-human --remove-label
+            # needs-senior-engineer` can have the add land while the remove fails -- so needs-human must be
+            # matched FIRST (a bash `case` takes the first matching branch), or a PR carrying both labels
+            # would be routed to handle_stranded_senior_engineer and re-dispatched instead of parked for a
+            # human, contradicting the terminal-skip contract above. Recovery consequence: once a human
+            # clears needs-human, the stale needs-senior-engineer becomes visible to this sweep again and is
+            # re-dispatched after its grace window -- that is the intended self-heal for the leftover label,
+            # not a bug.
             labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr")
             case ",$labels," in
+              *,needs-human,*) echo "PR #$n: needs-human already set, skipping"; continue ;;
               *,needs-senior-engineer,*)
                 if ! handle_stranded_senior_engineer "$n"; then
                   echo "::warning::PR #$n: stranded needs-senior-engineer handling failed this tick"
                 fi
                 continue
                 ;;
-              *,needs-human,*) echo "PR #$n: needs-human already set, skipping"; continue ;;
             esac
 
             mergeable=$(jq -r '.mergeable' <<<"$pr")
