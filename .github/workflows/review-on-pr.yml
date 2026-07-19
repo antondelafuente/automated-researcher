@@ -409,27 +409,6 @@ jobs:
           set -euo pipefail
           p0_count=$(jq '[.findings[] | select(.severity == "P0")] | length' codex-review.json)
           verdict=$(jq -r '.verdict // "changes_requested"' codex-review.json)
-          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
-
-          # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
-          # review start and this approval): a stale review must never approve new, unreviewed commits.
-          # automated-researcher#505 review: it also must never masquerade as a genuine review OF the new
-          # head -- codex-review.json's findings were produced against $CAPTURED_HEAD_SHA's diff, not
-          # $current_head_sha's. Posting them as a REQUEST_CHANGES tagged with commit_id=$current_head_sha
-          # would (a) auto-dispatch address-review.yml against findings for a diff the current head may not
-          # even contain, and (b) satisfy reconcile-prs.yml's handle_mergeable "does this head already have
-          # a completed codex review" check, permanently suppressing the very re-review that would
-          # otherwise fire for it. So: skip submitting any review at all and stop -- the current head is
-          # correctly left with zero codex reviews against it, which is exactly the state reconcile-prs.yml
-          # (#431) polls for and repairs by re-firing review-on-pr.yml's workflow_dispatch actuator.
-          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
-            echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — findings are for the stale head; skipping review submission so the reconciler re-fires a review against the current head instead of auto-dispatching against stale findings"
-            {
-              echo "event=STALE"
-              echo "round=0"
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
 
           # automated-researcher#502: consecutive-round count BEFORE this review is submitted -- the
           # trailing run of codex-engineer[bot] CHANGES_REQUESTED reviews, reset by any APPROVED. Computed
@@ -475,6 +454,31 @@ jobs:
           # only the deterministic dispatch step below can ever carry a live mention.
           body="${body//@claude-code-engineer/\`@claude-code-engineer\`}"
 
+          # Re-verify the head hasn't moved, as late as possible before the mutating POST below (guards a
+          # `synchronize` race between review start and this submission): a stale review must never
+          # approve new, unreviewed commits, and must never masquerade as a genuine review OF the new head
+          # either -- codex-review.json's findings were produced against $CAPTURED_HEAD_SHA's diff, not
+          # whatever the head has moved to since. automated-researcher#505 review round 2: this check
+          # previously ran before the prior_round query and body rendering above, leaving exactly the
+          # multi-second gap those steps take as an unguarded TOCTOU window; running it immediately before
+          # the POST instead shrinks that window to the smallest achievable in a scripted step. Posting
+          # stale findings as a REQUEST_CHANGES would (a) auto-dispatch address-review.yml against findings
+          # for a diff the current head may not even contain, and (b) satisfy reconcile-prs.yml's
+          # handle_mergeable "does this head already have a completed codex review" check, permanently
+          # suppressing the very re-review that would otherwise fire for it. So: skip submitting any review
+          # at all and stop -- the current head is correctly left with zero codex reviews against it, which
+          # is exactly the state reconcile-prs.yml (#431) polls for and repairs by re-firing
+          # review-on-pr.yml's workflow_dispatch actuator.
+          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
+            echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — findings are for the stale head; skipping review submission so the reconciler re-fires a review against the current head instead of auto-dispatching against stale findings"
+            {
+              echo "event=STALE"
+              echo "round=0"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
             -f "commit_id=$current_head_sha" \
             -f "event=$event" \
@@ -502,10 +506,23 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ needs.review.outputs.pr_number }}
           ROUND: ${{ steps.submit_review.outputs.round }}
+          CAPTURED_HEAD_SHA: ${{ needs.review.outputs.head_sha }}
         run: |
           set -euo pipefail
 
           LIMIT=3
+
+          # automated-researcher#505 review round 2: the freshness check in the submission step above only
+          # guards up to the moment of that POST -- a push landing in the gap between that POST succeeding
+          # and this step starting (however small) would otherwise still dispatch an addressing round
+          # against a head the review's findings no longer describe. Re-verify immediately before doing
+          # anything mutating; a moved head here means a new `synchronize` run for the true current head
+          # already owns (or will own) the dispatch decision, so skip rather than duplicate/contradict it.
+          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
+            echo "PR #$PR_NUMBER: head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) since the review was submitted; skipping auto-dispatch -- the synchronize run for the current head owns this decision"
+            exit 0
+          fi
 
           # Hard gate (issue #502 point 3): an escalation label already parked this PR with the
           # senior-engineer leg or a human -- the automated loop must never post another dispatch mention
