@@ -227,6 +227,25 @@ strip any row lacking a valid success marker (a real label/score, not `null` / a
 a downstream discrepancy. Run it detached (`setsid nohup`),
 then watch with a background until-loop SSH-checking the done-marker (plus the self-wake you already armed).
 
+**A judge driver's strict-tag parser needs a bare-text fallback, or it feeds the done-check above a false
+API-failure signal (#542).** A parser that only matches the literal `<mode>X</mode><flavor>Y</flavor>` wrapper
+and treats anything else as unparsed will retry a row forever (or drop it, under a lower retry cap) when the
+judge model reliably reproduces a bare-text shorthand for the same kind of row instead of the tagged format — a
+real incident: a 119,925-row Task-2 mini judge pass (`gpt-5.4-mini`, `reasoning_effort=low`) plateaued at 99.91%
+parsed across 3 retry-to-convergence passes, with 58 rows stuck no matter how many times the same prompt was
+re-sent; every one had already been classified correctly (`"answer"`, `"answer, na"`, `"deflect other"`, etc.),
+just without the XML tags, so more retries never helped. To the SUCCESS-aware done-check above (#357), a
+bare-text row is indistinguishable from a genuine API failure — both lack a valid tagged success marker — so the
+two failure modes need to be handled together: when the strict tag match fails, fall back to a constrained
+regex matched against the ENTIRE trimmed response — not a word search anywhere within it — requiring the whole
+trimmed response to consist of a standalone `\b(answer|deflect|refuse)\b` mode word, optionally followed only
+by a standalone flavor word (only if flavor tags are also absent), defaulting flavor to `na` when mode=answer.
+A longer free-text response that merely contains one of these words (e.g. "I cannot answer; this should be
+refused") must NOT match — an unanchored word search would misread that example as mode=answer, flavor=na,
+exactly the invented/coerced value the fallback must never produce. This only ever extracts the classification
+the judge already stated in a genuine bare-shorthand row — it never invents or coerces a value — and took one
+run's 234 cells from as low as 93.9% up to 100%.
+
 **Multi-wave eval fan-out over many checkpoints needs an explicit canonical checklist, not reactive batching
 (#337).** Batching eval waves reactively — queuing whichever checkpoints/arms/seeds are ready right now — has
 no built-in signal that something was skipped: it only ever adds to what's present, never checks against what's
