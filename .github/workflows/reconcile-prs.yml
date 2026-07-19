@@ -15,6 +15,13 @@ name: reconcile-prs
 #     exact guidance, or escalates to `needs-human` itself if it can't).
 #   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
 #     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
+#   - `mergeable == MERGEABLE` with a completed codex review AT THE CURRENT HEAD whose state is
+#     CHANGES_REQUESTED, and no addressing activity since (automated-researcher#515): this PR is invisible
+#     to both legs above (it IS mergeable, and it IS reviewed-at-head) and to submit-verdict's own
+#     auto-dispatch, which only fires at review-submission time -- a review predating auto-dispatch's merge,
+#     or a dispatch mention that silently failed to post, strands the PR with no further pipeline event ever
+#     arriving. This third leg re-derives the same round count submit-verdict uses and re-posts (or
+#     escalates past) the same auto-dispatch mention.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
 #
 # automated-researcher#513: GitHub emits no event when a PR becomes conflicted, but the event that CAUSES
@@ -84,6 +91,18 @@ jobs:
           # SAME head is treated as still in flight rather than re-dispatched or counted as a fresh round.
           CONFLICT_GRACE_SECONDS=$((55 * 60))
           REVIEW_GRACE_SECONDS=$((30 * 60))
+          # Third leg (automated-researcher#515): a dispatch mention here also fires address-review.yml, so
+          # the same in-flight window as the conflict leg's mention applies -- same idiom, same value.
+          STRANDED_GRACE_SECONDS=$CONFLICT_GRACE_SECONDS
+          # Shared budget with review-on-pr.yml's submit-verdict step (its LIMIT=3) -- this leg re-derives
+          # and re-acts on the SAME consecutive-CHANGES_REQUESTED count, not a separate counter, so a PR
+          # can't get extra rounds just because this leg is the one dispatching them.
+          REVIEW_ADDRESS_LIMIT=3
+          # address-review.yml's own comment-author allowlist (canonical logins only; canon_login below
+          # already remaps the "app/<slug>" form), minus the claude engineer bot itself -- the mention
+          # predicate this leg checks for is "did the SAME set of identities that can trigger an addressing
+          # round already do so", not merely "any comment exists".
+          DISPATCH_MENTION_ALLOW='["antondelafuente","codex-engineer[bot]","senior-engineer-agent[bot]"]'
           now_epoch=$(date -u +%s)
 
           # Lazy-mergeability retry (automated-researcher#513): right after a push, GitHub's mergeability
@@ -149,6 +168,66 @@ jobs:
             gh pr comment "$n" --repo "$REPO" --body "$CONFLICT_MARKER (auto-dispatch round $round/$BUDGET, head $short). @claude-code-engineer this PR conflicts with the base branch. Merge origin/main, resolve the conflicts, and push."
           }
 
+          handle_stranded_rejected() {
+            local n="$1" head="$2" review_info="$3"
+            local short="${head:0:8}"
+            local review_submitted_at
+            review_submitted_at=$(jq -r '.at_head.submitted_at' <<<"$review_info")
+
+            # Same formula review-on-pr.yml's submit-verdict step uses for its own `prior_round` (trailing
+            # run of codex-engineer[bot] CHANGES_REQUESTED reviews, reset by any APPROVED) -- but computed
+            # over ALL reviews INCLUDING the one at the current head, since that review is already posted
+            # here (unlike submit-verdict, which computes prior_round BEFORE submitting the review that
+            # would extend the run). This IS the round number that review represents.
+            local round
+            round=$(jq '.all | sort_by(.submitted_at)
+              | map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"))
+              | reduce .[] as $r (0; if $r.state == "CHANGES_REQUESTED" then . + 1 else 0 end)' <<<"$review_info")
+
+            if [ "$round" -ge "$REVIEW_ADDRESS_LIMIT" ]; then
+              echo "PR #$n: stranded rejected review at head $short is round $round/$REVIEW_ADDRESS_LIMIT with no addressing dispatch; escalating to needs-senior-engineer"
+              gh pr comment "$n" --repo "$REPO" --body "Review loop: $round consecutive CHANGES_REQUESTED rounds from the Codex reviewer with no approve in between (limit $REVIEW_ADDRESS_LIMIT). Escalating to \`needs-senior-engineer\` for in-flight adjudication rather than continuing to auto-dispatch. See the review above for the latest findings."
+              gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
+              return
+            fi
+
+            # Idempotency (automated-researcher#515): "addressing activity since the review" means a
+            # newer allowlisted dispatch mention -- the head hasn't moved (this review is AT the current
+            # head by construction), so "no newer commit" is already guaranteed and doesn't need its own
+            # check. Same errexit-disabled-by-caller hazard as elsewhere in this script: check the read's
+            # exit status explicitly.
+            local last_mention
+            if ! last_mention=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg since "$review_submitted_at" --argjson allow "$DISPATCH_MENTION_ALLOW" '
+              def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+              (add // []) | map(select(((.user.login | canon_login) as $c | ($allow | index($c)) != null)
+                and ((.body // "") | contains("@claude-code-engineer"))
+                and (.created_at > $since)))
+                | sort_by(.created_at) | last
+            '); then
+              echo "::warning::PR #$n: reading dispatch-mention history failed; skipping this tick"
+              return 1
+            fi
+
+            if [ "$last_mention" != "null" ] && [ -n "$last_mention" ]; then
+              local mention_ts elapsed
+              mention_ts=$(jq -r '.created_at' <<<"$last_mention")
+              elapsed=$(( now_epoch - $(date -u -d "$mention_ts" +%s) ))
+              if [ "$elapsed" -lt "$STRANDED_GRACE_SECONDS" ]; then
+                echo "PR #$n: dispatch mention posted ${elapsed}s ago against the rejected review at head $short; treating as still in flight, skipping this tick"
+                return
+              fi
+              # The dispatch mention is older than address-review.yml's own CLI timeout and no commit has
+              # landed since (head is unchanged) -- that addressing run died without pushing. Re-dispatch
+              # the SAME round rather than leaving the PR stranded a second way (mirrors the conflict leg's
+              # round idiom: a dead run doesn't get a free pass, it gets retried within the same budget).
+              echo "PR #$n: dispatch mention posted ${elapsed}s ago with no addressing commit since (still at head $short); that addressing run appears to have died -- re-dispatching round $round/$REVIEW_ADDRESS_LIMIT"
+            else
+              echo "PR #$n: rejected codex review at head $short with no addressing dispatch since; dispatching round $round/$REVIEW_ADDRESS_LIMIT"
+            fi
+
+            gh pr comment "$n" --repo "$REPO" --body "Review loop: auto-dispatch round $round/$REVIEW_ADDRESS_LIMIT. @claude-code-engineer the Codex review above requested changes -- please address the findings and push."
+          }
+
           handle_mergeable() {
             local n="$1" head="$2"
             local short="${head:0:8}"
@@ -157,17 +236,36 @@ jobs:
             # read failure here would look like "not reviewed" or "no marker" and trigger a duplicate
             # review-actuator dispatch. Check each read's exit status explicitly and skip this PR for
             # this tick on failure rather than treating it as absence.
-            local reviewed
-            if ! reviewed=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
+            local review_info
+            if ! review_info=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              add // [] | any(.commit_id == $head and ((.user.login | canon_login) == "codex-engineer[bot]"))
+              (add // []) | map(select((.user.login | canon_login) == "codex-engineer[bot]"))
+                | {at_head: (map(select(.commit_id == $head)) | sort_by(.submitted_at) | last), all: .}
             '); then
               echo "::warning::PR #$n: reading review history failed; skipping this tick"
               return 1
             fi
-            if [ "$reviewed" = "true" ]; then
-              echo "PR #$n: head $short already has a completed codex review; nothing to do"
-              return
+
+            local at_head
+            at_head=$(jq -c '.at_head' <<<"$review_info")
+
+            if [ "$at_head" != "null" ]; then
+              local review_state
+              review_state=$(jq -r '.state' <<<"$at_head")
+              case "$review_state" in
+                APPROVED)
+                  echo "PR #$n: head $short already has a completed APPROVED codex review; nothing to do"
+                  return
+                  ;;
+                CHANGES_REQUESTED)
+                  handle_stranded_rejected "$n" "$head" "$review_info"
+                  return $?
+                  ;;
+                *)
+                  echo "PR #$n: head $short has a completed codex review with unexpected state '$review_state'; nothing to do"
+                  return
+                  ;;
+              esac
             fi
 
             local last
