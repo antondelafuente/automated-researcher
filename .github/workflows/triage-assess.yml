@@ -86,6 +86,40 @@ name: triage-assess
 #
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the trust model, and .github/triage/RUBRIC.md for the
 # rubric every assessment/adjudication pass applies.
+#
+# Capability reduction for non-allowlisted-author tickets (automated-researcher#523): this pipeline's whole
+# job is to READ the filed ticket's own text, so an author-filtered snapshot (the #517/PR #520 shepherd-feed
+# pattern) can't exclude the very content being assessed here -- the boundary has to be capability-side
+# instead. `gather`'s single-ticket packet-build step resolves the ONE ticket's own author (canonicalized the
+# same way every other actor check in this repo is, automated-researcher#381) against this pipeline's usual
+# allowlist and outputs `trusted_author`. Every model-bearing job (blind-assess-fable, blind-assess-sol,
+# adjudicate) branches on it:
+#   - trusted_author == true (the researcher or one of the two engineer bots filed/reopened it): unchanged
+#     from v1.1 -- full checkout, Read (blind-assess) / Read+Grep+Glob (adjudicate) tool access, so the
+#     adjudicator can still check candidate DO tickets' file footprints for wave batching.
+#   - trusted_author == false (anyone else, on this public repo): NO checkout of this repository and NO
+#     tools beyond producing the structured verdict (Claude: `--tools ""`; codex-action: no checkout step at
+#     all, so there is nothing for its read-only sandbox to read). The rubric and the one ticket packet are
+#     embedded directly into the prompt TEXT instead, assembled by `gather` (which already has its own
+#     trusted checkout for exactly this, and never touches the ticket's own attacker-controlled text while
+#     doing so) and wrapped in explicit `<<<UNTRUSTED_TICKET_DATA>>>` delimiters with an instruction that the
+#     content is DATA to assess, never instructions -- defense-in-depth on top of the capability reduction,
+#     never a substitute for it (see `.github/prompts/*-untrusted.md`). The adjudicator's only genuine use of
+#     repo access is RUBRIC.md's file-disjoint wave-batching check; without it, a capability-reduced DO
+#     verdict cannot be compared against any other ticket's footprint, so the workflow itself (not the
+#     model) mechanically overrides its wave to this ticket's own issue number -- globally unique by
+#     construction, so it can never accidentally collide with, and therefore never silently batches with,
+#     any other ticket's wave (the wave rule's fail-safe direction is to serialize, per RUBRIC.md).
+#   Every multiline value assembled from ticket-filer-controlled text and passed through a `GITHUB_OUTPUT`
+#   heredoc uses a freshly random delimiter (`PROMPT_EOF_$(openssl rand -hex 16)`) -- GitHub's own documented
+#   mitigation for the delimiter-collision injection class; the fixed `PROMPT_EOF` delimiter the
+#   trusted-author path still uses is safe there only because that path's prompt is 100% static file content,
+#   never ticket-filer text. Every free-text field a model can populate from ticket-filer-controlled input
+#   (blind-assessment reasoning, adjudication notes/proposed_body_edit) has any `@handle`-shaped substring
+#   neutralized (wrapped in an inline code span, same technique as review-on-pr.yml's
+#   automated-researcher#502 precedent) before it enters an App-authored comment -- an App-authored comment
+#   passes exactly the author filters other actuators in this pipeline trust by author
+#   (agentic-engineering#56's escalation-mention sanitization precedent).
 
 on:
   issues:
@@ -118,6 +152,12 @@ env:
   # straggler exclusion and the rollup's awaiting-action scan) and to find-or-edit the comment in post-results.
   # Keep this literal in sync across all three uses if it's ever changed.
   ASSESSMENT_MARKER_PREFIX: "<!-- TRIAGE-ASSESSMENT-VERDICT:"
+  # Same allowlist every other actuator in this pipeline uses (space-separated, for canonical-login.sh's
+  # shell-loop comparison idiom — same form as implement-on-ready.yml's own ALLOWLIST). Used by `gather`
+  # (#523) to classify a single ticket's OWN author as trusted/untrusted for capability reduction — a
+  # distinct check from the job-level `if:` actor gates above, which authorize who can trigger this workflow
+  # at all, not who filed the ticket being assessed.
+  ALLOWLIST: "antondelafuente claude-code-engineer[bot] codex-engineer[bot]"
 
 jobs:
   gather:
@@ -143,6 +183,9 @@ jobs:
       issue_number: ${{ steps.build.outputs.issue_number }}
       ticket_count: ${{ steps.build.outputs.ticket_count }}
       stragglers: ${{ steps.build.outputs.stragglers }}
+      # #523: single-mode only — whether the ONE gathered ticket's own author is on this pipeline's trusted
+      # allowlist. Every model-bearing downstream job branches on this to decide checkout + tool access.
+      trusted_author: ${{ steps.build.outputs.trusted_author }}
     steps:
       - name: Checkout base branch
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
@@ -195,7 +238,7 @@ jobs:
 
           if [ "$MODE" = single ]; then
             if ! gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-                --json number,title,body,labels,createdAt,comments > /tmp/raw_issue.json; then
+                --json number,title,body,labels,createdAt,comments,author > /tmp/raw_issue.json; then
               echo "::error::gh issue view $ISSUE_NUMBER failed"
               exit 1
             fi
@@ -216,10 +259,67 @@ jobs:
                   created_at: .createdAt,
                   age_days: age_days(.createdAt),
                   comments: [ .comments[] | {author: .author.login, created_at: .createdAt, body: (.body // "")} ],
-                  referenced_issues: refs( ((.body // "") + "\n" + ([.comments[].body // ""] | join("\n"))); .number )
+                  referenced_issues: refs( ((.body // "") + "\n" + ([.comments[].body // ""] | join("\n"))); .number ),
+                  author: (.author.login // "")
                 } ]
               }
             ' /tmp/candidates.json > triage-packets.json
+
+            # #523: embed the (repo-trusted, never ticket-controlled) rubric + capability-reduced prompt
+            # preambles + the coverage validator script directly into the packets artifact here, while this
+            # job still has its own checkout — so the model-bearing blind-assess/adjudicate jobs never need a
+            # checkout of their own at all for an untrusted-author ticket (see below). #526 round-2 review
+            # (P0): a job-local sparse `actions/checkout` (the round-1 fix for the missing-validator P0)
+            # still materializes the FULL `.git` object database, not just the sparse worktree cone — a
+            # shell-capable model (codex-action's read-only sandbox included) can still `git show
+            # HEAD:<path>` any file in the repo regardless of what's checked out to the working tree. Writing
+            # the script straight from this artifact, instead of via any `actions/checkout` call, grants no
+            # git history at all in the untrusted-author jobs.
+            rubric_content=$(cat .github/triage/RUBRIC.md)
+            blind_untrusted_preamble=$(cat .github/prompts/triage-blind-assess-untrusted.md)
+            adjudicate_untrusted_preamble=$(cat .github/prompts/triage-adjudicate-untrusted.md)
+            validate_coverage_script=$(cat .github/triage/validate_coverage.sh)
+            jq --arg rubric "$rubric_content" \
+               --arg bpre "$blind_untrusted_preamble" \
+               --arg apre "$adjudicate_untrusted_preamble" \
+               --arg vscript "$validate_coverage_script" \
+               '. + {rubric: $rubric, blind_assess_untrusted_preamble: $bpre, adjudicate_untrusted_preamble: $apre, validate_coverage_script: $vscript}' \
+               triage-packets.json > /tmp/packets_ext.json
+            mv /tmp/packets_ext.json triage-packets.json
+
+            # #523: classify the ticket as trusted/untrusted for capability reduction. automated-researcher#381:
+            # canonicalize before comparing — `gh issue view --json author` returns the CLI/GraphQL "app/<slug>"
+            # form. #526 round-2 review (P0): trust is the AND of the ticket's OWN author (not this run's
+            # actor/sender, which the sweep dispatch always sets to the allowlisted App identity regardless of
+            # who actually filed the ticket) AND every comment author — on this public repo, anyone can comment
+            # on anyone's issue, so an allowlisted-author ticket's embedded comment thread can still carry
+            # attacker-controlled text; without this, that text would reach the full-checkout,
+            # Read/Grep/Glob-capable trusted path exactly like an untrusted issue body would. One
+            # non-allowlisted login anywhere in the set forces the whole ticket down the capability-reduced
+            # path (fail-closed, per AGENTS.md's scale principle) rather than trying to filter per-comment.
+            source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+            author_login=$(jq -r '.tickets[0].author' triage-packets.json)
+            mapfile -t comment_logins < <(jq -r '.tickets[0].comments[].author' triage-packets.json)
+            trusted_author=true
+            for login in "$author_login" "${comment_logins[@]}"; do
+              login_canon=$(canonical_login "$login" 2>/dev/null || echo "")
+              matched=false
+              # Explicit if/then (not a `&&`-chained one-liner): under `set -e`, a bare failing `[ ... ]` in a
+              # `&&` list that never reaches `matched=true` would abort this whole step, not just skip the
+              # loop body.
+              if [ -n "$login_canon" ]; then
+                for a in $ALLOWLIST; do
+                  if [ "$(canonical_login "$a")" = "$login_canon" ]; then
+                    matched=true
+                  fi
+                done
+              fi
+              if [ "$matched" != true ]; then
+                trusted_author=false
+              fi
+            done
+            echo "ticket #$ISSUE_NUMBER author=$author_login comment_authors=${comment_logins[*]:-none} trusted_author=$trusted_author"
+            echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
 
             ticket_count=$(jq '.tickets | length' triage-packets.json)
             echo "mode=$MODE gathered $ticket_count ticket(s)"
@@ -277,7 +377,11 @@ jobs:
     permissions:
       contents: read
     steps:
+      # #523: no checkout at all when the ticket's author is untrusted — the rendered prompt embeds
+      # everything this job's model needs (rubric + packet) instead, assembled by `gather` while IT holds
+      # the checkout (see this workflow's header). The trusted-author path is unchanged from v1.1.
       - name: Checkout base branch
+        if: needs.gather.outputs.trusted_author == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
           persist-credentials: false
@@ -287,14 +391,58 @@ jobs:
         with:
           name: triage-packets
 
-      - name: Render blind-assessment prompt
-        id: render_prompt
+      # #526 round-2 review (P0): a job-local sparse `actions/checkout` (the round-1 fix for the
+      # missing-validator P0) still materializes the FULL `.git` object database, not just the sparse
+      # worktree cone — a shell-capable model could still `git show HEAD:<path>` any file in the repo
+      # regardless of what's checked out. `gather` already embedded this static, non-secret script's content
+      # into the packets artifact (see this workflow's header); writing it straight from there grants no git
+      # history at all, closing this off completely instead of narrowing it.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
+
+      - name: Render blind-assessment prompt (trusted author)
+        id: render_prompt_trusted
+        if: needs.gather.outputs.trusted_author == 'true'
         run: |
           set -euo pipefail
           {
             echo "prompt<<PROMPT_EOF"
             cat .github/prompts/triage-blind-assess.md
             echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # #523: the rubric and the one ticket packet are embedded verbatim into the prompt TEXT (never left
+      # for the model to Read as a file, since it gets no tools at all) inside explicit
+      # <<<UNTRUSTED_TICKET_DATA>>> delimiters — quarantine framing, defense-in-depth on top of the tool
+      # removal below, never a substitute for it. A freshly random heredoc delimiter (not the fixed
+      # PROMPT_EOF the trusted path above uses) is required here: this content includes the ticket filer's
+      # own text, and GitHub's multiline-output heredoc is only safe against a delimiter-collision injection
+      # when the delimiter is unpredictable to whoever controls the embedded content.
+      - name: Render blind-assessment prompt (untrusted author, capability-reduced)
+        id: render_prompt_untrusted
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          preamble=$(jq -r '.blind_assess_untrusted_preamble' triage-packets.json)
+          rubric=$(jq -r '.rubric' triage-packets.json)
+          packet=$(jq -c '{generated_at, tickets}' triage-packets.json)
+          delim="PROMPT_EOF_$(openssl rand -hex 16)"
+          {
+            echo "prompt<<$delim"
+            printf '%s\n\n' "$preamble"
+            echo "<<<RUBRIC>>>"
+            printf '%s\n' "$rubric"
+            echo "<<<END RUBRIC>>>"
+            echo
+            echo "<<<UNTRUSTED_TICKET_DATA>>>"
+            printf '%s\n' "$packet"
+            echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       # Same pin rationale as implement-on-ready.yml/checks.yml (automated-researcher#384/#387): the
@@ -311,17 +459,25 @@ jobs:
         id: run_claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          PROMPT: ${{ steps.render_prompt_trusted.outputs.prompt || steps.render_prompt_untrusted.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+          TRUSTED_AUTHOR: ${{ needs.gather.outputs.trusted_author }}
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          # Read-only assessor: no Bash/Edit/Write, so it cannot mutate anything even if instructed to —
-          # it can only Read the packets/rubric files already present in its checkout.
+          # Read-only assessor when trusted: no Bash/Edit/Write, so it cannot mutate anything even if
+          # instructed to — it can only Read the packets/rubric files already present in its checkout.
+          # #523: an untrusted-author ticket instead gets NO tools at all (`--tools ""`) — the rendered
+          # prompt above already carries everything it needs as embedded text.
+          if [ "$TRUSTED_AUTHOR" = "true" ]; then
+            TOOL_ARGS=(--allowedTools Read)
+          else
+            TOOL_ARGS=(--tools "")
+          fi
           jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
-                --allowedTools Read \
+                "${TOOL_ARGS[@]}" \
                 --json-schema '{"type":"object","additionalProperties":false,"required":["assessments"],"properties":{"assessments":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","importance","reasoning"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"importance":{"enum":["low","med","high"]},"reasoning":{"type":"string"}}}}}}' \
             | tee /tmp/claude_stream.jsonl
 
@@ -353,7 +509,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      # #526 round-3 review (P0): during the codex-action run itself, zero repository-derived files exist on
+      # the runner's filesystem on the untrusted-author path — the only repo content in the model's reach is
+      # the prompt text (preamble + rubric), deliberately embedded below. The trusted-author path is
+      # unchanged from v1.1.
       - name: Checkout base branch
+        if: needs.gather.outputs.trusted_author == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
           persist-credentials: false
@@ -365,8 +526,9 @@ jobs:
 
       # Same prompt FILE as the Fable job (not just the same wording, the identical bytes) — true blind
       # symmetry requires both assessors to see the exact same packet under the exact same instructions.
-      - name: Render blind-assessment prompt
-        id: render_prompt
+      - name: Render blind-assessment prompt (trusted author)
+        id: render_prompt_trusted
+        if: needs.gather.outputs.trusted_author == 'true'
         run: |
           set -euo pipefail
           {
@@ -374,6 +536,38 @@ jobs:
             cat .github/prompts/triage-blind-assess.md
             echo "PROMPT_EOF"
           } >> "$GITHUB_OUTPUT"
+
+      # #523: same capability-reduced embedding as the Fable job's untrusted-author render step — identical
+      # prompt FILE and identical assembly, so blind symmetry holds in the reduced-capability case too.
+      - name: Render blind-assessment prompt (untrusted author, capability-reduced)
+        id: render_prompt_untrusted
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          preamble=$(jq -r '.blind_assess_untrusted_preamble' triage-packets.json)
+          rubric=$(jq -r '.rubric' triage-packets.json)
+          packet=$(jq -c '{generated_at, tickets}' triage-packets.json)
+          delim="PROMPT_EOF_$(openssl rand -hex 16)"
+          {
+            echo "prompt<<$delim"
+            printf '%s\n\n' "$preamble"
+            echo "<<<RUBRIC>>>"
+            printf '%s\n' "$rubric"
+            echo "<<<END RUBRIC>>>"
+            echo
+            echo "<<<UNTRUSTED_TICKET_DATA>>>"
+            printf '%s\n' "$packet"
+            echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
+      # #526 round-3 review (P0): with the prompt already rendered into GITHUB_OUTPUT, nothing needs
+      # the packets file until post-run validation — deleting it here means the codex-action sandbox
+      # has NO repo-derived file on disk during the model run; the only repo content the model sees
+      # is what the prompt deliberately embeds (preamble + rubric).
+      - name: Remove repo-derived files before model run (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: rm -f triage-packets.json
 
       - name: Run codex-action (Sol blind assessor)
         id: run_codex
@@ -392,7 +586,7 @@ jobs:
           # matches the actor string directly with no bot-suffix precondition, so passing the same dynamic
           # value through it instead covers every trigger type's actor representation uniformly.
           allow-users: ${{ github.actor }}
-          prompt: ${{ steps.render_prompt.outputs.prompt }}
+          prompt: ${{ steps.render_prompt_trusted.outputs.prompt || steps.render_prompt_untrusted.outputs.prompt }}
           output-file: triage-blind-sol.json
           output-schema: |
             {
@@ -424,6 +618,29 @@ jobs:
           path: triage-blind-sol.json
           retention-days: 90
 
+      # #526 round-3 review (P0): the untrusted-author path deleted triage-packets.json above so the
+      # codex-action sandbox had nothing repo-derived to read during the model run; the validate step below
+      # needs it back as its second argument.
+      - name: Re-download ticket packets (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      # #526 round-2 review (P0): same fix as the Fable job's identical step — a sparse `actions/checkout`
+      # (the round-1 fix for the missing-validator P0) still restores full `.git` object access to
+      # codex-action's read-only sandbox (worktree sparseness doesn't limit `git show HEAD:<path>`), directly
+      # contradicting this job's "no checkout at all" comment. Writing the script straight from the
+      # already-embedded packets artifact instead grants no git history at all. Moved to run after the model
+      # step (#526 round-3): the model run itself must see no repo-derived files at all.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
+
       # Same fail-closed exact-set check as the adjudicator (PR #456 round 2): a corrupt blind pass must
       # not reach adjudication at all, so this runs immediately after parsing, before the adjudicate job
       # (which needs this job) can even start.
@@ -440,8 +657,12 @@ jobs:
       issues: read
     steps:
       # Full checkout (not just the rubric file) so the adjudicator's Grep/Glob tools can check candidate
-      # DO tickets' expected file footprints against the real tree for wave batching.
+      # DO tickets' expected file footprints against the real tree for wave batching. #523: skipped entirely
+      # for an untrusted-author ticket — its DO verdict, if any, gets its wave forced to its own issue number
+      # below instead (the wave rule's fail-safe/serialized direction), since there is no repo tree here to
+      # check a footprint against.
       - name: Checkout base branch
+        if: needs.gather.outputs.trusted_author == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
         with:
           persist-credentials: false
@@ -450,6 +671,19 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: triage-packets
+
+      # #526 round-2 review (P0): same fix as the blind-assess jobs' identical step — a sparse
+      # `actions/checkout` (the round-1 fix for the missing-validator P0) still materializes the FULL `.git`
+      # object database, giving a shell-capable model `git show HEAD:<path>` read access to any file in the
+      # repo regardless of the sparse worktree cone. Writing the script straight from the already-embedded
+      # packets artifact instead grants no git history at all.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
 
       - name: Download Fable blind assessment
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
@@ -465,8 +699,12 @@ jobs:
       # #414's comment thread. Pinned to those two specific comment IDs — not a fetch of the whole
       # thread — so this stays constant-size by construction and can never accumulate this same
       # workflow's own later assessment/rollup comments (PR #456 P0: self-accumulating backfill context).
+      # #523: the backfill is one-time historical shaping recommendations, not essential to a correct
+      # adjudication — skipped for an untrusted-author ticket to keep that path's prompt minimal (it has no
+      # file access to fall back on if this step's output were ever missing, unlike the trusted path).
       - name: Fetch backfill recommendations from #414 (pinned dry-run comments)
         id: backfill
+        if: needs.gather.outputs.trusted_author == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -485,14 +723,47 @@ jobs:
             done
           } > triage-backfill.md
 
-      - name: Render adjudication prompt
-        id: render_prompt
+      - name: Render adjudication prompt (trusted author)
+        id: render_prompt_trusted
+        if: needs.gather.outputs.trusted_author == 'true'
         run: |
           set -euo pipefail
           {
             echo "prompt<<PROMPT_EOF"
             cat .github/prompts/triage-adjudicate.md
             echo "PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # #523: rubric + ticket packet + both blind assessments embedded verbatim into the prompt TEXT (no
+      # backfill — see above), inside explicit <<<UNTRUSTED_TICKET_DATA>>> delimiters for the ticket-filer
+      # text specifically (the blind assessments are trusted, model-generated JSON, not filer-authored, so
+      # they get their own distinct delimiter instead). Random heredoc delimiter for the same
+      # delimiter-collision reason as the blind-assess jobs' untrusted render step.
+      - name: Render adjudication prompt (untrusted author, capability-reduced)
+        id: render_prompt_untrusted
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          preamble=$(jq -r '.adjudicate_untrusted_preamble' triage-packets.json)
+          rubric=$(jq -r '.rubric' triage-packets.json)
+          packet=$(jq -c '{generated_at, tickets}' triage-packets.json)
+          blind=$(jq -n --slurpfile f triage-blind-fable.json --slurpfile s triage-blind-sol.json -c '{fable: $f[0], sol: $s[0]}')
+          delim="PROMPT_EOF_$(openssl rand -hex 16)"
+          {
+            echo "prompt<<$delim"
+            printf '%s\n\n' "$preamble"
+            echo "<<<RUBRIC>>>"
+            printf '%s\n' "$rubric"
+            echo "<<<END RUBRIC>>>"
+            echo
+            echo "<<<UNTRUSTED_TICKET_DATA>>>"
+            printf '%s\n' "$packet"
+            echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
+            echo
+            echo "<<<BLIND_ASSESSMENTS>>>"
+            printf '%s\n' "$blind"
+            echo "<<<END_BLIND_ASSESSMENTS>>>"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Claude Code
@@ -506,17 +777,25 @@ jobs:
         id: run_claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
+          PROMPT: ${{ steps.render_prompt_trusted.outputs.prompt || steps.render_prompt_untrusted.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
+          TRUSTED_AUTHOR: ${{ needs.gather.outputs.trusted_author }}
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          # Read/Grep/Glob only — no Bash/Edit/Write/gh. This pass produces a PROPOSAL; it has no path to
-          # mutate any issue even if instructed to.
+          # Read/Grep/Glob only when trusted — no Bash/Edit/Write/gh either way. This pass produces a
+          # PROPOSAL; it has no path to mutate any issue even if instructed to. #523: an untrusted-author
+          # ticket instead gets NO tools at all (`--tools ""`) — the rendered prompt above already carries
+          # the rubric, packet, and both blind assessments as embedded text.
+          if [ "$TRUSTED_AUTHOR" = "true" ]; then
+            TOOL_ARGS=(--allowedTools Read,Grep,Glob)
+          else
+            TOOL_ARGS=(--tools "")
+          fi
           jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
-                --allowedTools Read,Grep,Glob \
+                "${TOOL_ARGS[@]}" \
                 --json-schema '{"type":"object","additionalProperties":false,"required":["tickets"],"properties":{"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","proposed_body_edit","wave","notes"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"proposed_body_edit":{"type":["string","null"]},"wave":{"type":["integer","null"]},"notes":{"type":"string"}}}}}}' \
             | tee /tmp/claude_stream.jsonl
 
@@ -526,6 +805,21 @@ jobs:
             exit 1
           fi
           echo "$structured" > triage-adjudication.json
+
+      # #523: a capability-reduced adjudication has no repo access, so it cannot check this ticket's file
+      # footprint against any other open DO ticket the way the trusted-author path does (RUBRIC.md's
+      # file-disjoint wave-batching rule) — the model is instructed to report wave 1 for a DO verdict
+      # specifically BECAUSE it can't do that check. Override it here, mechanically, to this ticket's own
+      # issue number instead: globally unique by construction, so it can never accidentally collide with,
+      # and therefore never silently batches with, any other ticket's wave. This is the wave rule's own
+      # fail-safe direction (serialize, don't batch, when disjointness isn't verified), enforced by the
+      # workflow rather than relied upon from the model's own output.
+      - name: Force serialized wave for untrusted-author DO verdict
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          jq '.tickets |= map(if .verdict == "DO" then .wave = .number else . end)' triage-adjudication.json > /tmp/adj_wave.json
+          mv /tmp/adj_wave.json triage-adjudication.json
 
       - name: Upload adjudication artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # actions/upload-artifact v7.0.1
@@ -600,6 +894,23 @@ jobs:
             # HTML-comment-safe: a literal "-->" in model-authored text would otherwise terminate the
             # marker comment early; collapse to one line so the marker stays a single scannable line.
             def esc_marker: gsub("-->"; "- >") | gsub("\n"; " ");
+            # automated-researcher#523 (agentic-engineering#56 precedent): any `@handle`-shaped substring in
+            # model-authored text derived from a ticket (possibly untrusted-author, on this public repo) is
+            # neutralized before it enters this App-authored comment, so a filer-crafted
+            # "@some-allowlisted-identity ..." string quoted verbatim by a model can never itself become a
+            # live mention once this comment posts — an App-authored comment passes exactly the author
+            # filters the other actuators in this pipeline trust. #526 round-2 review (P0): the original
+            # approach wrapped the match in a FIXED single backtick on each side, relying on it forming a
+            # Markdown inline code span — but a backtick run already adjacent in the surrounding
+            # attacker-controlled text (of a different length than the one we insert) defeats the CommonMark
+            # equal-length-delimiter matching rule and can leave the handle outside any code span, live. A
+            # zero-width space (U+200B) inserted between "@" and the handle instead breaks the GitHub mention
+            # match at the character level — it never depends on Markdown delimiter parsing or on anything
+            # else in the surrounding text, so no attacker-controlled context can ever re-enable it. The
+            # character renders invisibly, so the text still reads correctly to a human. (Note: a literal
+            # apostrophe must never appear inside this bash single-quoted jq program -- bash has no escape
+            # for one there, and a stray one silently truncates/reflows the argument actually passed to jq.)
+            def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "@\u200b\(.h)");
             ($fable[0].assessments | map({(.number|tostring): .}) | add // {}) as $fable_by_num |
             ($sol[0].assessments   | map({(.number|tostring): .}) | add // {}) as $sol_by_num |
             ( $adj[0].tickets | map(
@@ -607,20 +918,37 @@ jobs:
                 $fable_by_num[$k] as $f |
                 $sol_by_num[$k] as $s |
                 ($f.verdict != $s.verdict) as $disagreement |
+                (.notes | esc_mentions) as $notes |
+                ($f.reasoning | esc_mentions) as $f_reasoning |
+                ($s.reasoning | esc_mentions) as $s_reasoning |
                 ( "<!-- TRIAGE-ASSESSMENT-VERDICT: " + .verdict + " -->\n" +
-                  "<!-- TRIAGE-ASSESSMENT-NOTES: " + (.notes | esc_marker) + " -->\n\n" +
+                  "<!-- TRIAGE-ASSESSMENT-NOTES: " + ($notes | esc_marker) + " -->\n\n" +
                   "# Triage assessment\n\n" +
                   "**Sighted verdict: " + .verdict + "** · blind verdicts: Fable=" + $f.verdict +
                   ", Sol=" + $s.verdict + (if $disagreement then " (blind assessors disagreed)" else "" end) +
-                  "\n\n" + .notes + "\n\n" +
+                  "\n\n" + $notes + "\n\n" +
                   "<details><summary>Fable blind assessment (importance: " + $f.importance + ")</summary>\n\n" +
-                  $f.reasoning + "\n\n</details>\n\n" +
+                  $f_reasoning + "\n\n</details>\n\n" +
                   "<details><summary>Sol blind assessment (importance: " + $s.importance + ")</summary>\n\n" +
-                  $s.reasoning + "\n\n</details>\n\n"
+                  $s_reasoning + "\n\n</details>\n\n"
                 ) as $head |
+                # proposed_body_edit is NOT mention-escaped: it renders inside a fenced code block below,
+                # where GitHub never parses @mentions live regardless, and the whole purpose of this field is to
+                # be a byte-faithful "full replacement body" a human can copy straight into the ticket —
+                # mutating it here would defeat that. automated-researcher#526 round-1 review (P0): a FIXED
+                # ``` fence let ticket-controlled content containing its own triple-backtick run close the
+                # fence early, moving whatever followed (including a quoted @handle) into normally-parsed
+                # markdown where GitHub DOES parse mentions live — defeating the neutralization above.
+                # The CommonMark rule is that a closing fence needs >= the opening fences backtick count,
+                # so sizing the fence to one longer than the longest backtick run anywhere in the content
+                # makes it impossible for any content run to act as a closing fence — content stays untouched.
+                # (Note: a literal apostrophe must never appear inside this bash single-quoted jq program.)
                 (if .proposed_body_edit != null then
-                   "## Proposed replacement body\n\n<details><summary>proposed replacement body</summary>\n\n```\n" +
-                   .proposed_body_edit + "\n```\n\n</details>\n\n"
+                   ((.proposed_body_edit | [scan("`+")] | map(length) | max) // 0) as $max_backtick_run |
+                   ([$max_backtick_run + 1, 3] | max) as $fence_len |
+                   ("`" * $fence_len) as $fence |
+                   "## Proposed replacement body\n\n<details><summary>proposed replacement body</summary>\n\n" +
+                   $fence + "\n" + .proposed_body_edit + "\n" + $fence + "\n\n</details>\n\n"
                  else "" end) as $edit_block |
                 ($head + $edit_block + "Full run: " + $run_url + "\n") as $full_body |
                 ( if ($full_body | length) > 64000 then
@@ -777,8 +1105,18 @@ jobs:
             # every run, and chunking into many comments would break that single-anchor invariant.
             jq -r --arg url "${SERVER_URL}/${REPO}" --arg run_url "$RUN_URL" --argjson budget 64000 --arg now "$NOW" '
               def esc: gsub("\\|"; "\\\\|") | gsub("\n"; " ");
+              # automated-researcher#523: `title` comes straight off a fresh `gh issue list` (untrusted —
+              # any open ticket, from any filer, on this public repo), unlike `notes` which is re-derived
+              # from a marker line this same pipeline already mention-escaped — so only title needs it here;
+              # escaping notes again would just double-wrap it.
+              # #526 round-2 review (P0): same zero-width-space technique as the post-results job identical
+              # definition — a fixed-backtick code-span wrap is defeated by an attacker-controlled backtick
+              # run of a different length already adjacent in the title text; U+200B breaks the mention match
+              # at the character level instead, independent of any surrounding Markdown delimiters. (Note: a
+              # literal apostrophe must never appear inside this bash single-quoted jq program.)
+              def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "@\u200b\(.h)");
               def row: "| [#" + (.number|tostring) + "](" + $url + "/issues/" + (.number|tostring) + ") | " +
-                       (.title | esc) + " | " + .verdict + " | " + (.notes | esc) + " |";
+                       (.title | esc_mentions | esc) + " | " + .verdict + " | " + (.notes | esc) + " |";
               ( "# Triage rollup (" + $now + ")\n\n" +
                 (length | tostring) + " open ticket(s) already assessed and awaiting a researcher decision. " +
                 "This sweep dispatches straggler assessments asynchronously (per-issue `workflow_dispatch` " +
