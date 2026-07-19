@@ -303,6 +303,19 @@ run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your
 invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
 then run to completion.
 
+**Reap your own design worktree — right after kickoff (automated-researcher#532).** If this design session is
+running in a dedicated worktree (your instance's convention for giving a design-experiment session its own
+working dir, distinct from the shared checkout — mirroring the executor's own dedicated dir just above), it
+is dead by construction the moment the executor launches: the design docs it carried already landed on the
+default branch via the design-stage PR merge (the gate just above), so nothing in it is still load-bearing —
+worktrees don't bill, so nothing else forces this teardown (automated-researcher#532: ~37G of exactly this
+class of dead worktree accumulated silently before this contract existed). `cd` OUT of it first (e.g. `$HOME`
+or the shared checkout — never remove the tree your own shell is standing in), then `git worktree remove
+--force` it (**`--force` is required and safe ONLY because the design-stage PR already merged** — design-stage
+scratch may be untracked). **Keep the branch ref** — the content already landed via squash-merge, so the ref
+is cheap and preserves recoverability. Skip this if you were never given a dedicated worktree for this design
+(e.g. exploratory work directly in a shared tree) — there is nothing of this class to reap.
+
 **Arm designer-side supervision (standard, the same moment you kick off) — the two-layer split (#292, #342).**
 Supervision divides by failure mode, and the designer's share is deliberately small. (The prior contract — one
 `/loop 20m` watchdog per executor, in the designer session — ran every tick with the full designer history:
