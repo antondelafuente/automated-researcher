@@ -266,38 +266,59 @@ jobs:
             ' /tmp/candidates.json > triage-packets.json
 
             # #523: embed the (repo-trusted, never ticket-controlled) rubric + capability-reduced prompt
-            # preambles directly into the packets artifact here, while this job still has its own checkout —
-            # so the model-bearing blind-assess/adjudicate jobs never need a checkout of their own just to
-            # read these three static files when the ticket's author turns out to be untrusted (see below).
+            # preambles + the coverage validator script directly into the packets artifact here, while this
+            # job still has its own checkout — so the model-bearing blind-assess/adjudicate jobs never need a
+            # checkout of their own at all for an untrusted-author ticket (see below). #526 round-2 review
+            # (P0): a job-local sparse `actions/checkout` (the round-1 fix for the missing-validator P0)
+            # still materializes the FULL `.git` object database, not just the sparse worktree cone — a
+            # shell-capable model (codex-action's read-only sandbox included) can still `git show
+            # HEAD:<path>` any file in the repo regardless of what's checked out to the working tree. Writing
+            # the script straight from this artifact, instead of via any `actions/checkout` call, grants no
+            # git history at all in the untrusted-author jobs.
             rubric_content=$(cat .github/triage/RUBRIC.md)
             blind_untrusted_preamble=$(cat .github/prompts/triage-blind-assess-untrusted.md)
             adjudicate_untrusted_preamble=$(cat .github/prompts/triage-adjudicate-untrusted.md)
+            validate_coverage_script=$(cat .github/triage/validate_coverage.sh)
             jq --arg rubric "$rubric_content" \
                --arg bpre "$blind_untrusted_preamble" \
                --arg apre "$adjudicate_untrusted_preamble" \
-               '. + {rubric: $rubric, blind_assess_untrusted_preamble: $bpre, adjudicate_untrusted_preamble: $apre}' \
+               --arg vscript "$validate_coverage_script" \
+               '. + {rubric: $rubric, blind_assess_untrusted_preamble: $bpre, adjudicate_untrusted_preamble: $apre, validate_coverage_script: $vscript}' \
                triage-packets.json > /tmp/packets_ext.json
             mv /tmp/packets_ext.json triage-packets.json
 
-            # #523: classify the ticket's OWN author (not this run's actor/sender, which the sweep dispatch
-            # always sets to the allowlisted App identity regardless of who actually filed the ticket) as
-            # trusted/untrusted for capability reduction. automated-researcher#381: canonicalize before
-            # comparing — `gh issue view --json author` returns the CLI/GraphQL "app/<slug>" form.
+            # #523: classify the ticket as trusted/untrusted for capability reduction. automated-researcher#381:
+            # canonicalize before comparing — `gh issue view --json author` returns the CLI/GraphQL "app/<slug>"
+            # form. #526 round-2 review (P0): trust is the AND of the ticket's OWN author (not this run's
+            # actor/sender, which the sweep dispatch always sets to the allowlisted App identity regardless of
+            # who actually filed the ticket) AND every comment author — on this public repo, anyone can comment
+            # on anyone's issue, so an allowlisted-author ticket's embedded comment thread can still carry
+            # attacker-controlled text; without this, that text would reach the full-checkout,
+            # Read/Grep/Glob-capable trusted path exactly like an untrusted issue body would. One
+            # non-allowlisted login anywhere in the set forces the whole ticket down the capability-reduced
+            # path (fail-closed, per AGENTS.md's scale principle) rather than trying to filter per-comment.
             source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
             author_login=$(jq -r '.tickets[0].author' triage-packets.json)
-            author_canon=$(canonical_login "$author_login" 2>/dev/null || echo "")
-            trusted_author=false
-            # Explicit if/then (not a `&&`-chained one-liner): under `set -e`, a bare failing `[ ... ]` in a
-            # `&&` list that never reaches `trusted_author=true` would abort this whole step, not just skip
-            # the loop body.
-            if [ -n "$author_canon" ]; then
-              for a in $ALLOWLIST; do
-                if [ "$(canonical_login "$a")" = "$author_canon" ]; then
-                  trusted_author=true
-                fi
-              done
-            fi
-            echo "ticket #$ISSUE_NUMBER author=$author_login trusted_author=$trusted_author"
+            mapfile -t comment_logins < <(jq -r '.tickets[0].comments[].author' triage-packets.json)
+            trusted_author=true
+            for login in "$author_login" "${comment_logins[@]}"; do
+              login_canon=$(canonical_login "$login" 2>/dev/null || echo "")
+              matched=false
+              # Explicit if/then (not a `&&`-chained one-liner): under `set -e`, a bare failing `[ ... ]` in a
+              # `&&` list that never reaches `matched=true` would abort this whole step, not just skip the
+              # loop body.
+              if [ -n "$login_canon" ]; then
+                for a in $ALLOWLIST; do
+                  if [ "$(canonical_login "$a")" = "$login_canon" ]; then
+                    matched=true
+                  fi
+                done
+              fi
+              if [ "$matched" != true ]; then
+                trusted_author=false
+              fi
+            done
+            echo "ticket #$ISSUE_NUMBER author=$author_login comment_authors=${comment_logins[*]:-none} trusted_author=$trusted_author"
             echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
 
             ticket_count=$(jq '.tickets | length' triage-packets.json)
@@ -365,25 +386,24 @@ jobs:
         with:
           persist-credentials: false
 
-      # #526 round-1 review (P0): the untrusted path below still runs validate_coverage.sh (a deterministic,
-      # workflow-authored bash script, not a model), which needs the file to exist on disk — the full
-      # checkout it would otherwise come from is exactly what the untrusted path skips. Sparse-checkout ONLY
-      # this one static script (no working-directory cone, so nothing else materializes) instead of granting
-      # any broader checkout; the model's own tool args stay `--tools ""` regardless, so this grants the
-      # model no capability at all — it only makes a deterministic post-model check runnable.
-      - name: Checkout coverage validator only (untrusted author)
-        if: needs.gather.outputs.trusted_author != 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            .github/triage/validate_coverage.sh
-          sparse-checkout-cone-mode: false
-
       - name: Download ticket packets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: triage-packets
+
+      # #526 round-2 review (P0): a job-local sparse `actions/checkout` (the round-1 fix for the
+      # missing-validator P0) still materializes the FULL `.git` object database, not just the sparse
+      # worktree cone — a shell-capable model could still `git show HEAD:<path>` any file in the repo
+      # regardless of what's checked out. `gather` already embedded this static, non-secret script's content
+      # into the packets artifact (see this workflow's header); writing it straight from there grants no git
+      # history at all, closing this off completely instead of narrowing it.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
 
       - name: Render blind-assessment prompt (trusted author)
         id: render_prompt_trusted
@@ -498,22 +518,23 @@ jobs:
         with:
           persist-credentials: false
 
-      # #526 round-1 review (P0): same rationale as the Fable job's identical step above — validate_coverage.sh
-      # runs unconditionally below and needs to exist on disk; sparse-checking out only this one static
-      # script grants codex-action's model no capability (its permission-profile is unaffected).
-      - name: Checkout coverage validator only (untrusted author)
-        if: needs.gather.outputs.trusted_author != 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            .github/triage/validate_coverage.sh
-          sparse-checkout-cone-mode: false
-
       - name: Download ticket packets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: triage-packets
+
+      # #526 round-2 review (P0): same fix as the Fable job's identical step — a sparse `actions/checkout`
+      # (the round-1 fix for the missing-validator P0) still restores full `.git` object access to
+      # codex-action's read-only sandbox (worktree sparseness doesn't limit `git show HEAD:<path>`), directly
+      # contradicting this job's own "no checkout at all" comment above. Writing the script straight from the
+      # already-embedded packets artifact instead grants no git history at all.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
 
       # Same prompt FILE as the Fable job (not just the same wording, the identical bytes) — true blind
       # symmetry requires both assessors to see the exact same packet under the exact same instructions.
@@ -627,23 +648,23 @@ jobs:
         with:
           persist-credentials: false
 
-      # #526 round-1 review (P0): same rationale as the blind-assess jobs' identical step — this job's
-      # "Validate adjudication ticket coverage" step below runs unconditionally and needs the script on
-      # disk; sparse-checking out only this one static file grants the model (which gets `--tools ""`
-      # either way) no capability.
-      - name: Checkout coverage validator only (untrusted author)
-        if: needs.gather.outputs.trusted_author != 'true'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            .github/triage/validate_coverage.sh
-          sparse-checkout-cone-mode: false
-
       - name: Download ticket packets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: triage-packets
+
+      # #526 round-2 review (P0): same fix as the blind-assess jobs' identical step — a sparse
+      # `actions/checkout` (the round-1 fix for the missing-validator P0) still materializes the FULL `.git`
+      # object database, giving a shell-capable model `git show HEAD:<path>` read access to any file in the
+      # repo regardless of the sparse worktree cone. Writing the script straight from the already-embedded
+      # packets artifact instead grants no git history at all.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
 
       - name: Download Fable blind assessment
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
@@ -854,14 +875,23 @@ jobs:
             # HTML-comment-safe: a literal "-->" in model-authored text would otherwise terminate the
             # marker comment early; collapse to one line so the marker stays a single scannable line.
             def esc_marker: gsub("-->"; "- >") | gsub("\n"; " ");
-            # automated-researcher#523 (agentic-engineering#56 precedent, same technique as
-            # the review-on-pr.yml automated-researcher#502 fix): any `@handle`-shaped substring in
+            # automated-researcher#523 (agentic-engineering#56 precedent): any `@handle`-shaped substring in
             # model-authored text derived from a ticket (possibly untrusted-author, on this public repo) is
-            # wrapped in an inline code span before it enters this App-authored comment. GitHub does not
-            # parse mentions inside code spans, so a filer-crafted "@some-allowlisted-identity ..." string
-            # quoted verbatim by a model can never itself become a live mention once this comment posts —
-            # an App-authored comment passes exactly the author filters the other actuators in this pipeline trust.
-            def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "`@\(.h)`");
+            # neutralized before it enters this App-authored comment, so a filer-crafted
+            # "@some-allowlisted-identity ..." string quoted verbatim by a model can never itself become a
+            # live mention once this comment posts — an App-authored comment passes exactly the author
+            # filters the other actuators in this pipeline trust. #526 round-2 review (P0): the original
+            # approach wrapped the match in a FIXED single backtick on each side, relying on it forming a
+            # Markdown inline code span — but a backtick run already adjacent in the surrounding
+            # attacker-controlled text (of a different length than the one we insert) defeats the CommonMark
+            # equal-length-delimiter matching rule and can leave the handle outside any code span, live. A
+            # zero-width space (U+200B) inserted between "@" and the handle instead breaks the GitHub mention
+            # match at the character level — it never depends on Markdown delimiter parsing or on anything
+            # else in the surrounding text, so no attacker-controlled context can ever re-enable it. The
+            # character renders invisibly, so the text still reads correctly to a human. (Note: a literal
+            # apostrophe must never appear inside this bash single-quoted jq program -- bash has no escape
+            # for one there, and a stray one silently truncates/reflows the argument actually passed to jq.)
+            def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "@\u200b\(.h)");
             ($fable[0].assessments | map({(.number|tostring): .}) | add // {}) as $fable_by_num |
             ($sol[0].assessments   | map({(.number|tostring): .}) | add // {}) as $sol_by_num |
             ( $adj[0].tickets | map(
@@ -890,9 +920,10 @@ jobs:
                 # ``` fence let ticket-controlled content containing its own triple-backtick run close the
                 # fence early, moving whatever followed (including a quoted @handle) into normally-parsed
                 # markdown where GitHub DOES parse mentions live — defeating the neutralization above.
-                # CommonMark's own rule is that a closing fence needs >= the opening fence's backtick count,
+                # The CommonMark rule is that a closing fence needs >= the opening fences backtick count,
                 # so sizing the fence to one longer than the longest backtick run anywhere in the content
                 # makes it impossible for any content run to act as a closing fence — content stays untouched.
+                # (Note: a literal apostrophe must never appear inside this bash single-quoted jq program.)
                 (if .proposed_body_edit != null then
                    ((.proposed_body_edit | [scan("`+")] | map(length) | max) // 0) as $max_backtick_run |
                    ([$max_backtick_run + 1, 3] | max) as $fence_len |
@@ -1059,7 +1090,12 @@ jobs:
               # any open ticket, from any filer, on this public repo), unlike `notes` which is re-derived
               # from a marker line this same pipeline already mention-escaped — so only title needs it here;
               # escaping notes again would just double-wrap it.
-              def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "`@\(.h)`");
+              # #526 round-2 review (P0): same zero-width-space technique as the post-results job identical
+              # definition — a fixed-backtick code-span wrap is defeated by an attacker-controlled backtick
+              # run of a different length already adjacent in the title text; U+200B breaks the mention match
+              # at the character level instead, independent of any surrounding Markdown delimiters. (Note: a
+              # literal apostrophe must never appear inside this bash single-quoted jq program.)
+              def esc_mentions: gsub("@(?<h>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37})?)"; "@\u200b\(.h)");
               def row: "| [#" + (.number|tostring) + "](" + $url + "/issues/" + (.number|tostring) + ") | " +
                        (.title | esc_mentions | esc) + " | " + .verdict + " | " + (.notes | esc) + " |";
               ( "# Triage rollup (" + $now + ")\n\n" +
