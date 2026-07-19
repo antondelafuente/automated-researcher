@@ -94,10 +94,36 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
+      # automated-researcher#540: the minted codex-engineer App token above has no Actions permission, so
+      # `gh workflow run senior-engineer.yml` 403s deterministically through it. Minting the claude
+      # engineer App token for just those two dispatch call sites instead (same pattern
+      # triage-assess.yml's sweep-dispatch-rollup job already uses for its own self-dispatch) fixes this
+      # AND keeps the dispatched run's actor allowlisted: `senior-engineer.yml`'s workflow_dispatch
+      # authorization checks `github.actor` against `claude-code-engineer[bot]` among others, which this
+      # token's identity satisfies directly. A bare `github.token` override (tried in this PR's first
+      # round) would have dispatched successfully but as `github-actions[bot]` -- not on that allowlist --
+      # so the summoned run's `resolve` job would silently skip and never adjudicate anything; using the
+      # claude engineer App instead avoids ever needing to touch senior-engineer.yml's own authorization.
+      # Same provisioning requirement as triage-assess.yml's: the CLAUDE_APP GitHub App must be granted
+      # `Actions: write` alongside its existing scopes for this call to succeed.
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Reconcile open bot PRs
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
+          # The two `gh workflow run senior-engineer.yml` call sites below override GH_TOKEN to this
+          # instead of the minted codex-engineer App token above -- every other call in this step
+          # (comments, labels) keeps the codex token unchanged, since the allowlist/loop-guard conventions
+          # those rely on are keyed off the commenting/labeling identity.
+          RECONCILER_ACTIONS_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
@@ -202,7 +228,7 @@ jobs:
             fi
 
             echo "PR #$n: needs-senior-engineer applied at $label_ts (most recent adjudication comment at ${comment_ts:-none}) with no activity in the last ${elapsed}s and the label still present -- that summons appears stranded (e.g. a dispatch that failed, a run that crashed or timed out after posting its comment, or a label-removal that itself failed); re-dispatching senior-engineer.yml"
-            if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+            if ! GH_TOKEN="$RECONCILER_ACTIONS_TOKEN" gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
               echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; leaving needs-senior-engineer in place for a later tick to retry"
               return 1
             fi
@@ -263,7 +289,7 @@ jobs:
                 echo "::warning::PR #$n: failed to add needs-senior-engineer; not dispatching this tick so the next tick retries"
                 return 1
               fi
-              if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+              if ! GH_TOKEN="$RECONCILER_ACTIONS_TOKEN" gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
                 echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed after labeling; removing needs-senior-engineer so the next tick retries instead of leaving it stranded"
                 if ! gh pr edit "$n" --repo "$REPO" --remove-label needs-senior-engineer; then
                   # automated-researcher#529: this used to need manual attention, since the sweep skipped
