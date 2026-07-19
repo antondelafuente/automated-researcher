@@ -16,7 +16,10 @@ name: reconcile-prs
 #     workflow_dispatches senior-engineer.yml directly (automated-researcher#524): the PR is still
 #     CONFLICTING when the label lands, so the `pull_request: labeled` event senior-engineer.yml listens
 #     for never fires (same no-merge-ref gap this reconciler exists to repair) -- without the explicit
-#     dispatch, the label would land with nothing to summon it.
+#     dispatch, the label would land with nothing to summon it. That dispatch carries a `summoned_by=
+#     reconciler` marker (automated-researcher#527) so senior-engineer.yml's reappearance loop guard counts
+#     it -- without the marker, repeated reconciler summons on a still-non-converging conflicted PR would
+#     bypass the guard entirely, since a bare workflow_dispatch is otherwise exempt from it.
 #   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
 #     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
 #   - `mergeable == MERGEABLE` with a completed codex review AT THE CURRENT HEAD whose state is
@@ -169,17 +172,29 @@ jobs:
               # alone would land with nothing to summon it. Explicitly workflow_dispatch it (the
               # workflow already accepts a pr_number input and tolerates running without the label
               # present on that path); its own per-PR concurrency group covers the harmless double-summon
-              # if a later labeled event on a since-mergeable PR also fires. Dispatch BEFORE adding the
-              # label (same "mark state only after success" ordering as handle_mergeable's review
-              # re-fire below) and bail on failure before labeling: this reconciler already skips any PR
-              # already carrying needs-senior-engineer on later ticks (see the top-level skip below), so
-              # labeling first and having the dispatch fail afterward would permanently strand the PR --
-              # labeled, but with no adjudication run and no further reconciler tick ever retrying it.
-              if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n"; then
-                echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; not labeling this tick so the next tick retries"
+              # if a later labeled event on a since-mergeable PR also fires.
+              #
+              # PR #528 round 2: label BEFORE dispatching (not after) so the `labeled` event this
+              # escalation produces is already on the issue's event timeline by the time the summoned
+              # run reads it. The prior dispatch-then-label ordering let the summoned run's timeline
+              # read race the label write -- or miss it entirely on an unchecked write failure -- so the
+              # loop guard's count could never be trusted either direction (double-counted if the write
+              # landed first, or never reached 3 if the write silently failed every time). If the label
+              # write succeeds but the dispatch itself then fails, roll the label back so the PR isn't
+              # permanently stranded labeled-but-unsummoned -- this reconciler skips any PR already
+              # carrying needs-senior-engineer on later ticks, so a stuck label with no run behind it
+              # would otherwise never be retried.
+              if ! gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer; then
+                echo "::warning::PR #$n: failed to add needs-senior-engineer; not dispatching this tick so the next tick retries"
                 return 1
               fi
-              gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
+              if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
+                echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed after labeling; removing needs-senior-engineer so the next tick retries instead of leaving it stranded"
+                if ! gh pr edit "$n" --repo "$REPO" --remove-label needs-senior-engineer; then
+                  echo "::error::PR #$n: also failed to roll back needs-senior-engineer after a failed dispatch -- PR is labeled with no adjudication summoned and no further reconciler tick will retry it; needs manual attention"
+                fi
+                return 1
+              fi
               return
             fi
 
