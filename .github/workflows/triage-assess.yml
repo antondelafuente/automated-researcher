@@ -509,9 +509,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      # #523: no checkout at all when the ticket's author is untrusted — codex-action's `working-directory`
-      # defaults to the (then-empty) repo root, so its read-only sandbox has nothing of this repository to
-      # read regardless of the permission profile. The trusted-author path is unchanged from v1.1.
+      # #526 round-3 review (P0): during the codex-action run itself, zero repository-derived files exist on
+      # the runner's filesystem on the untrusted-author path — the only repo content in the model's reach is
+      # the prompt text (preamble + rubric), deliberately embedded below. The trusted-author path is
+      # unchanged from v1.1.
       - name: Checkout base branch
         if: needs.gather.outputs.trusted_author == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
@@ -522,19 +523,6 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
         with:
           name: triage-packets
-
-      # #526 round-2 review (P0): same fix as the Fable job's identical step — a sparse `actions/checkout`
-      # (the round-1 fix for the missing-validator P0) still restores full `.git` object access to
-      # codex-action's read-only sandbox (worktree sparseness doesn't limit `git show HEAD:<path>`), directly
-      # contradicting this job's own "no checkout at all" comment above. Writing the script straight from the
-      # already-embedded packets artifact instead grants no git history at all.
-      - name: Write coverage validator script (untrusted author)
-        if: needs.gather.outputs.trusted_author != 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p .github/triage
-          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
-          chmod +x .github/triage/validate_coverage.sh
 
       # Same prompt FILE as the Fable job (not just the same wording, the identical bytes) — true blind
       # symmetry requires both assessors to see the exact same packet under the exact same instructions.
@@ -572,6 +560,14 @@ jobs:
             echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
+
+      # #526 round-3 review (P0): with the prompt already rendered into GITHUB_OUTPUT, nothing needs
+      # the packets file until post-run validation — deleting it here means the codex-action sandbox
+      # has NO repo-derived file on disk during the model run; the only repo content the model sees
+      # is what the prompt deliberately embeds (preamble + rubric).
+      - name: Remove repo-derived files before model run (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: rm -f triage-packets.json
 
       - name: Run codex-action (Sol blind assessor)
         id: run_codex
@@ -621,6 +617,29 @@ jobs:
           name: triage-blind-sol
           path: triage-blind-sol.json
           retention-days: 90
+
+      # #526 round-3 review (P0): the untrusted-author path deleted triage-packets.json above so the
+      # codex-action sandbox had nothing repo-derived to read during the model run; the validate step below
+      # needs it back as its second argument.
+      - name: Re-download ticket packets (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # actions/download-artifact v8.0.1
+        with:
+          name: triage-packets
+
+      # #526 round-2 review (P0): same fix as the Fable job's identical step — a sparse `actions/checkout`
+      # (the round-1 fix for the missing-validator P0) still restores full `.git` object access to
+      # codex-action's read-only sandbox (worktree sparseness doesn't limit `git show HEAD:<path>`), directly
+      # contradicting this job's "no checkout at all" comment. Writing the script straight from the
+      # already-embedded packets artifact instead grants no git history at all. Moved to run after the model
+      # step (#526 round-3): the model run itself must see no repo-derived files at all.
+      - name: Write coverage validator script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .github/triage
+          jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
+          chmod +x .github/triage/validate_coverage.sh
 
       # Same fail-closed exact-set check as the adjudicator (PR #456 round 2): a corrupt blind pass must
       # not reach adjudication at all, so this runs immediately after parsing, before the adjudicate job
