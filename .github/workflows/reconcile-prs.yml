@@ -68,13 +68,6 @@ concurrency:
 
 permissions:
   contents: read
-  # automated-researcher#540: the two `gh workflow run senior-engineer.yml` calls below need this to
-  # succeed. They deliberately use the workflow's own `github.token` (see the step-local override at the
-  # "Reconcile open bot PRs" step), not the minted codex-engineer App token -- that App installation has no
-  # Actions permission at all, so every dispatch attempt through it 403s deterministically. `workflow_dispatch`
-  # is one of the documented exceptions to GitHub's "events from GITHUB_TOKEN don't trigger new runs"
-  # recursion guard, so this is safe: the dispatched senior-engineer run fires normally.
-  actions: write
 
 jobs:
   reconcile:
@@ -101,17 +94,36 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
+      # automated-researcher#540: the minted codex-engineer App token above has no Actions permission, so
+      # `gh workflow run senior-engineer.yml` 403s deterministically through it. Minting the claude
+      # engineer App token for just those two dispatch call sites instead (same pattern
+      # triage-assess.yml's sweep-dispatch-rollup job already uses for its own self-dispatch) fixes this
+      # AND keeps the dispatched run's actor allowlisted: `senior-engineer.yml`'s workflow_dispatch
+      # authorization checks `github.actor` against `claude-code-engineer[bot]` among others, which this
+      # token's identity satisfies directly. A bare `github.token` override (tried in this PR's first
+      # round) would have dispatched successfully but as `github-actions[bot]` -- not on that allowlist --
+      # so the summoned run's `resolve` job would silently skip and never adjudicate anything; using the
+      # claude engineer App instead avoids ever needing to touch senior-engineer.yml's own authorization.
+      # Same provisioning requirement as triage-assess.yml's: the CLAUDE_APP GitHub App must be granted
+      # `Actions: write` alongside its existing scopes for this call to succeed.
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Reconcile open bot PRs
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
-          # automated-researcher#540: the minted codex-engineer App token above has no Actions permission,
-          # so `gh workflow run senior-engineer.yml` 403s deterministically through it. The two dispatch
-          # call sites below override GH_TOKEN to this workflow's own github.token (granted `actions:
-          # write` in this workflow's permissions block) for just that one invocation instead -- every
-          # other call in this step (comments, labels) keeps the minted App token unchanged, since the
-          # allowlist/loop-guard conventions those rely on are keyed off the commenting/labeling identity.
-          RECONCILER_ACTIONS_TOKEN: ${{ github.token }}
+          # The two `gh workflow run senior-engineer.yml` call sites below override GH_TOKEN to this
+          # instead of the minted codex-engineer App token above -- every other call in this step
+          # (comments, labels) keeps the codex token unchanged, since the allowlist/loop-guard conventions
+          # those rely on are keyed off the commenting/labeling identity.
+          RECONCILER_ACTIONS_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
