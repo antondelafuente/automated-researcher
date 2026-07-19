@@ -340,15 +340,14 @@ jobs:
 
           snapshot="## PR reviews (author-filtered)"$'\n\n'"$(render_reviews)"$'\n'"## Issue comment thread (author-filtered)"$'\n\n'"$(render_comments)"
 
-          # Random per-run delimiter (same reasoning as address-review.yml's render step,
-          # automated-researcher#389's injection class): the snapshot embeds trusted-but-freeform authored
-          # text, so a fixed heredoc delimiter could be matched by a line inside it.
-          delim="snapshot_$(openssl rand -hex 20)"
-          {
-            echo "snapshot<<$delim"
-            echo "$snapshot"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
+          # #531: write the snapshot straight to a workspace file instead of routing it through
+          # $GITHUB_OUTPUT + a step `env:` mapping — this snapshot only grows across a PR's review rounds
+          # and is exactly the in-repo string the issue is about. A prompt-scale string held in a step's
+          # process environment can trip the exec-time argv/envp size limit on its own (a single overlong
+          # env var fails any subsequent exec that inherits it), so passing it via `env:` at all stops being
+          # safe once it's plausibly this size. A plain file write has no such ceiling, and steps in this
+          # job share $RUNNER_TEMP.
+          printf '%s' "$snapshot" > "$RUNNER_TEMP/senior_engineer_snapshot.txt"
 
       - name: Render senior-engineer prompt
         id: render_prompt
@@ -357,9 +356,12 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
           BASE_REF: ${{ needs.resolve.outputs.base_ref }}
-          SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
         run: |
           set -euo pipefail
+          # #531: read the snapshot from the file the prior step wrote instead of a step `env:` mapping
+          # (see that step) — plain assignment, no `export`, so it never becomes part of this process's own
+          # environment either.
+          SNAPSHOT="$(cat "$RUNNER_TEMP/senior_engineer_snapshot.txt")"
           # patsub_replacement is on by default on bash 5.2+ (this runner's bash): it makes `&` in the
           # replacement word expand to the matched pattern and gives backslash special meaning, so any
           # `&`/`\` in $SNAPSHOT (freeform authored text) would corrupt the substitution below. Disabling
@@ -372,16 +374,10 @@ jobs:
           body="${body//\{\{BASE_REF\}\}/$BASE_REF}"
           body="${body//\{\{REVIEW_SNAPSHOT\}\}/$SNAPSHOT}"
 
-          # $body now embeds the author-filtered snapshot verbatim, so a fixed delimiter ("PROMPT_EOF")
-          # could be matched by a line inside it and used to inject extra keys into $GITHUB_OUTPUT (same
-          # genre as the review-memory fix on automated-researcher#389, mirrored from address-review.yml's
-          # render step). A per-run random delimiter closes that off.
-          delim="prompt_$(openssl rand -hex 20)"
-          {
-            echo "prompt<<$delim"
-            echo "$body"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
+          # #531: write the rendered prompt straight to a workspace file instead of $GITHUB_OUTPUT + a step
+          # `env:` mapping, for the same reason as the snapshot step above — $body now embeds the
+          # potentially-large snapshot, and that string must never land in a process environment.
+          printf '%s' "$body" > "$RUNNER_TEMP/senior_engineer_prompt.txt"
 
       - name: Mint senior-engineer App token
         id: mint_token
@@ -423,12 +419,14 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # So `gh` calls the agent makes from its own Bash tool are authorized as the senior-engineer App.
           GH_TOKEN: ${{ steps.mint_token.outputs.token }}
-          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
         timeout-minutes: 30
         run: |
           set -euo pipefail
-          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+          # #531: read the prompt straight from the file render_prompt wrote — never round-tripped through
+          # a step `env:` mapping (see that step), and `--rawfile` reads the file directly, so the prompt
+          # never rides on any command's argv either.
+          jq -nc --rawfile content "$RUNNER_TEMP/senior_engineer_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
                 --allowedTools Bash,Read,Grep,Glob \

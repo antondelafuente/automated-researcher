@@ -114,11 +114,14 @@ jobs:
           body="$(cat .github/prompts/implement.md)"
           body="${body//\{\{ISSUE_NUMBER\}\}/$ISSUE_NUMBER}"
           body="${body//\{\{REPO\}\}/$REPO}"
-          {
-            echo "prompt<<PROMPT_EOF"
-            echo "$body"
-            echo "PROMPT_EOF"
-          } >> "$GITHUB_OUTPUT"
+
+          # #531: write the rendered prompt straight to a workspace file instead of $GITHUB_OUTPUT + a step
+          # `env:` mapping — a prompt-scale string held in a step's process environment can trip the
+          # exec-time argv/envp size limit on its own, so passing it via `env:` at all stops being safe once
+          # it's plausibly that size. A plain file write has no such ceiling, and steps in this job share
+          # $RUNNER_TEMP. (This template is small today, but the invocation shape stays consistent with the
+          # other legs of this pipeline.)
+          printf '%s' "$body" > "$RUNNER_TEMP/implement_prompt.txt"
 
       - name: Mint claude engineer App token
         id: mint_claude_token
@@ -172,7 +175,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # So `gh` calls the agent makes from its own Bash tool are authorized as the engineer App.
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
-          PROMPT: ${{ steps.render_prompt.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
         timeout-minutes: 45
         run: |
@@ -185,7 +187,11 @@ jobs:
           # -c (compact): stream-json input is line-delimited — pretty-printed (jq's default) multi-line
           # output here breaks the CLI's line parser ("Error parsing streaming input line", verified
           # locally against the pinned 2.1.207 binary).
-          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+          #
+          # #531: read the prompt straight from the file render_prompt wrote — never round-tripped through
+          # a step `env:` mapping (see that step), and `--rawfile` reads the file directly, so the prompt
+          # never rides on jq's argv either.
+          jq -nc --rawfile content "$RUNNER_TEMP/implement_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-sonnet-5 \
                 --allowedTools Bash,Edit,Write,Read,Grep,Glob \

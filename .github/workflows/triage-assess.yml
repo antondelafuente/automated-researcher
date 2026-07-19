@@ -405,24 +405,22 @@ jobs:
           jq -r '.validate_coverage_script' triage-packets.json > .github/triage/validate_coverage.sh
           chmod +x .github/triage/validate_coverage.sh
 
+      # #531: written straight to a workspace file instead of $GITHUB_OUTPUT + a step `env:` mapping — a
+      # prompt-scale string held in a step's process environment can trip the exec-time argv/envp size
+      # limit on its own, so passing it via `env:` at all stops being safe once it's plausibly that size. A
+      # plain file write has no such ceiling, and steps in this job share $RUNNER_TEMP. Both this step and
+      # the untrusted-author variant below write to the SAME path — only one of the two ever runs.
       - name: Render blind-assessment prompt (trusted author)
         id: render_prompt_trusted
         if: needs.gather.outputs.trusted_author == 'true'
         run: |
           set -euo pipefail
-          {
-            echo "prompt<<PROMPT_EOF"
-            cat .github/prompts/triage-blind-assess.md
-            echo "PROMPT_EOF"
-          } >> "$GITHUB_OUTPUT"
+          cat .github/prompts/triage-blind-assess.md > "$RUNNER_TEMP/triage_fable_prompt.txt"
 
       # #523: the rubric and the one ticket packet are embedded verbatim into the prompt TEXT (never left
       # for the model to Read as a file, since it gets no tools at all) inside explicit
       # <<<UNTRUSTED_TICKET_DATA>>> delimiters — quarantine framing, defense-in-depth on top of the tool
-      # removal below, never a substitute for it. A freshly random heredoc delimiter (not the fixed
-      # PROMPT_EOF the trusted path above uses) is required here: this content includes the ticket filer's
-      # own text, and GitHub's multiline-output heredoc is only safe against a delimiter-collision injection
-      # when the delimiter is unpredictable to whoever controls the embedded content.
+      # removal below, never a substitute for it.
       - name: Render blind-assessment prompt (untrusted author, capability-reduced)
         id: render_prompt_untrusted
         if: needs.gather.outputs.trusted_author != 'true'
@@ -431,9 +429,7 @@ jobs:
           preamble=$(jq -r '.blind_assess_untrusted_preamble' triage-packets.json)
           rubric=$(jq -r '.rubric' triage-packets.json)
           packet=$(jq -c '{generated_at, tickets}' triage-packets.json)
-          delim="PROMPT_EOF_$(openssl rand -hex 16)"
           {
-            echo "prompt<<$delim"
             printf '%s\n\n' "$preamble"
             echo "<<<RUBRIC>>>"
             printf '%s\n' "$rubric"
@@ -442,8 +438,7 @@ jobs:
             echo "<<<UNTRUSTED_TICKET_DATA>>>"
             printf '%s\n' "$packet"
             echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
+          } > "$RUNNER_TEMP/triage_fable_prompt.txt"
 
       # Same pin rationale as implement-on-ready.yml/checks.yml (automated-researcher#384/#387): the
       # claude-code-action wrapper's auto-install has a known startup-crash class, so the raw CLI is
@@ -459,7 +454,6 @@ jobs:
         id: run_claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PROMPT: ${{ steps.render_prompt_trusted.outputs.prompt || steps.render_prompt_untrusted.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
           TRUSTED_AUTHOR: ${{ needs.gather.outputs.trusted_author }}
         timeout-minutes: 30
@@ -474,7 +468,10 @@ jobs:
           else
             TOOL_ARGS=(--tools "")
           fi
-          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+          # #531: read the prompt straight from the file whichever render step wrote — never round-tripped
+          # through a step `env:` mapping, and `--rawfile` reads the file directly, so the prompt never
+          # rides on jq's argv either.
+          jq -nc --rawfile content "$RUNNER_TEMP/triage_fable_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
                 "${TOOL_ARGS[@]}" \
@@ -728,17 +725,18 @@ jobs:
         if: needs.gather.outputs.trusted_author == 'true'
         run: |
           set -euo pipefail
-          {
-            echo "prompt<<PROMPT_EOF"
-            cat .github/prompts/triage-adjudicate.md
-            echo "PROMPT_EOF"
-          } >> "$GITHUB_OUTPUT"
+          # #531: written straight to a workspace file instead of $GITHUB_OUTPUT + a step `env:` mapping —
+          # a prompt-scale string held in a step's process environment can trip the exec-time argv/envp
+          # size limit on its own, so passing it via `env:` at all stops being safe once it's plausibly
+          # that size. A plain file write has no such ceiling, and steps in this job share $RUNNER_TEMP.
+          # Both this step and the untrusted-author variant below write to the SAME path — only one of the
+          # two ever runs.
+          cat .github/prompts/triage-adjudicate.md > "$RUNNER_TEMP/triage_adjudicate_prompt.txt"
 
       # #523: rubric + ticket packet + both blind assessments embedded verbatim into the prompt TEXT (no
       # backfill — see above), inside explicit <<<UNTRUSTED_TICKET_DATA>>> delimiters for the ticket-filer
       # text specifically (the blind assessments are trusted, model-generated JSON, not filer-authored, so
-      # they get their own distinct delimiter instead). Random heredoc delimiter for the same
-      # delimiter-collision reason as the blind-assess jobs' untrusted render step.
+      # they get their own distinct delimiter instead).
       - name: Render adjudication prompt (untrusted author, capability-reduced)
         id: render_prompt_untrusted
         if: needs.gather.outputs.trusted_author != 'true'
@@ -748,9 +746,7 @@ jobs:
           rubric=$(jq -r '.rubric' triage-packets.json)
           packet=$(jq -c '{generated_at, tickets}' triage-packets.json)
           blind=$(jq -n --slurpfile f triage-blind-fable.json --slurpfile s triage-blind-sol.json -c '{fable: $f[0], sol: $s[0]}')
-          delim="PROMPT_EOF_$(openssl rand -hex 16)"
           {
-            echo "prompt<<$delim"
             printf '%s\n\n' "$preamble"
             echo "<<<RUBRIC>>>"
             printf '%s\n' "$rubric"
@@ -763,8 +759,7 @@ jobs:
             echo "<<<BLIND_ASSESSMENTS>>>"
             printf '%s\n' "$blind"
             echo "<<<END_BLIND_ASSESSMENTS>>>"
-            echo "$delim"
-          } >> "$GITHUB_OUTPUT"
+          } > "$RUNNER_TEMP/triage_adjudicate_prompt.txt"
 
       - name: Install pinned Claude Code
         id: install_claude
@@ -777,7 +772,6 @@ jobs:
         id: run_claude
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          PROMPT: ${{ steps.render_prompt_trusted.outputs.prompt || steps.render_prompt_untrusted.outputs.prompt }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
           TRUSTED_AUTHOR: ${{ needs.gather.outputs.trusted_author }}
         timeout-minutes: 30
@@ -792,7 +786,10 @@ jobs:
           else
             TOOL_ARGS=(--tools "")
           fi
-          jq -nc --arg content "$PROMPT" '{"type":"user","message":{"role":"user","content":$content}}' \
+          # #531: read the prompt straight from the file whichever render step wrote — never round-tripped
+          # through a step `env:` mapping, and `--rawfile` reads the file directly, so the prompt never
+          # rides on jq's argv either.
+          jq -nc --rawfile content "$RUNNER_TEMP/triage_adjudicate_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-fable-5 \
                 "${TOOL_ARGS[@]}" \
