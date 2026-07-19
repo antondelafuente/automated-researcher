@@ -76,7 +76,12 @@ mapping no longer disqualifies every worktree that happens to contain it from ti
    failure is already non-fatal, so the ref survives on its own) loses nothing. A worktree that's still
    genuinely unmerged and carries content of its own not reflected anywhere on the default branch is
    unaffected by this — it's excluded exactly as before, or reads `UNKNOWN` (never a guess) if a comparison
-   itself can't complete.
+   itself can't complete. **The reap itself passes `--force`** whenever this bar (rather than plain
+   mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
+   to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
+   unconditionally refuses, regardless of whether that content is a byte-for-byte match — `--force` is
+   harmless to pass on a worktree that's also genuinely git-clean, so the reap doesn't need to re-derive
+   which case it's in.
 2. **Owner-session investigates** — stray content (dirty/untracked), or a stale unmerged branch nobody is
    continuing, whose derived owner reads as *live*. The report asks that owner to investigate and
    disposition it (or escalate) — ownership assigns *investigation responsibility*, not a memory test: a
@@ -123,8 +128,11 @@ fails, behind/ahead is `UNKNOWN` for that repo (never a stale number silently pr
 
 `--reap-tier1` performs the deletions this same invocation just classified as tier 1: prunable entries via
 `git worktree prune`, merged+clean+old entries via `git worktree remove` (re-verified immediately before
-deleting, as a defense against the state changing mid-sweep) + a best-effort `git branch -d`. `--dry-run`
-(only meaningful with `--reap-tier1`) logs every removal it would perform without touching anything.
+deleting, as a defense against the state changing mid-sweep) + a best-effort `git branch -d` — `--force` is
+added to the `remove` whenever the content-identity bar above (not plain mergedness) is what qualified the
+entry, since that path's byte-identical dirty/untracked residue is exactly what a bare `remove` refuses.
+`--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
+anything.
 
 **A scheduled/standing invocation of this sweep must never pass `--reap-tier1`.** Deletion happens only on
 researcher approval, or on deterministic tier-1 evidence the researcher has explicitly, separately

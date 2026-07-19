@@ -321,11 +321,21 @@ git -C "$CI_REPO" add newfile.txt
 g "$CI_REPO" commit -q -m "squash landed newfile"
 g "$CI_REPO" push -q origin main
 
-# Case B: the same idea but as UNCOMMITTED residue — an untracked file that happens to already match main
-# byte-for-byte (the literal case the manual 2026-07-19 verification script checked).
+# Case B: the same idea but as UNCOMMITTED residue — a file whose content matches main byte-for-byte but
+# reads as untracked ("??") in `git status` rather than clean (the literal case the manual 2026-07-19
+# verification script checked). Built by untracking an already-identical, already-committed file from the
+# INDEX ONLY (`git rm --cached`, disk content untouched) rather than deleting+recreating it: the committed
+# tree (HEAD) stays byte-identical to default_ref either way (content_identical_fact's step 1, the
+# committed-tree diff, stays empty — `git rm --cached` doesn't create a new commit), while status now
+# reports it "??" for step 2 to match against main. (Round-1 Codex review, automated-researcher#537 P0: the
+# ORIGINAL version of this fixture instead branched feat-stray-matching from `main` AFTER Case A's
+# newfile.txt had already landed there, so the checkout inherited it as an already-tracked, UNMODIFIED file
+# — `git status` reported nothing for it, so the fixture never actually exercised a genuinely untracked path
+# at all, and its "removed by --reap-tier1" assertion passed on git's own plain clean bar alone, never on
+# the content-identity/`--force` path it claimed to be testing.)
 g "$CI_REPO" worktree add -q -b feat-stray-matching "$TMP/wt-stray-matching" main
 GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stray-matching" commit -q --allow-empty -m oldbase --date="$OLD_DATE"
-echo squashcontent > "$TMP/wt-stray-matching/newfile.txt"   # untracked, matches main's newfile.txt exactly
+git -C "$TMP/wt-stray-matching" rm -q --cached newfile.txt
 
 # Case C: genuinely novel untracked content with no counterpart on main at all — must NOT be silently
 # waved through (a per-file compare failure, including "path absent from main", is UNKNOWN, never a guess).
@@ -342,7 +352,11 @@ if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-novel"; then no "conte
 # content-identity items must actually survive a REAL --reap-tier1 pass too, not just classification — the
 # do_reap re-verification recomputes merged/content-identity fresh before deleting, and must not gate solely
 # on `merged_now is True` (which a squash-merge branch can never satisfy, at classification OR reap time).
-python3 "$SWEEP" --repo "$CI_REPO" --reap-tier1 >/dev/null 2>&1
+# `|| true`: do_reap's exit code reflects genuine removal failures (main() propagates `fails`), and under
+# `set -euo pipefail` an unguarded non-zero exit here would abort the whole smoke script before the
+# assertions below ever ran, instead of surfacing as a clean FAIL line (as line 400's `&&/||` capture
+# already does for the equivalent case elsewhere in this file).
+python3 "$SWEEP" --repo "$CI_REPO" --reap-tier1 >/dev/null 2>&1 || true
 if [ -d "$TMP/wt-squashed" ]; then no "content-identity: squash-merge-equivalent worktree NOT removed by --reap-tier1 (re-verification regressed to requiring literal merged=True)"; else ok "content-identity: squash-merge-equivalent worktree removed by --reap-tier1"; fi
 if [ -d "$TMP/wt-stray-matching" ]; then no "content-identity: matching-residue worktree NOT removed by --reap-tier1"; else ok "content-identity: matching-residue worktree removed by --reap-tier1"; fi
 if git -C "$CI_REPO" branch --format='%(refname:short)' 2>/dev/null | grep -qx feat-squashed; then ok "content-identity: branch ref survives reap (git branch -d is a no-op for a non-ancestor branch, non-fatal)"; else no "content-identity: branch ref feat-squashed was WRONGLY deleted despite never being an ancestor"; fi

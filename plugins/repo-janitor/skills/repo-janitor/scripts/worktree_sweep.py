@@ -42,10 +42,11 @@ DEFAULT_DEFAULT_BRANCH = "main"
 
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
-# identically), which buried the one actionable fact in noise instead of surfacing it once. A reason
-# string is collapsed to one summary line + a flat path list once it accounts for at least this fraction of
-# the sweep's total flagged entries, with a minimum absolute count so a small sweep with a few genuinely
-# identical reasons isn't collapsed just for reaching the percentage.
+# identically), which buried the one actionable fact in noise instead of surfacing it once. A reason string
+# is collapsed to one summary line + a flat path list once it accounts for at least this fraction of ITS
+# OWN tier/owner-group's flagged entries (never the whole sweep's total — see render_group), with a minimum
+# absolute count so a small group with a few genuinely identical reasons isn't collapsed just for reaching
+# the percentage.
 REPORT_COLLAPSE_FRACTION = 0.2
 REPORT_COLLAPSE_MIN_COUNT = 5
 
@@ -386,8 +387,16 @@ def inspect_action(path):
     return {"kind": "inspect", "commands": [gitcmd("-C", path, "status"), gitcmd("-C", path, "log", "-1")]}
 
 
-def remove_action(repo, path, branch, default_branch):
-    cmds = [gitcmd("-C", repo, "worktree", "remove", path)]
+def remove_action(repo, path, branch, default_branch, force=False):
+    """`force` must be set whenever this tier-1 classification relied on the content-identity bar
+    (`squash_safe`) rather than git's own clean bar (Codex review, automated-researcher#537 round 1): git
+    unconditionally refuses a bare `worktree remove` on a working tree carrying ANY modified-tracked or
+    untracked file, regardless of whether that content is byte-identical to the default branch — exactly
+    the "matching residue" case this PR's own SKILL.md documents as needing `--force`/manual removal. A
+    worktree that's genuinely git-clean doesn't need `--force`, but passing it there too is harmless (git
+    still checks history/attachedness first; `--force` only lifts the dirty/untracked refusal), so callers
+    pass `force=squash_safe` unconditionally rather than re-deriving "was this actually dirty" themselves."""
+    cmds = [gitcmd("-C", repo, "worktree", "remove", *(["--force"] if force else []), path)]
     # NEVER suggest (or later execute) deleting the ref matching the configured default branch name
     # (round-3 code-review Finding 2): a linked worktree can legitimately be checked out ON the default
     # branch itself (git only forbids the SAME branch checked out twice, not a linked worktree on main
@@ -549,7 +558,7 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
 
     if det_safe and liveness == "not_live":
         entry = dict(base, tier=1, reason=f"{clean_old_phrase} — safe to reap",
-                     action=remove_action(repo, path, branch, args.default_branch))
+                     action=remove_action(repo, path, branch, args.default_branch, force=squash_safe))
         results["tier1"].append(entry)
         reap_plan.append(dict(entry, kind="remove", owner=owner, merged=merged, dirty=dirty,
                                untracked=untracked, ignored=ignored, age_days=age_days, head=head))
@@ -664,7 +673,11 @@ def do_reap(reap_plan, dry_run, default_branch):
         if dry_run:
             log(f"DRY-RUN would remove: path={path} branch={branch} head={item.get('head')}")
             continue
-        rc, _, err = run_git(["worktree", "remove", path], cwd=repo)
+        # --force is required whenever this reap is riding the content-identity bar rather than git's own
+        # clean bar (Codex review, automated-researcher#537 round 1): a bare `worktree remove` unconditionally
+        # refuses a working tree carrying modified-tracked/untracked content, even when that content is
+        # byte-identical to the default branch — harmless to pass when the tree is also genuinely clean.
+        rc, _, err = run_git(["worktree", "remove"] + (["--force"] if squash_safe_now else []) + [path], cwd=repo)
         if rc != 0:
             log(f"REMOVE FAILED: path={path}: {err.strip()}")
             fails += 1
@@ -682,11 +695,16 @@ def do_reap(reap_plan, dry_run, default_branch):
     return fails
 
 
-def render_group(lines, entries, collapse_at):
+def render_group(lines, entries):
     """Renders one tier's (or one tier-2 owner's) entries, collapsing any reason string shared by more than
-    `collapse_at` entries into a single summary line + a flat path list, instead of repeating the full
-    reason and action commands once per entry. Order-preserving: reasons render in first-seen order, and
-    entries within an uncollapsed reason render in their original order."""
+    a threshold of THIS group's own entries into a single summary line + a flat path list, instead of
+    repeating the full reason and action commands once per entry. The threshold is computed from `len(entries)`
+    — this group's own size, never the whole sweep's total (Codex review, automated-researcher#537 round 1):
+    a shared-total denominator let a large tier/owner group dilute a small one's share, so a tier with five
+    identical entries stayed uncollapsed whenever other tiers/owners were big enough. Order-preserving:
+    reasons render in first-seen order, and entries within an uncollapsed reason render in their original
+    order."""
+    collapse_at = max(REPORT_COLLAPSE_MIN_COUNT, len(entries) * REPORT_COLLAPSE_FRACTION)
     by_reason = {}
     order = []
     for it in entries:
@@ -712,20 +730,18 @@ def render_text(results):
     if not t1 and not t2 and not t3:
         print("[janitor] sweep clean — nothing to report", file=sys.stderr)
         return
-    total = len(t1) + sum(len(v) for v in t2.values()) + len(t3)
-    collapse_at = max(REPORT_COLLAPSE_MIN_COUNT, total * REPORT_COLLAPSE_FRACTION)
     if t1:
         lines.append(f"## Tier 1 — safe to reap ({len(t1)})")
-        render_group(lines, t1, collapse_at)
+        render_group(lines, t1)
     if t2:
         owner_total = sum(len(v) for v in t2.values())
         lines.append(f"\n## Tier 2 — owner investigates ({owner_total})")
         for owner in sorted(t2):
             lines.append(f"### owner: {owner}")
-            render_group(lines, t2[owner], collapse_at)
+            render_group(lines, t2[owner])
     if t3:
         lines.append(f"\n## Tier 3 — researcher residual ({len(t3)})")
-        render_group(lines, t3, collapse_at)
+        render_group(lines, t3)
     print("\n".join(lines))
 
 
