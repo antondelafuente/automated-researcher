@@ -1001,6 +1001,53 @@ jobs:
             fi
           done
 
+      # #543: surface the sighted verdict as a workflow-owned label so the researcher can filter the issue
+      # list (`label:triage:ask` = the attention queue) without a comments-fetch + marker-parse per issue.
+      # The assessment comment above remains canonical; this label is a derived cache with a single writer
+      # (this step, only) — no other workflow or human is expected to edit `triage:*`. `gh label create
+      # --force` upserts idempotently, so "create once per repo" holds without a separate existence check.
+      - name: Ensure triage:do/ask/skip labels exist
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for spec in "triage:do|0e8a16|Sighted triage verdict: DO (workflow-owned — written only by triage-assess.yml)" \
+                      "triage:ask|fbca04|Sighted triage verdict: ASK (workflow-owned — written only by triage-assess.yml)" \
+                      "triage:skip|cccccc|Sighted triage verdict: SKIP (workflow-owned — written only by triage-assess.yml)"; do
+            IFS='|' read -r name color desc <<< "$spec"
+            if ! gh label create "$name" --repo "$REPO" --color "$color" --description "$desc" --force; then
+              echo "::warning::failed to create/update label $name — next assessment pass retries"
+            fi
+          done
+
+      # Applied immediately after the comment above (#543 item 2): remove any existing `triage:*` label
+      # first — a re-assessment (manual `workflow_dispatch` re-request, or `reopened`) must not leave a stale
+      # verdict's label sitting alongside the new one — then add the one matching the sighted verdict. Label
+      # application failure is a `::warning`, never a run failure (#543 item 3): the assessment comment
+      # already landed, and the next assessment pass repairs the label.
+      - name: Apply triage:do/ask/skip label
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for n in $(jq -r '.tickets[].number' triage-adjudication.json); do
+            verdict=$(jq -r --arg n "$n" '.tickets[] | select((.number|tostring) == $n) | .verdict' triage-adjudication.json)
+            case "$verdict" in
+              DO) label=triage:do ;;
+              ASK) label=triage:ask ;;
+              SKIP) label=triage:skip ;;
+              *) echo "::warning::unrecognized verdict '$verdict' for #$n — skipping label"; continue ;;
+            esac
+            for stale in triage:do triage:ask triage:skip; do
+              gh issue edit "$n" --repo "$REPO" --remove-label "$stale" >/dev/null 2>&1 || true
+            done
+            if ! gh issue edit "$n" --repo "$REPO" --add-label "$label" 2>&1; then
+              echo "::warning::failed to apply label $label to #$n — next assessment pass retries"
+            fi
+          done
+
   sweep-dispatch-rollup:
     name: sweep-dispatch-rollup
     needs: gather
