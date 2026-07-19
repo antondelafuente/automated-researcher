@@ -91,6 +91,12 @@
       `run_supervision_record.sh close <run-id>` (finished) or `stop <run-id>` (deliberate /quit, never
       relaunch) — AFTER the close audit, so a finished run can't be resurrected and an early clear can't
       orphan a still-billing pod.                                                                 ev: run_supervision_record.sh status <run-id>
+- ☐ [BLOCK] Workspace teardown READY (own worktree, NOT removed early, automated-researcher#532): R2 upload
+      verified (above) AND log-experiment has merged the record — the same two gates that make `git worktree
+      remove --force` safe (untracked executor scratch would otherwise be lost). Then run the finalizer —
+      `cd` OUT of the worktree first, `reap_worktree.sh <run-id> <worktree-path>` (fires only on a clean
+      close via the same `is-closed` guard; branch ref kept) — right before session reap. N.A. only if this
+      run was never given its own dedicated worktree.                                             ev: git worktree list
 - ☐ Retro filed via feedback-loop's file-feedback when installed/configured; otherwise recorded
       through the consuming instance's feedback guidance.                                         ev:
 
