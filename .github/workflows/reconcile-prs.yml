@@ -12,7 +12,11 @@ name: reconcile-prs
 #     and push -- which fires `synchronize` on the now-buildable merge ref). Round-budgeted: escalates to
 #     `needs-senior-engineer` instead of nudging forever if the head never moves (automated-researcher#438 --
 #     the in-flight judgment layer looks closer at why plain resolution-dispatch isn't landing and hands
-#     exact guidance, or escalates to `needs-human` itself if it can't).
+#     exact guidance, or escalates to `needs-human` itself if it can't). That escalation ALSO
+#     workflow_dispatches senior-engineer.yml directly (automated-researcher#524): the PR is still
+#     CONFLICTING when the label lands, so the `pull_request: labeled` event senior-engineer.yml listens
+#     for never fires (same no-merge-ref gap this reconciler exists to repair) -- without the explicit
+#     dispatch, the label would land with nothing to summon it.
 #   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
 #     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
 #   - `mergeable == MERGEABLE` with a completed codex review AT THE CURRENT HEAD whose state is
@@ -160,6 +164,21 @@ jobs:
             if [ "$round" -gt "$BUDGET" ]; then
               echo "PR #$n: conflicted with no progress after $((round - 1)) reconciler dispatch(es); escalating to needs-senior-engineer"
               gh pr comment "$n" --repo "$REPO" --body "Reconciler: PR has stayed conflicted with main across $((round - 1)) resolution-dispatch round(s) with no new commit landing (still at head $short). Escalating to \`needs-senior-engineer\` rather than continuing to nudge."
+              # automated-researcher#524: a CONFLICTING PR has no buildable merge ref, so GitHub never
+              # fires the `pull_request: labeled` event senior-engineer.yml listens for -- the label
+              # alone would land with nothing to summon it. Explicitly workflow_dispatch it (the
+              # workflow already accepts a pr_number input and tolerates running without the label
+              # present on that path); its own per-PR concurrency group covers the harmless double-summon
+              # if a later labeled event on a since-mergeable PR also fires. Dispatch BEFORE adding the
+              # label (same "mark state only after success" ordering as handle_mergeable's review
+              # re-fire below) and bail on failure before labeling: this reconciler already skips any PR
+              # already carrying needs-senior-engineer on later ticks (see the top-level skip below), so
+              # labeling first and having the dispatch fail afterward would permanently strand the PR --
+              # labeled, but with no adjudication run and no further reconciler tick ever retrying it.
+              if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n"; then
+                echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; not labeling this tick so the next tick retries"
+                return 1
+              fi
               gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
               return
             fi
