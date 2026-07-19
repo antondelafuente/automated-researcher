@@ -27,6 +27,14 @@ on:
         description: "PR number to run senior-engineer adjudication against (its current head)"
         required: true
         type: number
+      summoned_by:
+        description: >-
+          Marks this dispatch as an automated summons on behalf of a label application (e.g.
+          'reconciler') so the reappearance loop guard counts it. Leave empty for a bare manual
+          dispatch, which keeps its existing exemption from the guard.
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: senior-engineer-pr-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
@@ -131,11 +139,20 @@ jobs:
       # `needs-senior-engineer` application, and if the label REAPPEARS N=2 times on one PR (i.e. this is
       # its 3rd+ application), the guidance loop isn't converging -- escalate straight to needs-human instead
       # of running another adjudication round. Counts `labeled` events for this exact label via the issue's
-      # own event timeline (ambient read-only token is sufficient -- this is a read). Only meaningful for the
-      # labeled path; a workflow_dispatch run isn't a label (re-)application at all.
+      # own event timeline (ambient read-only token is sufficient -- this is a read).
+      #
+      # issue #527: a workflow_dispatch run isn't itself a label (re-)application, but reconcile-prs.yml's
+      # conflicted-PR escalation summons this workflow via workflow_dispatch (no `pull_request: labeled`
+      # event fires while a PR is CONFLICTING -- no buildable merge ref) and only adds the label AFTER the
+      # dispatch succeeds. Skipping the guard for every workflow_dispatch therefore let the reconciler's
+      # repeated summons on a non-converging conflicted PR bypass it entirely -- exactly the unbounded loop
+      # this guard exists to stop. The guard now also runs for a workflow_dispatch that carries the
+      # `summoned_by` marker (set by reconcile-prs.yml), counting the same label-application history as the
+      # labeled path. A bare manual workflow_dispatch (no marker) keeps the deliberate exemption -- the
+      # dispatcher's manual lever may run without label history.
       - name: Loop guard — count needs-senior-engineer applications
         id: loop_guard
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name == 'pull_request' || github.event.inputs.summoned_by != ''
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
