@@ -42,7 +42,10 @@ leaves that fact `UNKNOWN`, which disqualifies the worktree from tier 1 and rout
 **degrades instead of poisoning the whole worktree**: `git submodule status` fails repo-wide the moment
 *any* gitlink lacks a `.gitmodules` mapping, so on that failure the sweep falls back to a per-path scan of
 the index's gitlink entries instead of marking the fact `UNKNOWN` outright — a single historical broken
-mapping no longer disqualifies every worktree that happens to contain it from tier 1.
+mapping no longer disqualifies every worktree that happens to contain it from tier 1. That fallback parses
+`git ls-files -s -z` (NUL-separated), not the plain-line default: git C-quotes a tab/newline-containing path
+in normal output, so a plain-line parse checking for that literal quoted spelling on disk would miss a
+genuinely initialized submodule at such a path and silently let it through a forced reap.
 
 1. **Deterministic ("safe to reap")** — merged into the default branch, clean of both tracked changes AND
    untracked files, carries no ignored content either, and older than `--min-age-days`; or the worktree's
@@ -70,17 +73,21 @@ mapping no longer disqualifies every worktree that happens to contain it from ti
    content lands as a new, unrelated squashed commit — so the plain ancestry check above never passes for
    it, permanently, however clean and old. A worktree also qualifies for tier 1 when every file it carries
    beyond `default_ref` — its committed tree (a direct two-tree diff against `default_ref`, not an ancestry
-   check) plus any dirty/untracked residue on top — is byte-identical to the same path there: the tree
-   contains zero content the default branch doesn't already have, so reaping the *worktree* (never the
-   branch ref — the best-effort `git branch -d` is simply a no-op for a non-ancestor branch, and that
-   failure is already non-fatal, so the ref survives on its own) loses nothing. A worktree that's still
-   genuinely unmerged and carries content of its own not reflected anywhere on the default branch is
-   unaffected by this — it's excluded exactly as before, or reads `UNKNOWN` (never a guess) if a comparison
-   itself can't complete. **A path with a staged add/modify is checked against both the index blob and the
-   working-tree file, independently** — a status like `MM` (staged, then further modified unstaged) means
-   the working-tree file can coincidentally match the default branch while the staged blob still holds
-   unique content that exists nowhere else; checking the working tree alone would miss that and reap it
-   anyway. A staged deletion needs no such check (there's no index blob left to compare). **The reap itself
+   check) plus any dirty/untracked residue on top — is byte-identical AND mode-identical to the same path
+   there: the tree contains zero content the default branch doesn't already have, so reaping the *worktree*
+   (never the branch ref — the best-effort `git branch -d` is simply a no-op for a non-ancestor branch, and
+   that failure is already non-fatal, so the ref survives on its own) loses nothing. Mode identity
+   (100644/100755/120000) is checked alongside bytes, not instead of them: an uncommitted `chmod +x` on a
+   tracked file is byte-identical to the default branch but a distinct mode, and a symlink is compared by
+   its link target, never by reading through it to whatever it points at — either mismatch fails this bar,
+   even when the raw bytes would otherwise "match." A worktree that's still genuinely unmerged and carries
+   content of its own not reflected anywhere on the default branch is unaffected by this — it's excluded
+   exactly as before, or reads `UNKNOWN` (never a guess) if a comparison itself can't complete. **A path with
+   a staged add/modify is checked against both the index blob and the working-tree file, independently** — a
+   status like `MM` (staged, then further modified unstaged) means the working-tree file can coincidentally
+   match the default branch while the staged blob still holds unique content (and its own mode) that exists
+   nowhere else; checking the working tree alone would miss that and reap it anyway. A staged deletion needs
+   no such check (there's no index blob left to compare). **The reap itself
    passes `--force`** whenever this bar (rather than plain
    mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
    to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
@@ -188,6 +195,8 @@ live-owner tier-1 veto, fail-closed UNKNOWN handling, the silent cases, `--fetch
 with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored content never reaching tier
 1 (with a `status.showUntrackedFiles=no` config bypass attempt), the default branch's ref surviving a reap
 of a linked worktree checked out on it, a locked (un-removable) tier-1 worktree failing without blocking
-other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass and
-a fail-closed novel-content case), the per-path submodule-fact degradation on an unmapped gitlink, and the
-human report's same-reason collapsing.
+other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass, a
+fail-closed novel-content case, a chmod-only mode-mismatch case, and an untracked-symlink mode-mismatch
+case), the per-path submodule-fact degradation on an unmapped gitlink (including a tab-quoted path carrying
+a genuinely initialized submodule, which the NUL-safe fallback parse must still find), and the human
+report's same-reason collapsing.

@@ -307,7 +307,13 @@ CI_ORIGIN="$TMP/ci-origin.git"; CI_REPO="$TMP/ci-repo"
 git init -q --bare -b main "$CI_ORIGIN"
 git init -q -b main "$CI_REPO"
 g "$CI_REPO" config user.email t@example.com; g "$CI_REPO" config user.name smoke
-echo hello > "$CI_REPO/f.txt"; g "$CI_REPO" add f.txt; g "$CI_REPO" commit -q -m init
+echo hello > "$CI_REPO/f.txt"; g "$CI_REPO" add f.txt
+# symlink-victim.txt is committed here, in the SHARED base every Case A-F branch forks from (not added to
+# main later): default_ref is re-resolved fresh for every content-identity check, so adding a file to main
+# AFTER a branch already forked would make that branch's own committed-tree diff (step 1) non-empty against
+# every OTHER already-existing case's fork point too — it must land in the common ancestor all cases share.
+echo hello > "$CI_REPO/symlink-victim.txt"; g "$CI_REPO" add symlink-victim.txt
+g "$CI_REPO" commit -q -m init
 g "$CI_REPO" remote add origin "$CI_ORIGIN"; g "$CI_REPO" push -q origin main
 
 # Case A: squash-merge-equivalent — a clean, old, fully-committed worktree whose branch was never merged,
@@ -354,12 +360,34 @@ echo staged_unique_content > "$TMP/wt-staged-unique/f.txt"
 git -C "$TMP/wt-staged-unique" add f.txt
 echo hello > "$TMP/wt-staged-unique/f.txt"  # working tree reverted to match main's f.txt byte-for-byte
 
+# Case E (senior-engineer round, automated-researcher#537): an uncommitted chmod-only change on a tracked
+# file -- `chmod +x` alone, no byte change. Porcelain status reports this as a modification with IDENTICAL
+# content to main, so a byte-only compare would call this content-identical and a forced reap would then
+# destroy the mode change; must be excluded from tier1 (lands tier3 as dirty, same as any other tracked
+# modification).
+g "$CI_REPO" worktree add -q -b feat-chmod-only "$TMP/wt-chmod-only" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-chmod-only" commit -q --allow-empty -m oldbase4 --date="$OLD_DATE"
+chmod +x "$TMP/wt-chmod-only/f.txt"
+
+# Case F (senior-engineer round, automated-researcher#537): an untracked SYMLINK at a path whose main copy
+# is a tracked regular file (symlink-victim.txt, committed in CI_REPO's shared base above), where the
+# symlink's FOLLOWED target has bytes identical to main's copy -- the exact case a bare `open()` read (which
+# follows symlinks) would match byte-for-byte, silently treating a mode-120000 path as content-identical to
+# main's mode-100644 copy and losing the symlink itself on reap.
+g "$CI_REPO" worktree add -q -b feat-symlink-residue "$TMP/wt-symlink-residue" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-symlink-residue" commit -q --allow-empty -m oldbase5 --date="$OLD_DATE"
+git -C "$TMP/wt-symlink-residue" rm -q --cached symlink-victim.txt
+rm "$TMP/wt-symlink-residue/symlink-victim.txt"
+ln -s f.txt "$TMP/wt-symlink-residue/symlink-victim.txt"
+
 J_CI=$(python3 "$SWEEP" --json --repo "$CI_REPO" 2>/dev/null)
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-squashed"; then ok "content-identity: squash-merge-equivalent clean+old worktree reaches tier1 despite merged=False"; else no "content-identity: squash-merge-equivalent worktree NOT classified tier1 (defect not fixed)"; fi
 if echo "$J_CI" | reason_has "d['tier1']" "$TMP/wt-squashed" "squash-merge equivalent"; then ok "content-identity: tier1 reason distinguishes the squash-merge-equivalent path from a literal merge"; else no "content-identity: tier1 reason doesn't explain the squash-merge-equivalent basis"; fi
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-matching"; then ok "content-identity: untracked residue matching main exactly reaches tier1"; else no "content-identity: matching untracked residue NOT classified tier1"; fi
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-novel"; then no "content-identity: worktree with genuinely novel untracked content wrongly reached tier1"; else ok "content-identity: novel untracked content (no counterpart on main) correctly excluded from tier1"; fi
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-staged-unique"; then no "content-identity: staged-unique ('MM') worktree WRONGLY reached tier1 (index-only content would be lost on reap)"; else ok "content-identity: staged-unique ('MM') worktree correctly excluded from tier1 (index blob checked, not just the working-tree read)"; fi
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-chmod-only"; then no "content-identity: chmod-only worktree WRONGLY reached tier1 (mode change would be lost on reap)"; else ok "content-identity: chmod-only worktree correctly excluded from tier1 (mode compared, not just bytes)"; fi
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-symlink-residue"; then no "content-identity: untracked-symlink worktree WRONGLY reached tier1 (followed-target bytes matched main, but mode 120000 != 100644)"; else ok "content-identity: untracked-symlink worktree correctly excluded from tier1 (symlink compared by mode+link-target, never by followed content)"; fi
 
 # content-identity items must actually survive a REAL --reap-tier1 pass too, not just classification — the
 # do_reap re-verification recomputes merged/content-identity fresh before deleting, and must not gate solely
@@ -374,6 +402,8 @@ if [ -d "$TMP/wt-stray-matching" ]; then no "content-identity: matching-residue 
 if git -C "$CI_REPO" branch --format='%(refname:short)' 2>/dev/null | grep -qx feat-squashed; then ok "content-identity: branch ref survives reap (git branch -d is a no-op for a non-ancestor branch, non-fatal)"; else no "content-identity: branch ref feat-squashed was WRONGLY deleted despite never being an ancestor"; fi
 if [ -d "$TMP/wt-stray-novel" ]; then ok "content-identity: novel-content worktree preserved by --reap-tier1"; else no "content-identity: novel-content worktree was WRONGLY removed by --reap-tier1"; fi
 if [ -d "$TMP/wt-staged-unique" ]; then ok "content-identity: staged-unique ('MM') worktree preserved by --reap-tier1"; else no "content-identity: staged-unique ('MM') worktree was WRONGLY removed by --reap-tier1 (staged-only content lost)"; fi
+if [ -d "$TMP/wt-chmod-only" ]; then ok "content-identity: chmod-only worktree preserved by --reap-tier1"; else no "content-identity: chmod-only worktree was WRONGLY removed by --reap-tier1 (mode change lost)"; fi
+if [ -d "$TMP/wt-symlink-residue" ]; then ok "content-identity: untracked-symlink worktree preserved by --reap-tier1"; else no "content-identity: untracked-symlink worktree was WRONGLY removed by --reap-tier1 (symlink lost)"; fi
 
 # 3g. automated-researcher#533: submodule-fact per-path degradation. A single gitlink with no `.gitmodules`
 #     mapping makes `git submodule status` fail identically for EVERY worktree whose checkout contains that
@@ -395,10 +425,30 @@ GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-um-merged" commit -q --allow-empt
 g "$UM_REPO" merge -q --no-edit feat-um-merged
 g "$UM_REPO" push -q origin main
 
+# Second worktree (senior-engineer round, automated-researcher#537): extends the same unmapped-gitlink
+# fixture with a genuinely INITIALIZED submodule at a TAB-containing path. `git ls-files -s` (without -z)
+# C-quotes a tab-containing path (e.g. a literal `dir<TAB>tab/inner` renders as `"dir\ttab/inner"`, literal
+# backslash-t and all) in its default output, so a plain-line parse of the fallback scan would probe that
+# literal quoted spelling on disk and miss the real path -- `-z` emits the raw, unquoted path instead,
+# letting the fallback correctly find this submodule and keep the worktree OUT of tier 1, even though `git
+# submodule status` itself already fails here too (same unrelated `badlink` gitlink as wt-um-merged above).
+g "$UM_REPO" worktree add -q -b feat-um-quoted-submodule "$TMP/wt-um-quoted" main
+QUOTED_REL=$'dir\ttab/inner'
+mkdir -p "$TMP/wt-um-quoted/$QUOTED_REL"
+git init -q -b main "$TMP/wt-um-quoted/$QUOTED_REL"
+g "$TMP/wt-um-quoted/$QUOTED_REL" config user.email t@example.com
+g "$TMP/wt-um-quoted/$QUOTED_REL" config user.name smoke
+git -C "$TMP/wt-um-quoted" update-index --add --cacheinfo 160000,$FAKESHA,"$QUOTED_REL"
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-um-quoted" commit -q -m addquotedgitlink --date="$OLD_DATE"
+g "$UM_REPO" merge -q --no-edit feat-um-quoted-submodule
+g "$UM_REPO" push -q origin main
+
 if git -C "$UM_REPO" submodule status >/dev/null 2>&1; then no "fixture setup: expected 'git submodule status' to fail on the unmapped gitlink (fixture doesn't reproduce the real trigger)"; else ok "fixture: 'git submodule status' fails on the unmapped gitlink, as in the real 2026-07-19 trigger"; fi
 
 J_UM=$(python3 "$SWEEP" --json --repo "$UM_REPO" 2>/dev/null)
 if echo "$J_UM" | has_path_in "d['tier1']" "$TMP/wt-um-merged"; then ok "unmapped-gitlink degradation: merged+clean+old worktree still reaches tier1 (submodule fact degrades per-path instead of poisoning UNKNOWN)"; else no "unmapped-gitlink poisoned tier1 classification (submodule check failure not degraded)"; fi
+if echo "$J_UM" | has_path_in "d['tier1']" "$TMP/wt-um-quoted"; then no "quoted-path fallback: worktree with an initialized submodule at a tab-quoted path WRONGLY reached tier1 (fallback failed to find it)"; else ok "quoted-path fallback: worktree with an initialized submodule at a tab-quoted path correctly excluded from tier1"; fi
+if echo "$J_UM" | reason_has "d['tier3']" "$TMP/wt-um-quoted" "submodule"; then ok "quoted-path fallback: tier3 reason names the initialized submodule"; else no "quoted-path fallback: tier3 reason for wt-um-quoted missing the submodule note"; fi
 
 # 3h. round-2 Codex review, automated-researcher#537 P0: do_reap's re-verification must re-check
 #     submodule_fact() too, not just status/identity/HEAD -- a worktree can gain an INITIALIZED submodule in

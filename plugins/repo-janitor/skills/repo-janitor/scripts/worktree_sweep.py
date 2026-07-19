@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -285,6 +286,17 @@ def content_identical_fact(repo, path, head, default_ref):
        tracked path from the index never withholds unique content the way an add/modify can — the working-
        tree read below (or step 1's committed-tree diff, for a path the disk copy also lacks) already covers
        whatever's actually still present.
+
+       Identity requires byte-identical AND MODE-identical content (100644/100755/120000) — not bytes alone
+       (senior-engineer round, automated-researcher#537): an uncommitted `chmod +x` on a tracked file is
+       byte-identical to `default_ref` but a distinct mode, and a forced reap riding a byte-only "identical"
+       verdict would silently discard that mode change. A symlink is compared by its LINK TARGET, never by
+       reading through it — the previous plain `open()` read followed a symlink to its target's content,
+       which could coincidentally byte-match `default_ref`'s copy of a REGULAR file at that path while the
+       symlink itself (a wholly different, unique thing) got waved through as "identical" and lost on reap.
+       Any other on-disk type at a residue path (fifo, socket, device — `git status` never lists these, so
+       only a directory-vs-file mismatch should reach this branch in practice) fails the fact closed, same
+       as every other unreadable case here.
     """
     rc, out, _ = run_git(["diff", "--name-only", default_ref, head], cwd=repo)
     if rc != 0:
@@ -295,24 +307,93 @@ def content_identical_fact(repo, path, head, default_ref):
     entries, ok = dirty_untracked_entries(path)
     if not ok:
         return None
+    if not entries:
+        return True
+
+    ref_modes = ls_tree_modes(repo, default_ref)
+    if ref_modes is None:
+        return None
+    index_modes = ls_files_modes(path)
+    if index_modes is None:
+        return None
+
     for code, rel in entries:
+        ref_mode = ref_modes.get(rel)
+        if ref_mode is None:
+            return None  # path absent from default_ref -> UNKNOWN, same as the show-failure case below
         rc, remote_bytes, _ = run_git_bytes(["show", f"{default_ref}:{rel}"], cwd=repo)
         if rc != 0:
             return None
         if code[0] not in (" ", "?", "D"):
+            idx_mode = index_modes.get(rel)
+            if idx_mode is None:
+                return None
+            if idx_mode != ref_mode:
+                return False
             rc_idx, index_bytes, _ = run_git_bytes(["show", f":{rel}"], cwd=path)
             if rc_idx != 0:
                 return None
             if index_bytes != remote_bytes:
                 return False
+        full = os.path.join(path, rel)
         try:
-            with open(os.path.join(path, rel), "rb") as f:
-                local_bytes = f.read()
+            st = os.lstat(full)
         except OSError:
             return None
+        if stat.S_ISLNK(st.st_mode):
+            local_mode = "120000"
+            try:
+                local_bytes = os.readlink(full).encode()
+            except OSError:
+                return None
+        elif stat.S_ISREG(st.st_mode):
+            local_mode = "100755" if st.st_mode & stat.S_IXUSR else "100644"
+            try:
+                with open(full, "rb") as f:
+                    local_bytes = f.read()
+            except OSError:
+                return None
+        else:
+            return None  # not a regular file or symlink -> fail closed, never guess
+        if local_mode != ref_mode:
+            return False
         if remote_bytes != local_bytes:
             return False
     return True
+
+
+def ls_tree_modes(repo, ref):
+    """path -> git mode string (e.g. "100644") for every entry in `ref`'s tree, via a single `ls-tree -r -z`
+    (NUL-separated so a tab/newline-containing path parses exactly, same discipline as
+    `dirty_untracked_entries`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look up
+    the default-ref side of its per-file mode comparison without one `git show`-style call per residue
+    entry."""
+    rc, out, _ = run_git(["ls-tree", "-r", "-z", ref], cwd=repo)
+    if rc != 0:
+        return None
+    modes = {}
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, relpath = record.partition("\t")
+        modes[relpath] = meta.split(" ", 1)[0]
+    return modes
+
+
+def ls_files_modes(path):
+    """path -> git mode string for every entry in `path`'s INDEX, via `ls-files -s -z` (NUL-separated, same
+    reasoning as `ls_tree_modes`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look
+    up a staged add/modify's own recorded mode, independent of the working-tree file's mode."""
+    rc, out, _ = run_git(["ls-files", "-s", "-z"], cwd=path)
+    if rc != 0:
+        return None
+    modes = {}
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, relpath = record.partition("\t")
+        modes[relpath] = meta.split(" ", 1)[0]
+    return modes
 
 
 def behind_ahead_facts(repo, default_ref):
@@ -348,6 +429,12 @@ def submodule_fact(path):
     `git ls-files -s`) and check each one directly for a `.git` entry (git's own initialized-vs-not
     signal) — this degrades a broken `.gitmodules` mapping to a real answer instead of poisoning the whole
     fact, and still correctly reports True the moment any OTHER, properly-initialized submodule is found.
+    The fallback parses `-z` (NUL-separated) output, not plain `splitlines()` (senior-engineer round,
+    automated-researcher#537): `git ls-files -s` C-quotes a tab/newline-containing path in its default
+    output (e.g. a literal `dir\ttab/inner` renders as `"dir\ttab/inner"`, backslash-t and all), so
+    `os.path.exists()` on that literal quoted spelling would miss the real on-disk path and read a genuinely
+    initialized submodule as absent — `-z` emits the raw, unquoted path instead, and a newline-containing
+    path would otherwise also be shredded by `splitlines()` regardless of quoting.
     """
     rc, out, _ = run_git(["submodule", "status"], cwd=path)
     if rc == 0:
@@ -355,13 +442,13 @@ def submodule_fact(path):
 
     log(f"'git submodule status' failed (rc={rc}) for {path} — falling back to a per-path gitlink scan "
         "instead of marking the whole worktree's submodule fact UNKNOWN (likely an unmapped gitlink)")
-    rc2, out2, _ = run_git(["ls-files", "-s"], cwd=path)
+    rc2, out2, _ = run_git(["ls-files", "-s", "-z"], cwd=path)
     if rc2 != 0:
         return None  # both checks failed -> genuinely UNKNOWN, fail closed same as before
-    for line in out2.splitlines():
-        if not line.startswith("160000") or "\t" not in line:
+    for record in out2.split("\0"):
+        if not record.startswith("160000") or "\t" not in record:
             continue
-        rel = line.split("\t", 1)[1]
+        rel = record.split("\t", 1)[1]
         if os.path.exists(os.path.join(path, rel, ".git")):
             return True
     return False
