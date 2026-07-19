@@ -163,9 +163,10 @@ jobs:
         # GitHub-native disposition state (#380): prior codex review rounds + the author's issue-comment
         # responses, so the reviewer can adjudicate rather than re-litigating findings the author already
         # fixed or disputed. Read-only `gh api` calls against this same PR — the job's read token suffices.
-        # automated-researcher#389 review: restricted to the pipeline's own trusted identities (same
-        # allowlist as implement-on-ready.yml's ALLOWLIST) — an unrelated or adversarial review/comment must
-        # not be able to inject or crowd out disposition context.
+        # automated-researcher#389 review: restricted to the pipeline's own trusted identities (originally
+        # the same allowlist as implement-on-ready.yml's ALLOWLIST; #507 adds the senior-engineer shepherd,
+        # see COMMENT_ALLOW below) — an unrelated or adversarial review/comment must not be able to inject or
+        # crowd out disposition context.
         # automated-researcher#389 round 2: reviews and comments are two distinct streams and are capped
         # INDEPENDENTLY, then merged only for rendering. Capping a single merged stream let a burst of
         # trusted-but-routine comments (e.g. the automerge-status notice, owner check-ins) push actual prior
@@ -177,18 +178,28 @@ jobs:
         # notice (implement-on-ready.yml's "Auto-merge could not be enabled..." message, emitted verbatim by
         # automation with no relation to any finding) is now filtered out before capping, since it is the one
         # deterministically identifiable source of "routine noise" in this pipeline. Beyond that one known
-        # pattern, we accept as a residual risk that arbitrary free-text chatter from the two trusted
-        # identities (owner, this bot) can still occupy a slot ahead of an older genuine disposition once
-        # more than MAX_ROUNDS comments accumulate. This is deliberately best-effort, not exhaustive:
-        # (1) the comments stream is restricted to two fully-trusted, human-supervised identities by the
-        # round-1 allowlist, so this is a volume/ordering question among trusted parties, never an
-        # adversarial-injection one; (2) a keyword/regex classifier for "is this a disposition" would be
-        # brittle and risks silently dropping a genuine response phrased without its expected vocabulary,
-        # which is worse than best-effort retention; (3) the full comment thread stays visible to a human on
-        # the PR page regardless of what's fed to the reviewer; and (4) the prompt's adjudicate-not-suppress
-        # instruction means a missing disposition just causes the finding to be judged fresh again, not
-        # wrongly suppressed — the safe failure direction. MAX_ROUNDS=6 also comfortably covers this PR's own
-        # 3-round history to date.
+        # pattern, we accept as a residual risk that arbitrary free-text chatter from the three trusted
+        # identities (owner, this bot, the senior-engineer shepherd) can still occupy a slot ahead of an
+        # older genuine disposition once more than MAX_ROUNDS comments accumulate. This is deliberately
+        # best-effort, not exhaustive: (1) the comments stream is restricted to three fully-trusted,
+        # human-supervised identities by the round-1 allowlist, so this is a volume/ordering question among
+        # trusted parties, never an adversarial-injection one; (2) a keyword/regex classifier for "is this a
+        # disposition" would be brittle and risks silently dropping a genuine response phrased without its
+        # expected vocabulary, which is worse than best-effort retention; (3) the full comment thread stays
+        # visible to a human on the PR page regardless of what's fed to the reviewer; and (4) the prompt's
+        # adjudicate-not-suppress instruction means a missing disposition just causes the finding to be
+        # judged fresh again, not wrongly suppressed — the safe failure direction. MAX_ROUNDS=6 also
+        # comfortably covers this PR's own 3-round history to date.
+        #
+        # automated-researcher#507: `senior-engineer-agent[bot]` (the in-flight-adjudication shepherd,
+        # AGENTS.md's "Senior-engineer leg", #438) is added to COMMENT_ALLOW below. Its rulings are the
+        # convergence mechanism's memory — proven live on PR #505, where the shepherd ruled a finding class
+        # irreducible-and-accepted in round 3, but the reviewer never saw that ruling (this identity was
+        # missing from the allowlist), re-flagged the same class in round 4, and the ladder escalated to
+        # needs-human on a disagreement that only existed because the judge was deaf to the adjudicator. Its
+        # escalation notices ("needs-senior-engineer applied N times...") are legitimate history too — they
+        # tell the reviewer the loop state — so only the one known auto-merge notice above stays filtered by
+        # NOISE_PREFIXES, never anything shepherd-authored.
         id: history
         env:
           GH_TOKEN: ${{ github.token }}
@@ -199,7 +210,7 @@ jobs:
           MAX_ROUNDS=6
           MAX_CHARS=20000
           REVIEW_ALLOW='["codex-engineer[bot]"]'
-          COMMENT_ALLOW='["antondelafuente","claude-code-engineer[bot]"]'
+          COMMENT_ALLOW='["antondelafuente","claude-code-engineer[bot]","senior-engineer-agent[bot]"]'
           # The only comment this pipeline's automation emits itself with no disposition content of its own
           # (implement-on-ready.yml's enable-automerge step, verbatim) — excluded before capping so it can
           # never occupy a slot ahead of a real prior-round response.
