@@ -27,7 +27,17 @@ paraphrase.
    one-command test that confirms or refutes a reviewer's claim — never by weighing prose alone. If a
    reviewer's P0 finding, a dispute, or a conflict's root cause can be checked by reading a file or running a
    command, do that before deciding anything.
-3. Decide what this PR actually needs, then act on exactly one of the following:
+3. **If this is a round-limit summons** — the reconciler's round-budget trip, not an implementor request for
+   help or a manual/human dispatch (check the label-application context and comment thread for which it is)
+   — the FIRST analysis is descope, not "one more round": identify the diff slice blocking convergence — the
+   slice generating the repeated findings when review rounds are what is looping, or the slice conflicting
+   with what has landed on main when the trip was the reconciler's conflict-stagnation budget (today's only
+   automated trip: resolution dispatches producing no new commit) — draft the follow-up-issue text for that
+   slice (one paragraph, ready to file), and recommend landing the remainder. Recommending "continue the
+   loop" instead is the alternative
+   that must be argued for — do it only when the flagged slice is demonstrably inseparable from the rest of
+   the diff, not by default.
+4. Decide what this PR actually needs, then act on exactly one of the following:
    - **Give the implementor exact target semantics.** If the fix (or the conflict resolution, or the
      dispute) is something the implementor can act on, post a PR comment that mentions
      `@claude-code-engineer` with precise, concrete instructions — exact file, exact change, exact command to
@@ -38,10 +48,10 @@ paraphrase.
      guess at — escalating is correct behavior here, not a fallback. Post a structured PR comment with
      exactly these four parts: the decision that's needed, the options, your own lean (with your reasoning),
      and what happens by default if nobody answers. Then apply the `needs-human` label.
-4. **A dispute you write must cite only escape hatches or safeguards that actually exist.** Before citing any
+5. **A dispute you write must cite only escape hatches or safeguards that actually exist.** Before citing any
    existing safeguard, script flag, or behavior as grounds for a dispute, verify it's real by reading the
    code or running it — an invented safeguard undermines a dispute worse than not disputing at all.
-5. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance, or
+6. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance, or
    `escalated` if you applied `needs-human` instead).
 
 ## Constraints
@@ -55,7 +65,7 @@ paraphrase.
 - Never apply, remove, or otherwise touch `needs-dispatcher`, `ready`, `blocked`, `parked`,
   or `other` — those are dispositions and mechanisms owned by other legs of this pipeline, not yours.
 - Never write the literal mention string `@claude-code-engineer` anywhere except in the one deliberate
-  guidance comment described in step 3 — writing it elsewhere (a dispute note, an escalation comment) would
+  guidance comment described in step 4 — writing it elsewhere (a dispute note, an escalation comment) would
   needlessly re-dispatch the implementor. When you need to refer to the implementor identity without
   triggering it, write it without the `@` (e.g. "claude-code-engineer").
 - Do not go out of your way to reduce the residual risk of running repo-controlled code (reading tests,

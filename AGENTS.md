@@ -79,9 +79,19 @@ agentic-engineering#43).
   <!-- CODEX-REVIEW-GUIDANCE:BEGIN -->
   - **P0 (blocking):** a correctness bug that breaks the change's stated purpose; a security issue (secret
     exposure, injection, privilege escalation, a trust-boundary violation); or a violation of one of this
-    file's `Rules`. Blocks `APPROVE` — the PR gets `REQUEST_CHANGES` instead.
+    file's `Rules`. Blocks `APPROVE` — the PR gets `REQUEST_CHANGES` instead. Scope is what the issue body
+    declares: before flagging P0, cite the scope/non-goals declaration the finding falls inside as it appears
+    in your inputs — the issue's scope when surfaced in your prompt, or the author's quoted scope in the
+    prior-review history; when no scope declaration is visible in your inputs, do not downgrade: keep the P0
+    and note the open scope question for the implementor's adjudication — a finding that is correct but
+    falls outside that declared scope is not a P0, however real the bug (see `follow-up-suggested` below).
   - **P1 (non-blocking):** style, minor edge cases, suggestions, simplification opportunities. Recorded in
     the review body for a later human pass; never blocks merge on its own.
+  - **follow-up-suggested (non-blocking):** a finding that is correct but outside the issue's declared
+    scope/non-goals. The review output schema's `severity` enum has no third value for this (`P0`/`P1`
+    only) — encode it as `P1` with a literal `[follow-up-suggested]` prefix on the summary, so it renders
+    distinguishably in the review body without a schema change. Never blocks `APPROVE`; the implementor
+    does not expand the PR to cover it (see `.github/prompts/address-review.md`'s scope-adjudication step).
   <!-- CODEX-REVIEW-GUIDANCE:END -->
 - **The scale principle** (researcher-stated policy, quoted verbatim — not agent paraphrase): "~10
   concurrent agents, a handful of researchers; robustness is priced at that scale; rarity alone never
