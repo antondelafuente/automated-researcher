@@ -93,15 +93,18 @@ while IFS= read -r h; do
 done <<< "$LIVE_OUT"
 
 # --- run-supervision record registry ---------------------------------------------------------------
-mapfile -t RECORDS < <(bash "$REC" list)
+# A failed listing must never be silently read as "no records" — that would leave every live session
+# looking unknown/orphan instead of surfacing the real anomaly. Abort loudly, same as the live-session
+# inventory above.
+RECORDS_OUT=$(bash "$REC" list) || { echo "session_janitor: run_supervision_record.sh list failed — aborting sweep (refusing to make reap decisions without a reliable record inventory)" >&2; exit 1; }
+mapfile -t RECORDS <<< "$RECORDS_OUT"
 
-# Pre-classify every record's handle binding so the reap path can catch registry ambiguity: how many
-# GENUINE clean-close records are bound to a handle (Finding-parity with pod_reaper's duplicate-active-
-# lease guard: >1 means the registry itself is ambiguous about who owns that session), and separately
-# whether ANY non-clean-close record (active, stopped, or stopped-then-closed) also claims that same
-# handle — a reused handle split between a closed record and a still-active/stopped one must never let
-# the closed record kill a session the other record still owns.
-declare -A CLOSED_HANDLE_COUNT KNOWN_HANDLE OTHER_HANDLE
+# Only KNOWN_HANDLE is snapshotted here — it feeds step 2's report-only "unknown live session" check,
+# which never kills anything, so a snapshot that goes stale mid-sweep is harmless. The handle-ambiguity
+# check that GATES a kill is deliberately NOT precomputed here: see handle_ambiguous() below, re-checked
+# fresh immediately before each kill so a record created/updated for a handle after this snapshot (e.g.
+# while an idle probe is in flight) still blocks it.
+declare -A KNOWN_HANDLE
 for line in "${RECORDS[@]}"; do
   [ -n "$line" ] || continue
   id=${line%% *}; state=${line#* }
@@ -109,12 +112,31 @@ for line in "${RECORDS[@]}"; do
   h=$(bash "$REC" session-handle "$id" 2>/dev/null || true)
   [ -n "$h" ] || continue
   KNOWN_HANDLE["$h"]=1
-  if [ "$state" = closed ] && is_clean_close "$id"; then
-    CLOSED_HANDLE_COUNT["$h"]=$(( ${CLOSED_HANDLE_COUNT["$h"]:-0} + 1 ))
-  else
-    OTHER_HANDLE["$h"]=1
-  fi
 done
+
+# Fresh re-check for handle ambiguity, called as LATE as possible (immediately before a kill) instead of
+# off a sweep-start snapshot: a record created/updated for this handle after the snapshot — e.g. while
+# the idle probe in consider_record is in flight — must still block the kill. run_supervision_record.sh
+# only locks a SINGLE record's own read-modify-write, so there is no cross-record lock this janitor can
+# take; this narrows the race window to "between this re-check and the kill call" rather than eliminating
+# it (the same residual gap any reader of a multi-record registry like this has).
+handle_ambiguous(){ # <handle> -> exit 0 iff ambiguous (never kill), 1 iff this handle's ownership is clear
+  local h=$1 closed_n=0 line id state hh fresh
+  fresh=$(bash "$REC" list) || return 0   # can't verify the registry right now -> never guess, block the kill
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id=${line%% *}; state=${line#* }
+    [ -n "$id" ] || continue
+    hh=$(bash "$REC" session-handle "$id" 2>/dev/null || true)
+    [ "$hh" = "$h" ] || continue
+    if [ "$state" = closed ] && is_clean_close "$id"; then
+      closed_n=$((closed_n+1))
+    else
+      return 0   # a non-clean-close (active/stopped/stopped-then-closed) record also claims this handle
+    fi
+  done <<< "$fresh"
+  [ "$closed_n" -gt 1 ]
+}
 
 # Decide for one record.
 consider_record(){ # <run-id> <state>
@@ -147,10 +169,6 @@ consider_record(){ # <run-id> <state>
   if [ -z "${LIVE[$h]:-}" ]; then
     kept=$((kept+1)); return    # already gone — the common path (self-reap already ran)
   fi
-  if [ "${CLOSED_HANDLE_COUNT[$h]:-0}" -gt 1 ] || [ -n "${OTHER_HANDLE[$h]:-}" ]; then
-    log "report-only (AMBIGUOUS records bound to session $h — registry ambiguity, NOT killing): run-id=$id"
-    reported=$((reported+1)); return
-  fi
   local idle; idle=$(idle_state "$h")
   case "$idle" in
     active) kept=$((kept+1)); return;;
@@ -158,6 +176,12 @@ consider_record(){ # <run-id> <state>
     idle)   : ;;   # both a clean close AND idle -> reap
     *)      log "report-retry (unrecognized idleness verdict '$idle'): run-id=$id handle=$h"; retried=$((retried+1)); return;;
   esac
+  # Authoritative ambiguity gate, re-checked fresh right here (see handle_ambiguous above) — the latest
+  # point before the kill, after whatever time the idle probe above took.
+  if handle_ambiguous "$h"; then
+    log "report-only (AMBIGUOUS records bound to session $h — registry ambiguity, NOT killing): run-id=$id"
+    reported=$((reported+1)); return
+  fi
   if [ "$DRY" = 1 ]; then
     log "DRY-RUN would reap: run-id=$id handle=$h"; reaped=$((reaped+1)); return
   fi

@@ -13,11 +13,14 @@
 #   - report-only: a MALFORMED run-supervision record file
 #   - report-only: two CLOSED records bound to the SAME handle (registry ambiguity)
 #   - report-only: a CLOSED record sharing a handle with an ACTIVE record (registry ambiguity)
+#   - report-only: a record for the SAME handle created WHILE the idle probe is in flight still blocks
+#     the kill (the ambiguity gate is re-checked fresh right before killing, not off a stale snapshot)
 #   - keep: a STOP-then-CLOSE (deliberate-quit finalize) record, live + idle -> never reaped
 #   - a kill that's accepted but the session is STILL listed live afterward -> retried, not reaped
 #   - a kill that's NOT accepted -> retried, not reaped
 #   - --dry-run kills nothing
 #   - unset SESSION_JANITOR_LIST_CMD -> whole sweep no-op; a PARTIAL config (idle/kill missing) fails loud
+#   - a run_supervision_record.sh `list` failure aborts the sweep loudly (never read as "no records")
 #   - arg validation (unknown/surplus arguments rejected)
 set -uo pipefail
 
@@ -50,6 +53,12 @@ cat "$LIVE_FILE" 2>/dev/null || true
 EOF
 cat > "$TMP/idle.sh" <<EOF
 #!/bin/bash
+# P0-regression hook: while the "tmux:race" fixture's idle probe is in flight, if armed, inject a fresh
+# record for that SAME handle -- deterministic (no sleep/timing dependency), fires exactly once.
+if [ "\$1" = "tmux:race" ] && [ -f "$TMP/race_armed" ]; then
+  rm -f "$TMP/race_armed"
+  bash "$REC" create raceB --session-handle "tmux:race" >/dev/null 2>&1
+fi
 cat "$TMP/idle_\$1" 2>/dev/null || true
 EOF
 cat > "$TMP/kill.sh" <<EOF
@@ -148,6 +157,19 @@ OUT=$(janitor 2>&1)
 killed "tmux:reuse" && no reused-handle-killed || ok reused-handle-not-killed
 echo "$OUT" | grep -q "AMBIGUOUS records bound to session tmux:reuse" && ok reused-handle-reported || no reused-handle-reported
 
+# === fixture (P0 regression): a record for the SAME handle created WHILE the idle probe is in flight
+#     must still block the kill -- the ambiguity gate must be re-checked fresh right before killing, not
+#     trusted off the sweep-start snapshot. The idle stub above injects the "concurrent" record exactly
+#     when idle is probed for this handle (deterministic, no sleep/timing dependency). ===
+rec create race1 --session-handle "tmux:race" >/dev/null; rec close race1 >/dev/null
+live_add "tmux:race"; idle_set "tmux:race" idle
+: > "$TMP/race_armed"
+: > "$KILL_LOG"
+OUT=$(janitor 2>&1)
+[ -f "$TMP/race_armed" ] && no race-injection-did-not-fire || ok race-injection-fired
+killed "tmux:race" && no race-injected-record-killed || ok race-injected-record-not-killed
+echo "$OUT" | grep -q "AMBIGUOUS records bound to session tmux:race" && ok race-injected-record-reported || no race-injected-record-reported
+
 # === fixture: keep — a STOP-then-CLOSE (deliberate-quit finalize) record, live + idle -> NEVER reaped ===
 # `list`'s state column collapses this to "closed" too; only is-closed correctly excludes it.
 rec create sc --session-handle "tmux:sc" >/dev/null; rec stop sc >/dev/null; rec close sc >/dev/null
@@ -190,6 +212,22 @@ chmod +x "$TMP/list_fail.sh"
 if SESSION_JANITOR_LIST_CMD="bash $TMP/list_fail.sh" bash "$J" >/dev/null 2>&1; then no list-cmd-failure-accepted; else ok list-cmd-failure-rejected; fi
 FOUT=$(SESSION_JANITOR_LIST_CMD="bash $TMP/list_fail.sh" bash "$J" 2>&1)
 echo "$FOUT" | grep -q "SESSION_JANITOR_LIST_CMD failed" && ok list-cmd-failure-logged || no list-cmd-failure-logged
+
+# === a FAILING `run_supervision_record.sh list` aborts the sweep loudly, never read as "no records" ===
+# Forced by shadowing python3 with a stub that always fails: classify_record (called per on-disk record
+# during `list`) needs python3, and the record dir already has entries from earlier fixtures, so `list`
+# is guaranteed to hit and propagate the failure (run_supervision_record.sh's `set -e` propagates a failed
+# `state=$(classify_record "$f")` assignment out of cmd_list).
+mkdir -p "$TMP/nopy"
+cat > "$TMP/nopy/python3" <<'EOF'
+#!/bin/bash
+echo "python3: stubbed unavailable for this smoke test" >&2
+exit 127
+EOF
+chmod +x "$TMP/nopy/python3"
+if PATH="$TMP/nopy:$PATH" bash "$J" >/dev/null 2>&1; then no reclist-failure-accepted; else ok reclist-failure-rejected; fi
+RFOUT=$(PATH="$TMP/nopy:$PATH" bash "$J" 2>&1)
+echo "$RFOUT" | grep -q "run_supervision_record.sh list failed" && ok reclist-failure-logged || no reclist-failure-logged
 
 # === unset SESSION_JANITOR_LIST_CMD -> the whole sweep is a documented no-op ===
 if env -u SESSION_JANITOR_LIST_CMD bash "$J" >/dev/null 2>&1; then ok unset-list-noop; else no unset-list-noop; fi
