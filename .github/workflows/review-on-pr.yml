@@ -399,6 +399,7 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Submit verdict as native review
+        id: submit_review
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
@@ -409,6 +410,18 @@ jobs:
           p0_count=$(jq '[.findings[] | select(.severity == "P0")] | length' codex-review.json)
           verdict=$(jq -r '.verdict // "changes_requested"' codex-review.json)
           current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+
+          # automated-researcher#502: consecutive-round count BEFORE this review is submitted -- the
+          # trailing run of codex-engineer[bot] CHANGES_REQUESTED reviews, reset by any APPROVED. Computed
+          # here (rather than re-querying after submission) so there is no eventual-consistency race
+          # against the review this same step is about to post.
+          prior_round=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // []
+              | map(select((.user.login | canon_login) == "codex-engineer[bot]" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED")))
+              | sort_by(.submitted_at)
+              | reduce .[] as $r (0; if $r.state == "CHANGES_REQUESTED" then . + 1 else 0 end)
+          ')
 
           # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
           # review start and this approval): a stale review must never approve new, unreviewed commits.
@@ -440,7 +453,60 @@ jobs:
             end)
           ' codex-review.json)
 
+          # automated-researcher#502: this body embeds model-authored text (finding summaries/evidence)
+          # verbatim, and a later step in this same job may post a deterministic @claude-code-engineer
+          # dispatch mention to auto-trigger address-review.yml. Any occurrence of that same literal
+          # substring inside the model's own prose must never itself be a live mention -- wrapping it in an
+          # inline code span renders it visibly but GitHub does not parse mentions inside code spans, so
+          # only the deterministic dispatch step below can ever carry a live mention.
+          body="${body//@claude-code-engineer/\`@claude-code-engineer\`}"
+
           gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
             -f "commit_id=$current_head_sha" \
             -f "event=$event" \
             -f "body=$body"
+
+          round=0
+          if [ "$event" = "REQUEST_CHANGES" ]; then
+            round=$((prior_round + 1))
+          fi
+          {
+            echo "event=$event"
+            echo "round=$round"
+          } >> "$GITHUB_OUTPUT"
+
+      # automated-researcher#502: closes the pipeline's last human-in-the-loop step on the healthy path --
+      # an interactive session previously had to hand-post the allowlisted @claude-code-engineer mention
+      # after every CHANGES_REQUESTED round (address-review.yml's own allowlist already includes
+      # codex-engineer[bot], which is the identity this job posts as). Ports agentic-engineering#56's
+      # round-limit machinery (bounded consecutive-CHANGES_REQUESTED count -> needs-senior-engineer
+      # escalation) so auto-dispatch can never spin an unbounded loop on a stuck disagreement.
+      - name: Auto-dispatch addressing round on REQUEST_CHANGES
+        if: steps.submit_review.outputs.event == 'REQUEST_CHANGES'
+        env:
+          GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.review.outputs.pr_number }}
+          ROUND: ${{ steps.submit_review.outputs.round }}
+        run: |
+          set -euo pipefail
+
+          LIMIT=3
+
+          # Hard gate (issue #502 point 3): an escalation label already parked this PR with the
+          # senior-engineer leg or a human -- the automated loop must never post another dispatch mention
+          # on top of that, regardless of round count.
+          labels=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")')
+          case ",$labels," in
+            *,needs-senior-engineer,*) echo "PR #$PR_NUMBER: needs-senior-engineer already set; skipping auto-dispatch"; exit 0 ;;
+            *,needs-human,*) echo "PR #$PR_NUMBER: needs-human already set; skipping auto-dispatch"; exit 0 ;;
+          esac
+
+          if [ "$ROUND" -ge "$LIMIT" ]; then
+            echo "PR #$PR_NUMBER: $ROUND consecutive CHANGES_REQUESTED reviews (limit $LIMIT); escalating to needs-senior-engineer instead of auto-dispatching"
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Review loop: $ROUND consecutive CHANGES_REQUESTED rounds from the Codex reviewer with no approve in between (limit $LIMIT). Escalating to \`needs-senior-engineer\` for in-flight adjudication rather than continuing to auto-dispatch. See the review above for the latest findings."
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label needs-senior-engineer
+          else
+            echo "PR #$PR_NUMBER: dispatching addressing round $ROUND/$LIMIT"
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Review loop: auto-dispatch round $ROUND/$LIMIT. @claude-code-engineer the Codex review above requested changes -- please address the findings and push."
+          fi
