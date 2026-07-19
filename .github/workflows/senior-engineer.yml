@@ -227,6 +227,80 @@ jobs:
           ref: ${{ needs.resolve.outputs.base_ref }}
           persist-credentials: false
 
+      # Untrusted-input boundary (issue #517, mirrors agentic-engineering#65's fix): this workflow's
+      # allowlist gates who can SUMMON the agent (apply needs-senior-engineer), not whose CONTENT reaches
+      # it. Raw `gh api` fetches of PR reviews / the issue-comment thread would hand any public commenter's
+      # text straight to a Bash-running agent that holds ANTHROPIC_API_KEY and a write-scoped App token.
+      # Assemble the review/comment context HERE instead, filtered to trusted authors (the researcher +
+      # this pipeline's own bot identities) via the shared canonical-login helper, and hand the agent only
+      # the rendered snapshot — the prompt is instructed to treat this as its sole comment-thread input.
+      - name: Assemble author-filtered review/comment snapshot
+        id: snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+
+          is_allowed() {
+            local canon
+            canon=$(canonical_login "$1" 2>/dev/null) || return 1
+            case "$canon" in
+              antondelafuente|codex-engineer\[bot\]|claude-code-engineer\[bot\]|senior-engineer-agent\[bot\])
+                return 0 ;;
+              *)
+                return 1 ;;
+            esac
+          }
+
+          render_reviews() {
+            local rendered=""
+            while IFS= read -r obj; do
+              login=$(jq -r '.user.login' <<<"$obj")
+              is_allowed "$login" || continue
+              state=$(jq -r '.state' <<<"$obj")
+              submitted=$(jq -r '.submitted_at // ""' <<<"$obj")
+              body=$(jq -r '.body // ""' <<<"$obj")
+              rendered+="### Review by ${login} (${state}) at ${submitted}"$'\n\n'"${body}"$'\n\n---\n\n'
+            done < <(jq -c '.[]' <<<"$reviews_json")
+            if [ -z "$rendered" ]; then
+              rendered="(no reviews from allowlisted authors)"$'\n'
+            fi
+            printf '%s' "$rendered"
+          }
+
+          render_comments() {
+            local rendered=""
+            while IFS= read -r obj; do
+              login=$(jq -r '.user.login' <<<"$obj")
+              is_allowed "$login" || continue
+              created=$(jq -r '.created_at // ""' <<<"$obj")
+              body=$(jq -r '.body // ""' <<<"$obj")
+              rendered+="### Comment by ${login} at ${created}"$'\n\n'"${body}"$'\n\n---\n\n'
+            done < <(jq -c '.[]' <<<"$comments_json")
+            if [ -z "$rendered" ]; then
+              rendered="(no comments from allowlisted authors)"$'\n'
+            fi
+            printf '%s' "$rendered"
+          }
+
+          reviews_json=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s 'add // []')
+          comments_json=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s 'add // []')
+
+          snapshot="## PR reviews (author-filtered)"$'\n\n'"$(render_reviews)"$'\n'"## Issue comment thread (author-filtered)"$'\n\n'"$(render_comments)"
+
+          # Random per-run delimiter (same reasoning as address-review.yml's render step,
+          # automated-researcher#389's injection class): the snapshot embeds trusted-but-freeform authored
+          # text, so a fixed heredoc delimiter could be matched by a line inside it.
+          delim="snapshot_$(openssl rand -hex 20)"
+          {
+            echo "snapshot<<$delim"
+            echo "$snapshot"
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Render senior-engineer prompt
         id: render_prompt
         env:
@@ -234,17 +308,30 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
           BASE_REF: ${{ needs.resolve.outputs.base_ref }}
+          SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
         run: |
           set -euo pipefail
+          # patsub_replacement is on by default on bash 5.2+ (this runner's bash): it makes `&` in the
+          # replacement word expand to the matched pattern and gives backslash special meaning, so any
+          # `&`/`\` in $SNAPSHOT (freeform authored text) would corrupt the substitution below. Disabling
+          # it restores the pre-5.2 behavior where the replacement word is inserted literally.
+          shopt -u patsub_replacement
           body="$(cat .github/prompts/senior-engineer.md)"
           body="${body//\{\{PR_NUMBER\}\}/$PR_NUMBER}"
           body="${body//\{\{REPO\}\}/$REPO}"
           body="${body//\{\{HEAD_REF\}\}/$HEAD_REF}"
           body="${body//\{\{BASE_REF\}\}/$BASE_REF}"
+          body="${body//\{\{REVIEW_SNAPSHOT\}\}/$SNAPSHOT}"
+
+          # $body now embeds the author-filtered snapshot verbatim, so a fixed delimiter ("PROMPT_EOF")
+          # could be matched by a line inside it and used to inject extra keys into $GITHUB_OUTPUT (same
+          # genre as the review-memory fix on automated-researcher#389, mirrored from address-review.yml's
+          # render step). A per-run random delimiter closes that off.
+          delim="prompt_$(openssl rand -hex 20)"
           {
-            echo "prompt<<PROMPT_EOF"
+            echo "prompt<<$delim"
             echo "$body"
-            echo "PROMPT_EOF"
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
 
       - name: Mint senior-engineer App token
