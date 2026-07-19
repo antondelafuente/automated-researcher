@@ -35,8 +35,11 @@ name: triage-assess
 # wave-assignment check (--check-wave).
 #
 # The weekly `schedule` leg is now a BACKSTOP SWEEP (#497 design item 3), not the primary path: it gathers
-# open issues that are NOT `ready`, NOT `needs-human`/`needs-senior-engineer`, and carry NO assessment comment
-# yet (event-missed stragglers — including, on its first run, today's entire unlabeled backlog). Per PR #501
+# open issues that carry NO disposition label (`ready`/`blocked`/`parked`/`other`) or escalation label
+# (`needs-human`/`needs-senior-engineer`) at all, and NO assessment comment yet (event-missed stragglers —
+# including, on its first run, today's entire unlabeled backlog; tightened by #518 to exclude every
+# dispositioned label, not just `ready`/`needs-*` — a dispositioned ticket has already been decided, and the
+# sweep exists only for UNDECIDED stragglers). Per PR #501
 # review round (2026-07-19), the sweep does NOT assess these stragglers itself: it only dispatches, for each
 # one, the SAME per-issue path a single `issues` event would take (`workflow_dispatch` with `issue_number`
 # set), using the minted claude-engineer App token so the dispatched run's own actor is
@@ -148,14 +151,24 @@ jobs:
 
       # Single-ticket mode (an `issues` event, or `workflow_dispatch` with issue_number set) builds a one-entry
       # packet for exactly the triggering/requested issue, unconditionally — its current labels never gate
-      # whether it gets assessed. Sweep mode (schedule, or workflow_dispatch with no issue_number) no longer
-      # builds assessment packets at all (P0-3, PR #501 review round): it only needs the NUMBERS of open
-      # issues that are NOT `ready`, NOT `needs-human`/`needs-senior-engineer`, and carry no assessment
-      # comment yet (the event-missed-stragglers predicate, #497 design item 3) — deliberately NOT excluding
-      # `blocked`/`parked`/`other` here: those are rare, and once assessed once they carry the marker comment
-      # too, so the no-marker clause already keeps them from being reassessed forever. Those numbers are
-      # dispatched (see sweep-dispatch-rollup below), one per-issue `workflow_dispatch` run each, instead of
-      # being assessed inline.
+      # whether it gets assessed. `opened` is unconditional because a fresh filing is undecided by definition;
+      # `reopened` is ALSO left unconditional, by explicit decision (automated-researcher#518): the `gather`
+      # job's actor gate above already restricts who can fire a `reopened` event that reaches this far
+      # (researcher + the two engineer bots), so a reopen from that allowlist reads as an intentional
+      # reassessment request, not a stragglers-sweep case — it does not need the sweep's no-disposition
+      # predicate applied to it.
+      #
+      # Sweep mode (schedule, or workflow_dispatch with no issue_number) no longer builds assessment packets
+      # at all (P0-3, PR #501 review round): it only needs the NUMBERS of open issues that carry no
+      # disposition label (`ready`/`blocked`/`parked`/`other`) or escalation label (`needs-human`/
+      # `needs-senior-engineer`) at all, and no assessment comment yet (the event-missed-stragglers predicate,
+      # #497 design item 3, tightened by #518). Lifecycle rule this predicate implements: a dispositioned or
+      # escalated ticket has already been DECIDED — the sweep exists only to catch UNDECIDED stragglers, so it
+      # must exclude every disposition/escalation label, not just `ready`/`needs-*` (mirrors the
+      # sweep-dispatch-rollup job's own awaiting-action filter below — the two now apply the identical
+      # "dispositioned = decided" rule instead of disagreeing). Those numbers are dispatched (see
+      # sweep-dispatch-rollup below), one per-issue `workflow_dispatch` run each, instead of being assessed
+      # inline.
       - name: Build ticket packet(s) / gather stragglers
         id: build
         env:
@@ -231,7 +244,8 @@ jobs:
             stragglers=$(jq -c --arg marker "$ASSESSMENT_MARKER_PREFIX" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
               [ .[] | select(
-                  (.labels | map(.name) | any(. == "ready" or . == "needs-human" or . == "needs-senior-engineer")) | not
+                  (.labels | map(.name) | any(. == "ready" or . == "blocked" or . == "parked" or . == "other"
+                    or . == "needs-human" or . == "needs-senior-engineer")) | not
                 ) | select(
                   ( [ .comments[]
                       | select((.author.login // "" | canon_login) == "claude-code-engineer[bot]")
