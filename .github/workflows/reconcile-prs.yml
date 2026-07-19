@@ -94,16 +94,17 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      # automated-researcher#540: the minted codex-engineer App token above has no Actions permission, so
-      # `gh workflow run senior-engineer.yml` 403s deterministically through it. Minting the claude
-      # engineer App token for just those two dispatch call sites instead (same pattern
-      # triage-assess.yml's sweep-dispatch-rollup job already uses for its own self-dispatch) fixes this
-      # AND keeps the dispatched run's actor allowlisted: `senior-engineer.yml`'s workflow_dispatch
-      # authorization checks `github.actor` against `claude-code-engineer[bot]` among others, which this
-      # token's identity satisfies directly. A bare `github.token` override (tried in this PR's first
-      # round) would have dispatched successfully but as `github-actions[bot]` -- not on that allowlist --
-      # so the summoned run's `resolve` job would silently skip and never adjudicate anything; using the
-      # claude engineer App instead avoids ever needing to touch senior-engineer.yml's own authorization.
+      # automated-researcher#540/#544: the minted codex-engineer App token above has no Actions permission, so
+      # `gh workflow run senior-engineer.yml` (and, identically, `review-on-pr.yml`) 403s deterministically
+      # through it. Minting the claude engineer App token for those dispatch call sites instead (same
+      # pattern triage-assess.yml's sweep-dispatch-rollup job already uses for its own self-dispatch) fixes
+      # this AND keeps the dispatched run's actor allowlisted: both `senior-engineer.yml`'s and
+      # `review-on-pr.yml`'s workflow_dispatch authorization check `github.actor` against
+      # `claude-code-engineer[bot]` among others, which this token's identity satisfies directly. A bare
+      # `github.token` override (tried in this PR's first round) would have dispatched successfully but as
+      # `github-actions[bot]` -- not on that allowlist -- so the summoned run's `resolve` job would silently
+      # skip and never adjudicate anything; using the claude engineer App instead avoids ever needing to
+      # touch either dispatched workflow's own authorization.
       # Same provisioning requirement as triage-assess.yml's: the CLAUDE_APP GitHub App must be granted
       # `Actions: write` alongside its existing scopes for this call to succeed.
       - name: Mint claude engineer App token
@@ -119,10 +120,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint_codex_token.outputs.token }}
           REPO: ${{ github.repository }}
-          # The two `gh workflow run senior-engineer.yml` call sites below override GH_TOKEN to this
-          # instead of the minted codex-engineer App token above -- every other call in this step
-          # (comments, labels) keeps the codex token unchanged, since the allowlist/loop-guard conventions
-          # those rely on are keyed off the commenting/labeling identity.
+          # The two `gh workflow run senior-engineer.yml` call sites and the `review-on-pr.yml` re-fire
+          # call site below override GH_TOKEN to this instead of the minted codex-engineer App token above
+          # -- every other call in this step (comments, labels) keeps the codex token unchanged, since the
+          # allowlist/loop-guard conventions those rely on are keyed off the commenting/labeling identity.
           RECONCILER_ACTIONS_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
         run: |
           set -euo pipefail
@@ -459,7 +460,7 @@ jobs:
             # posting the marker comment, so the marker is only ever written after a successful dispatch
             # (an unchecked failure here would still record the in-flight marker and suppress retries for
             # up to REVIEW_GRACE_SECONDS despite no review having actually been launched).
-            gh workflow run review-on-pr.yml --repo "$REPO" -f "pr_number=$n" || return 1
+            GH_TOKEN="$RECONCILER_ACTIONS_TOKEN" gh workflow run review-on-pr.yml --repo "$REPO" -f "pr_number=$n" || return 1
             gh pr comment "$n" --repo "$REPO" --body "$REVIEW_MARKER (head $short)." >/dev/null
           }
 
