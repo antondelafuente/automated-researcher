@@ -52,7 +52,7 @@ paraphrase.
 - Never add, remove, or otherwise touch `needs-senior-engineer` yourself — the workflow that dispatched you
   owns this label's entire lifecycle (it verifies your reported outcome before clearing it); re-applying or
   removing it here would race or duplicate that mechanism.
-- Never apply, remove, or otherwise touch `needs-dispatcher`, `ready`, `needs-design`, `blocked`, `parked`,
+- Never apply, remove, or otherwise touch `needs-dispatcher`, `ready`, `blocked`, `parked`,
   or `other` — those are dispositions and mechanisms owned by other legs of this pipeline, not yours.
 - Never write the literal mention string `@claude-code-engineer` anywhere except in the one deliberate
   guidance comment described in step 3 — writing it elsewhere (a dispute note, an escalation comment) would
