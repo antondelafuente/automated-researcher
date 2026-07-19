@@ -411,6 +411,26 @@ jobs:
           verdict=$(jq -r '.verdict // "changes_requested"' codex-review.json)
           current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
 
+          # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
+          # review start and this approval): a stale review must never approve new, unreviewed commits.
+          # automated-researcher#505 review: it also must never masquerade as a genuine review OF the new
+          # head -- codex-review.json's findings were produced against $CAPTURED_HEAD_SHA's diff, not
+          # $current_head_sha's. Posting them as a REQUEST_CHANGES tagged with commit_id=$current_head_sha
+          # would (a) auto-dispatch address-review.yml against findings for a diff the current head may not
+          # even contain, and (b) satisfy reconcile-prs.yml's handle_mergeable "does this head already have
+          # a completed codex review" check, permanently suppressing the very re-review that would
+          # otherwise fire for it. So: skip submitting any review at all and stop -- the current head is
+          # correctly left with zero codex reviews against it, which is exactly the state reconcile-prs.yml
+          # (#431) polls for and repairs by re-firing review-on-pr.yml's workflow_dispatch actuator.
+          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
+            echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — findings are for the stale head; skipping review submission so the reconciler re-fires a review against the current head instead of auto-dispatching against stale findings"
+            {
+              echo "event=STALE"
+              echo "round=0"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # automated-researcher#502: consecutive-round count BEFORE this review is submitted -- the
           # trailing run of codex-engineer[bot] CHANGES_REQUESTED reviews, reset by any APPROVED. Computed
           # here (rather than re-querying after submission) so there is no eventual-consistency race
@@ -423,19 +443,13 @@ jobs:
               | reduce .[] as $r (0; if $r.state == "CHANGES_REQUESTED" then . + 1 else 0 end)
           ')
 
-          # Re-verify the head hasn't moved since the review started (guards a `synchronize` race between
-          # review start and this approval): a stale review must never approve new, unreviewed commits.
-          #
           # code-review finding: approving must require BOTH zero P0 findings AND the model's own
           # `verdict` field saying "approve" -- deriving approval from p0_count alone let an
           # internally-inconsistent result (verdict="changes_requested" with an empty/malformed
           # findings array, or any verdict value other than the literal "approve") slip through as an
           # APPROVE. Any inconsistency between the two signals now fails closed to REQUEST_CHANGES,
           # never the other direction.
-          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
-            echo "::warning::PR head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) during review — requesting changes instead of a stale approve"
-            event="REQUEST_CHANGES"
-          elif [ "$p0_count" -eq 0 ] && [ "$verdict" = "approve" ]; then
+          if [ "$p0_count" -eq 0 ] && [ "$verdict" = "approve" ]; then
             event="APPROVE"
           else
             if [ "$p0_count" -eq 0 ] && [ "$verdict" != "approve" ]; then
