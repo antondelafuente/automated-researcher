@@ -135,31 +135,33 @@ jobs:
             echo "base_ref=$(jq -r '.baseRefName' <<<"$pr_json")"
           } >> "$GITHUB_OUTPUT"
 
-      # Loop guard (issue #438): the senior engineer must never dispatch more than once per
-      # `needs-senior-engineer` application, and if the label REAPPEARS N=2 times on one PR (i.e. this is
-      # its 3rd+ application), the guidance loop isn't converging -- escalate straight to needs-human instead
-      # of running another adjudication round. Counts `labeled` events for this exact label via the issue's
-      # own event timeline (ambient read-only token is sufficient -- this is a read).
+      # Loop guard (issue #438, redecoupled by #529): the senior engineer must not keep re-adjudicating a
+      # PR that isn't converging -- but the original design counted `labeled` timeline events for
+      # `needs-senior-engineer`, and a label is applied (and sometimes rolled back) by transport mechanics
+      # that have nothing to do with whether an adjudication actually ran. reconcile-prs.yml can label a PR,
+      # then fail to dispatch this workflow and roll the label back -- zero adjudications ran, yet the
+      # label churn still looked like a real application. Two such transport failures made a genuine THIRD
+      # summons look like the guard's trip point and escalate prematurely (agentic-engineering#65 rounds
+      # 9-10, reproduced here).
+      #
+      # The guard now counts senior-engineer-agent[bot]-authored adjudication comments (the `adjudicate`
+      # job's guidance/escalation comment, or `loop-guard-escalate`'s own comment below) -- direct evidence a
+      # summons actually ran -- since whichever is more recent of: the last APPROVED codex review (the PR
+      # converged, so any earlier adjudications are moot), or the last `needs-human` label REMOVAL (a human
+      # cleared a prior escalation and put the PR back in the automated loop, so the count resets). Label
+      # churn with no comment behind it (a rolled-back transport failure) produces no comment and therefore
+      # cannot advance this count; reconcile-prs.yml's sweep is what re-dispatches a PR left stranded with
+      # the label and no comment (see its own comments for that half of the fix).
       #
       # issue #527: a workflow_dispatch run isn't itself a label (re-)application, but reconcile-prs.yml's
       # conflicted-PR escalation summons this workflow via workflow_dispatch (no `pull_request: labeled`
       # event fires while a PR is CONFLICTING -- no buildable merge ref). Skipping the guard for every
       # workflow_dispatch therefore let the reconciler's repeated summons on a non-converging conflicted PR
       # bypass it entirely -- exactly the unbounded loop this guard exists to stop. The guard now also runs
-      # for a workflow_dispatch that carries the `summoned_by` marker (set by reconcile-prs.yml), counting
-      # the same label-application history as the labeled path. A bare manual workflow_dispatch (no marker)
-      # keeps the deliberate exemption -- the dispatcher's manual lever may run without label history.
-      #
-      # PR #528 rounds 1-2: reconcile-prs.yml's escalation now adds the `needs-senior-engineer` label
-      # BEFORE dispatching this workflow (not after), so by the time this step runs, the labeled event
-      # this exact summons produced is already on the issue's timeline -- same guarantee the `labeled`
-      # path gets for free from the event that triggers it. A prior version dispatched first and added
-      # the label after, then tried to compensate with a synthetic `+1` on the workflow_dispatch path;
-      # that was provably unreliable both ways (double-counted if the label write raced ahead of this
-      # read, never reached 3 if the write silently failed), so the fix is ordering at the write site
-      # (reconcile-prs.yml), not a guess here. Both paths now read the same historical count with no
-      # special-casing.
-      - name: Loop guard — count needs-senior-engineer applications
+      # for a workflow_dispatch that carries the `summoned_by` marker (set by reconcile-prs.yml), reading
+      # the same comment history as the labeled path. A bare manual workflow_dispatch (no marker) keeps the
+      # deliberate exemption -- the dispatcher's manual lever may run without any of this history.
+      - name: Loop guard — count adjudication comments since last approval or escalation clearance
         id: loop_guard
         if: github.event_name == 'pull_request' || github.event.inputs.summoned_by != ''
         env:
@@ -168,11 +170,28 @@ jobs:
           PR_NUMBER: ${{ steps.resolve_pr.outputs.pr_number }}
         run: |
           set -euo pipefail
-          count=$(gh api "repos/$REPO/issues/$PR_NUMBER/events" --paginate | jq -s '
-            add // [] | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | length
+
+          # Cutoff = the later of the last APPROVED codex review and the last `needs-human` removal --
+          # adjudication comments at or before this point belong to a round that has already resolved
+          # (converged, or cleared by a human) and must not count against the current one.
+          last_approved=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
+            add // [] | map(select(.state == "APPROVED")) | sort_by(.submitted_at) | last | .submitted_at // "1970-01-01T00:00:00Z"
           ')
-          echo "needs-senior-engineer has been applied $count time(s) (including this one) on PR #$PR_NUMBER"
-          if [ "$count" -ge 3 ]; then
+          last_clearance=$(gh api "repos/$REPO/issues/$PR_NUMBER/events" --paginate | jq -s '
+            add // [] | map(select(.event == "unlabeled" and .label.name == "needs-human")) | sort_by(.created_at) | last | .created_at // "1970-01-01T00:00:00Z"
+          ')
+          if [[ "$last_approved" > "$last_clearance" ]]; then
+            cutoff="$last_approved"
+          else
+            cutoff="$last_clearance"
+          fi
+
+          count=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --arg cutoff "$cutoff" '
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select((.user.login | canon_login) == "senior-engineer-agent[bot]" and .created_at > $cutoff)) | length
+          ')
+          echo "senior-engineer has posted $count adjudication comment(s) on PR #$PR_NUMBER since $cutoff"
+          if [ "$count" -ge 2 ]; then
             trip="true"
           else
             trip="false"
@@ -221,7 +240,7 @@ jobs:
           LOOP_COUNT: ${{ needs.resolve.outputs.loop_count }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: \`needs-senior-engineer\` has been applied to this PR $LOOP_COUNT times (the 2-reappearance loop guard) without the underlying issue resolving. Escalating to \`needs-human\` instead of running another adjudication round — repeated re-labeling without progress means the automated guidance loop isn't converging and needs a person's judgment on what's actually stuck."
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Senior engineer: this PR has already received $LOOP_COUNT adjudication round(s) since the last approved review (or escalation clearance) without the underlying issue resolving (the 2-round loop guard). Escalating to \`needs-human\` instead of running another round — repeated guidance without progress means the automated loop isn't converging and needs a person's judgment on what's actually stuck."
           # No `|| true` here: a claimed-but-undelivered escalation is exactly the swallowed-escalation
           # class this pipeline exists to eliminate -- the escalation only exists once needs-human is
           # actually on the PR, so a failed mutation must fail this job, not pass silently.
