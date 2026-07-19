@@ -512,18 +512,6 @@ jobs:
 
           LIMIT=3
 
-          # automated-researcher#505 review round 2: the freshness check in the submission step above only
-          # guards up to the moment of that POST -- a push landing in the gap between that POST succeeding
-          # and this step starting (however small) would otherwise still dispatch an addressing round
-          # against a head the review's findings no longer describe. Re-verify immediately before doing
-          # anything mutating; a moved head here means a new `synchronize` run for the true current head
-          # already owns (or will own) the dispatch decision, so skip rather than duplicate/contradict it.
-          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
-          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
-            echo "PR #$PR_NUMBER: head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) since the review was submitted; skipping auto-dispatch -- the synchronize run for the current head owns this decision"
-            exit 0
-          fi
-
           # Hard gate (issue #502 point 3): an escalation label already parked this PR with the
           # senior-engineer leg or a human -- the automated loop must never post another dispatch mention
           # on top of that, regardless of round count.
@@ -532,6 +520,29 @@ jobs:
             *,needs-senior-engineer,*) echo "PR #$PR_NUMBER: needs-senior-engineer already set; skipping auto-dispatch"; exit 0 ;;
             *,needs-human,*) echo "PR #$PR_NUMBER: needs-human already set; skipping auto-dispatch"; exit 0 ;;
           esac
+
+          # automated-researcher#505 review round 2: the freshness check in the submission step above only
+          # guards up to the moment of that POST -- a push landing in the gap between that POST succeeding
+          # and this step starting (however small) would otherwise still dispatch an addressing round
+          # against a head the review's findings no longer describe. Re-verify immediately before doing
+          # anything mutating; a moved head here means a new `synchronize` run for the true current head
+          # already owns (or will own) the dispatch decision, so skip rather than duplicate/contradict it.
+          #
+          # automated-researcher#505 review round 3: the labels gate now precedes this check, so no API
+          # call sits between this fetch and the mutations below. The remaining fetch->mutation gap is
+          # irreducible (GitHub's REST API has no atomic compare-and-mutate) and its outcomes are all
+          # self-correcting or fail-closed: a mergeable push fires `synchronize`, whose run supersedes this
+          # one via the `review-pr-N` cancel-in-progress group and re-decides dispatch at the current head;
+          # a duplicate dispatch collapses in address-review.yml's per-PR `address-pr-N` cancel-in-progress
+          # group into one round, run against the live branch (the implementor never checks out the
+          # captured SHA); a stale escalation errs toward early senior-engineer attention. Accepted per
+          # AGENTS.md's scale principle -- do not shrink this window further; see PR #505's round-3
+          # senior-engineer adjudication.
+          current_head_sha=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')
+          if [ "$current_head_sha" != "$CAPTURED_HEAD_SHA" ]; then
+            echo "PR #$PR_NUMBER: head moved ($CAPTURED_HEAD_SHA -> $current_head_sha) since the review was submitted; skipping auto-dispatch -- the synchronize run for the current head owns this decision"
+            exit 0
+          fi
 
           if [ "$ROUND" -ge "$LIMIT" ]; then
             echo "PR #$PR_NUMBER: $ROUND consecutive CHANGES_REQUESTED reviews (limit $LIMIT); escalating to needs-senior-engineer instead of auto-dispatching"
