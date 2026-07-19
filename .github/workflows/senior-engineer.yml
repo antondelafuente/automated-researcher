@@ -311,6 +311,11 @@ jobs:
           SNAPSHOT: ${{ steps.snapshot.outputs.snapshot }}
         run: |
           set -euo pipefail
+          # patsub_replacement is on by default on bash 5.2+ (this runner's bash): it makes `&` in the
+          # replacement word expand to the matched pattern and gives backslash special meaning, so any
+          # `&`/`\` in $SNAPSHOT (freeform authored text) would corrupt the substitution below. Disabling
+          # it restores the pre-5.2 behavior where the replacement word is inserted literally.
+          shopt -u patsub_replacement
           body="$(cat .github/prompts/senior-engineer.md)"
           body="${body//\{\{PR_NUMBER\}\}/$PR_NUMBER}"
           body="${body//\{\{REPO\}\}/$REPO}"
