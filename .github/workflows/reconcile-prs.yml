@@ -170,7 +170,7 @@ jobs:
             # exit status explicitly and skip this PR for this tick on failure rather than treating it as
             # absence (which would trigger a spurious re-dispatch).
             local label_ts
-            if ! label_ts=$(gh api "repos/$REPO/issues/$n/events" --paginate | jq -s '
+            if ! label_ts=$(gh api "repos/$REPO/issues/$n/events" --paginate | jq -r -s '
               add // [] | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | sort_by(.created_at) | last | .created_at // empty
             '); then
               echo "::warning::PR #$n: reading needs-senior-engineer label history failed; skipping this tick"
@@ -182,7 +182,7 @@ jobs:
             fi
 
             local comment_ts
-            if ! comment_ts=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s '
+            if ! comment_ts=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -r -s '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
               add // [] | map(select((.user.login | canon_login) == "senior-engineer-agent[bot]")) | sort_by(.created_at) | last | .created_at // empty
             '); then
