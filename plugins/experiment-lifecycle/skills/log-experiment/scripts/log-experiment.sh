@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
+#   --skip-ignored proceeds WITHOUT the flagged gitignored files (acknowledge-and-exclude) — it never
+#   force-includes them into the commit.
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):

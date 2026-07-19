@@ -67,6 +67,17 @@ are not.** Pin:
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
+- **Train/eval leakage screen — DEFAULT to a semantic-embedding near-dup check, not token overlap alone.**
+  Whenever training data and eval data are drawn from overlapping domains (a training pool that intentionally
+  shares an eval battery's topic area is the common case), token-overlap screens (e.g. Jaccard on word sets) miss
+  real near-duplicates that share little surface vocabulary — a real incident: a 0.6-threshold token-Jaccard
+  screen missed training/eval near-duplicates scoring 0.52 and 0.37 Jaccard, and the screen never checked
+  within-pool (training-against-itself) duplicates at all, only cross-battery ones. Pin the DEFAULT recipe as:
+  embedding cosine similarity (e.g. OpenAI `text-embedding-3-small`), run in BOTH directions — cross-battery
+  (training pool vs. every eval battery it must stay disjoint from) AND within-pool (training pool against
+  itself) — flagging pairs above a moderate threshold (~0.55-0.6) for a read. A flagged pair is not automatically
+  a leak: a "convergent_topical" pair (same narrow domain, distinct question) is an expected structural residual
+  when the pool intentionally shares an eval battery's domain, so flagged pairs need a read, not an auto-drop.
 - **RESULTS describes the data, not a verdict.** `RESULTS.md` reports the numbers / the plot and **may include a
   lightweight, clearly-marked qualitative read** ("the data looks like X") that stays **separable from the numbers**. It
   must NOT make a rigorous pre-registered claim ("H confirmed / refuted at threshold") — the rigorous interpretation is the
