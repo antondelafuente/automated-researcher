@@ -194,33 +194,59 @@ jobs:
             # Idempotency (automated-researcher#515): "addressing activity since the review" means a
             # newer allowlisted dispatch mention -- the head hasn't moved (this review is AT the current
             # head by construction), so "no newer commit" is already guaranteed and doesn't need its own
-            # check. Same errexit-disabled-by-caller hazard as elsewhere in this script: check the read's
-            # exit status explicitly.
-            local last_mention
-            if ! last_mention=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg since "$review_submitted_at" --argjson allow "$DISPATCH_MENTION_ALLOW" '
+            # check. `created_at >= $since` (not `>`): GitHub timestamps are 1-second resolution and
+            # review-on-pr.yml's submit-verdict posts its own dispatch mention in the step immediately
+            # after submitting the review, so the two can legitimately share a timestamp -- a strict `>`
+            # would treat that same-second mention as absent and re-dispatch a duplicate, which would
+            # cancel-in-progress the already-running address-review.yml job (automated-researcher#516 P1).
+            # Same errexit-disabled-by-caller hazard as elsewhere in this script: check the read's exit
+            # status explicitly.
+            local mentions_json
+            if ! mentions_json=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg since "$review_submitted_at" --argjson allow "$DISPATCH_MENTION_ALLOW" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
               (add // []) | map(select(((.user.login | canon_login) as $c | ($allow | index($c)) != null)
                 and ((.body // "") | contains("@claude-code-engineer"))
-                and (.created_at > $since)))
-                | sort_by(.created_at) | last
+                and (.created_at >= $since)))
+                | sort_by(.created_at)
             '); then
               echo "::warning::PR #$n: reading dispatch-mention history failed; skipping this tick"
               return 1
             fi
 
-            if [ "$last_mention" != "null" ] && [ -n "$last_mention" ]; then
-              local mention_ts elapsed
+            local mention_count
+            mention_count=$(jq 'length' <<<"$mentions_json")
+
+            if [ "$mention_count" -gt 0 ]; then
+              local last_mention mention_ts elapsed
+              last_mention=$(jq -c '.[-1]' <<<"$mentions_json")
               mention_ts=$(jq -r '.created_at' <<<"$last_mention")
               elapsed=$(( now_epoch - $(date -u -d "$mention_ts" +%s) ))
               if [ "$elapsed" -lt "$STRANDED_GRACE_SECONDS" ]; then
                 echo "PR #$n: dispatch mention posted ${elapsed}s ago against the rejected review at head $short; treating as still in flight, skipping this tick"
                 return
               fi
+
+              # automated-researcher#516 P0: `round` only moves when a NEW review lands at a NEW head --
+              # a dead addressing run (mention posted, grace elapsed, no commit landed since, so the head
+              # is unchanged by construction) never produces either, so `round` cannot double as the
+              # retry-escalation counter here or this branch would re-dispatch the same round forever.
+              # Count how many times THIS round has already been dispatched instead and escalate once that
+              # count exhausts the same budget -- mirroring the conflict leg's round idiom of a bounded,
+              # self-consuming counter, just keyed off dispatch-mention count rather than a stored round
+              # number, since the round number itself is shared with (and must stay meaningful against)
+              # submit-verdict's own numbering.
+              if [ "$mention_count" -ge "$REVIEW_ADDRESS_LIMIT" ]; then
+                echo "PR #$n: round $round has already been dispatched $mention_count time(s) with no addressing commit ever landing (still at head $short); escalating to needs-senior-engineer instead of retrying again"
+                gh pr comment "$n" --repo "$REPO" --body "Review loop: round $round has been auto-dispatched $mention_count time(s) with no addressing commit landing since (limit $REVIEW_ADDRESS_LIMIT). Escalating to \`needs-senior-engineer\` for in-flight adjudication rather than continuing to retry a dispatch that keeps dying before it pushes."
+                gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
+                return
+              fi
+
               # The dispatch mention is older than address-review.yml's own CLI timeout and no commit has
               # landed since (head is unchanged) -- that addressing run died without pushing. Re-dispatch
               # the SAME round rather than leaving the PR stranded a second way (mirrors the conflict leg's
               # round idiom: a dead run doesn't get a free pass, it gets retried within the same budget).
-              echo "PR #$n: dispatch mention posted ${elapsed}s ago with no addressing commit since (still at head $short); that addressing run appears to have died -- re-dispatching round $round/$REVIEW_ADDRESS_LIMIT"
+              echo "PR #$n: dispatch mention posted ${elapsed}s ago with no addressing commit since (still at head $short); that addressing run appears to have died -- re-dispatching round $round/$REVIEW_ADDRESS_LIMIT (retry $((mention_count + 1))/$REVIEW_ADDRESS_LIMIT)"
             else
               echo "PR #$n: rejected codex review at head $short with no addressing dispatch since; dispatching round $round/$REVIEW_ADDRESS_LIMIT"
             fi
