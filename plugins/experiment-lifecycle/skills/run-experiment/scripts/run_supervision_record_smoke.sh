@@ -279,4 +279,20 @@ if run status nonesuch >/dev/null 2>&1; then no status-missing-failclosed; else 
 if run status broken >/dev/null 2>&1; then no status-corrupt-failclosed; else ok status-corrupt-failclosed; fi
 if run status a1 extra >/dev/null 2>&1; then no status-surplus-rejected; else ok status-surplus-rejected; fi
 
+# ===== list: the session-janitor's enumeration input =====
+# Fresh registry root so `list`'s output is exactly the fixtures created here (a-la-carte, not the
+# whole smoke's accumulated state).
+LISTROOT=$(mktemp -d)
+AAR_RUN_SUPERVISION_DIR="$LISTROOT" run create lst_active >/dev/null
+AAR_RUN_SUPERVISION_DIR="$LISTROOT" run create lst_closed >/dev/null
+AAR_RUN_SUPERVISION_DIR="$LISTROOT" run close lst_closed >/dev/null
+printf 'not json{' > "$LISTROOT/lst_broken.json"
+LOUT=$(AAR_RUN_SUPERVISION_DIR="$LISTROOT" run list)
+echo "$LOUT" | grep -qx 'lst_active active' && ok list-active || no list-active
+echo "$LOUT" | grep -qx 'lst_closed closed' && ok list-closed || no list-closed
+echo "$LOUT" | grep -qx 'lst_broken invalid' && ok list-invalid || no list-invalid
+if AAR_RUN_SUPERVISION_DIR="$LISTROOT" run list extra >/dev/null 2>&1; then no list-surplus-rejected; else ok list-surplus-rejected; fi
+[ -z "$(AAR_RUN_SUPERVISION_DIR="$TMP/no-such-dir" run list)" ] && ok list-missing-dir-empty || no list-missing-dir-empty
+rm -rf "$LISTROOT"
+
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }

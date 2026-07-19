@@ -488,8 +488,20 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   `session_handle` and hands it to your instance's **session-teardown seam** (`EXPERIMENT_SESSION_REAP_CMD` — resolved
   LIVE at close like the deploy-account teardown key, NOT a frozen `START.md` field). The seam is **self-only**: it must
   verify the current session matches the handle and fail closed on a mismatch, so a stale/misbound handle reaps nothing,
-  never a peer. **No seam configured → a logged no-op** (the deferred session-janitor is the backstop). The **transcript
-  persists on disk** (resumable) — this frees the process, not the record. Nothing runs after this by design.
+  never a peer. **No seam configured → a logged no-op** (the standing session-janitor sweep is the backstop for a
+  crashed close, below). The **transcript persists on disk** (resumable) — this frees the process, not the record.
+  Nothing runs after this by design.
+- **The session janitor is the backstop for a crashed close.** Self-reap above only fires from inside the closing
+  session — if the executor dies before it runs (or the close never finalizes), the session sits resident
+  indefinitely (~300–530 MB each; a batch of these OOMs a small box). `scripts/session_janitor.sh`, scheduled by the
+  instance like `gpu-job`'s `pod_reaper.sh`, sweeps the run-supervision record registry standing outside any one
+  session: it reaps ONLY a record that is a clean close (`is-closed`) whose recorded `session_handle` matches a LIVE
+  session that reads IDLE — never a parked/blocked/stopped run, never on an inconclusive idleness read. Everything
+  else is reported, never killed: a live session with no matching record, a still-desired-active record whose
+  session is no longer live (the deeper crash class self-reap can't catch — the executor died before ever reaching
+  close), and an inconclusive idle read. It needs its own instance seams (`SESSION_JANITOR_LIST_CMD` /
+  `SESSION_JANITOR_IDLE_CMD` / `SESSION_JANITOR_KILL_CMD`) — `reap_session.sh`'s `EXPERIMENT_SESSION_REAP_CMD` is
+  self-only by contract and cannot be reused here. Roll it out `--dry-run` first, same as the pod reaper.
 
 ---
 

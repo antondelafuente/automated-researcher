@@ -52,6 +52,10 @@
 #              checks (automated-researcher#535 review, round 2): the record is written from INSIDE the
 #              run's own worktree at start, so a clean-closed run-id can only ever name its OWN worktree
 #              path here, never a peer's.
+#   list -> print one `<run-id> <state>` line per record on disk (state: active|stopped|closed|invalid).
+#              Read-only, no lock (write_record's atomic replace means a list never observes a partial
+#              write). This is the box-level session-janitor's enumeration input (session_janitor.sh),
+#              the run-supervision analog of pod_lease.sh's own `list`.
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
 #   the terminal-state guard runs INSIDE that lock — so a concurrent `update` cannot read-modify-write
@@ -72,6 +76,7 @@
 #   run_supervision_record.sh worktree-path         <run-id>  # print bound worktree path (exit 1 if unset)
 #   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
+#   run_supervision_record.sh list                           # `<run-id> <state>` per record (enumeration)
 #
 # Record root is instance-overridable: ${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}.
 set -euo pipefail
@@ -498,6 +503,20 @@ cmd_show(){
   cat "$file"
 }
 
+# list: print one `<run-id> <state>` line per record (the session-janitor's enumeration input, mirroring
+# pod_lease.sh's own `list`). <run-id> is the FILENAME's stem, not a field read out of the (possibly
+# corrupt) JSON, so an invalid record is still enumerable and reportable rather than silently skipped.
+cmd_list(){
+  [ -d "$ROOT" ] || return 0
+  local f id state
+  for f in "$ROOT"/*.json; do
+    [ -e "$f" ] || continue
+    id=$(basename "$f"); id=${id%.json}
+    state=$(classify_record "$f")
+    printf '%s %s\n' "$id" "$state"
+  done
+}
+
 cmd_status(){
   local id=$1; local file; file=$(record_path "$id")
   local state; state=$(classify_record "$file")
@@ -542,7 +561,8 @@ main(){
   case "$sub" in
     create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show)
       validate_id "$id"; shift;;
-    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show> <run-id> [...]";;
+    list) [ $# -eq 0 ] || die "list: unexpected extra argument(s): $*";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show|list> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
@@ -569,6 +589,7 @@ main(){
     worktree-path)         with_lock "$id" cmd_worktree_path         "$id";;
     status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;
+    list)                  cmd_list;;
   esac
 }
 

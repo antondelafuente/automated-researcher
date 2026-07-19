@@ -279,6 +279,23 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 10b2. session janitor smoke (#285): the standing backstop reaper for crashed-close sessions — the reap
+#     predicate (clean close + live handle + idle, ALL three), the report-only anomaly classes (unknown
+#     live session with no matching record, a still-desired-active record whose handle isn't live, an
+#     inconclusive idleness read, a malformed record, duplicate closed records on the same handle), the
+#     unset-seam no-op vs. the fail-loud partial config, and --dry-run killing nothing — behavior the
+#     JSON/syntax checks can't cover. Runs when the janitor, its smoke, or run_supervision_record.sh
+#     (the janitor's enumeration input via its `list` command) changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/(session_janitor(_smoke)?|run_supervision_record)\.sh$'; then
+  SJ_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/session_janitor_smoke.sh"
+  if [ -f "$SJ_SMOKE" ]; then
+    echo "[checks] session janitor smoke" >&2
+    bash "$SJ_SMOKE" >&2 && ok "session_janitor smoke" || err "session_janitor smoke FAILED"
+  else
+    err "session_janitor.sh or run_supervision_record.sh changed but session_janitor_smoke.sh missing — cannot verify the janitor"
+  fi
+fi
+
 # 10c. log-experiment secret-scan smoke (#306): the diff-scoped scan (a pre-existing merged file no longer
 #     blocks a log that leaves it unchanged; a newly added/modified real key still blocks) + the sk- boundary
 #     guard (a hyphenated identifier containing 'sk-' is not a false-positive) + the fail-safe fallback
