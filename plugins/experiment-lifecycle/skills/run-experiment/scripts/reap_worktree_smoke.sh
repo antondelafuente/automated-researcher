@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Smoke for reap_worktree.sh — the workspace self-reap close action (automated-researcher#532). Behavior the
 # deterministic JSON/syntax checks can't catch: the clean-close guard (only closed-AND-not-stopped reaps —
-# a parked/blocked or deliberately-stopped run is never reaped), the actual `git worktree remove --force`
-# (branch ref kept, untracked scratch removed), and refusal on a path that isn't a real worktree. Uses a
-# real throwaway git repo under TMP — no network, no real experiment state touched.
+# a parked/blocked or deliberately-stopped run is never reaped), the $OLDPWD self-only binding (a
+# clean-closed run-id must still match the worktree the caller just cd'd out of — automated-researcher#535
+# review), the actual `git worktree remove --force` (branch ref kept, untracked scratch removed), and
+# refusal on a path that isn't a real worktree. Uses a real throwaway git repo under TMP — no network, no
+# real experiment state touched.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -20,7 +22,18 @@ fails=0
 ok(){ echo "ok   $1"; }
 no(){ echo "FAIL $1"; fails=1; }
 rec(){ bash "$REC" "$@"; }
-reap(){ bash "$R" "$@"; }   # propagate exit code
+# Invoke reap_worktree.sh the way the skill actually calls it: cd INTO the worktree, then OUT of it, so
+# $OLDPWD is exactly the worktree path when the script runs (the self-only binding it now enforces) —
+# propagates the script's exit code. Forwards ALL args (not just id/wt) so arg-count validation tests
+# below still reach the script unchanged; only cd's when $2 is an existing directory to cd into.
+reap(){
+  local wt=${2:-}
+  if [ -n "$wt" ] && [ -d "$wt" ]; then
+    ( cd "$wt" && cd "$TMP" && bash "$R" "$@" )
+  else
+    bash "$R" "$@"
+  fi
+}
 
 REPO="$TMP/repo"
 git init -q "$REPO"
@@ -67,6 +80,20 @@ WT6=$(new_worktree g_broken)
 printf 'not json{' > "$AAR_RUN_SUPERVISION_DIR/g_broken.json"                                   # corrupt record
 if reap g_broken "$WT6" >/dev/null 2>&1; then no reap-corrupt-refused; else ok reap-corrupt-refused; fi
 [ -d "$WT6" ] && ok reap-corrupt-worktree-survives || no reap-corrupt-worktree-survives
+
+# --- SELF-ONLY BINDING: $OLDPWD unset -> refuses, worktree survives (raw invocation, bypassing the
+# reap() wrapper's cd dance, since this test is exactly about that dance being absent) ---
+WT7=$(new_worktree g_oldpwd_unset)
+rec create g_oldpwd_unset >/dev/null; rec close g_oldpwd_unset >/dev/null
+if (unset OLDPWD; bash "$R" g_oldpwd_unset "$WT7") >/dev/null 2>&1; then no reap-oldpwd-unset-refused; else ok reap-oldpwd-unset-refused; fi
+[ -d "$WT7" ] && ok reap-oldpwd-unset-worktree-survives || no reap-oldpwd-unset-worktree-survives
+
+# --- SELF-ONLY BINDING: $OLDPWD set but pointing at a DIFFERENT dir (e.g. a peer's worktree, or a plain
+# copy/paste mistake) -> refuses, worktree survives ---
+WT8=$(new_worktree g_oldpwd_mismatch)
+rec create g_oldpwd_mismatch >/dev/null; rec close g_oldpwd_mismatch >/dev/null
+if OLDPWD="$TMP" bash "$R" g_oldpwd_mismatch "$WT8" >/dev/null 2>&1; then no reap-oldpwd-mismatch-refused; else ok reap-oldpwd-mismatch-refused; fi
+[ -d "$WT8" ] && ok reap-oldpwd-mismatch-worktree-survives || no reap-oldpwd-mismatch-worktree-survives
 
 # --- a clean close but a path that ISN'T actually a worktree -> refuses, no crash ---
 rec create c_notwt >/dev/null; rec close c_notwt >/dev/null

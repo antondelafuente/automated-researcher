@@ -464,9 +464,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   considered and rejected as a second mechanism where one suffices. Fires **only on a clean close** — the
   SAME `is-closed` guard session reap uses below: a parked/blocked/crashed run leaves its worktree in place
   for forensics (`repo-janitor`'s sweep is the backstop for that residue, not this step). `cd` OUT of the
-  worktree yourself FIRST (e.g. `$HOME` — never remove the tree your own shell is standing in), then run
-  `scripts/reap_worktree.sh <run-id> <this worktree's path>`: it re-checks the clean-close guard, resolves
-  the shared checkout on its own, then `git worktree remove --force`s the tree (**`--force` is required and
+  worktree yourself FIRST (e.g. `$HOME` — never remove the tree your own shell is standing in), then
+  **immediately, in the same shell**, run `scripts/reap_worktree.sh <run-id> <this worktree's path>`: it
+  re-checks the clean-close guard, **requires the given path to equal `$OLDPWD`** (the self-only binding —
+  refuses if you cd'd elsewhere first, or pass any path other than the one you just left, so a clean-closed
+  run-id can never be paired with an unrelated worktree), resolves the shared checkout on its own via its
+  git-dir, then `git worktree remove --force`s the tree (**`--force` is required and
   safe ONLY behind the upload-verified + log-experiment-merged gates above** — executor scratch is untracked
   by design, so a plain `remove` would refuse every time). **Keep the branch ref** — the content already
   landed via squash-merge, so the ref is cheap and preserves recoverability; this never touches the shared
