@@ -581,10 +581,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   process rather than a scheduling bug: it produces a sustained ZERO-GROWTH flatline that gets worse, not
   better, as you raise concurrency in response. It's also invisible at smoke scale — a 10-prompt smoke never
   triggered it; it only appeared at n=1207 with concurrency>=48 — so a clean smoke run is not proof the drain
-  loop is fine at full scale. Drain with `asyncio.wrap_future(fut)` + `asyncio.wait(pending,
-  return_when=asyncio.FIRST_COMPLETED)` instead, so whichever request finishes first gets processed first.
-  Measured effect from the incident that surfaced this: 1.5-1.9/s -> 6.0-6.7/s (3-4x) at concurrency 96-128,
-  same model/prompts/decoding config, with no data-validity change — this is a pure scheduling fix.
+  loop is fine at full scale. Drain with `asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)` instead,
+  so whichever request finishes first gets processed first — wrap each future with `asyncio.wrap_future(fut)`
+  only if `fut` is a `concurrent.futures.Future` (e.g. from a thread/process-pool executor); a native asyncio
+  Task/Future from `asyncio.ensure_future`/`create_task` goes into `pending` directly, not through
+  `wrap_future`. Completion order is not submission order: carry each request's own input identifier (its
+  index or key) alongside its future so the result can be re-associated with its source input when written —
+  writing results out purely by arrival position will silently scramble row alignment against the input
+  population. Measured effect from the incident that surfaced this: 1.5-1.9/s -> 6.0-6.7/s (3-4x) at
+  concurrency 96-128, same model/prompts/decoding config, with no data-validity change — this is a pure
+  scheduling fix (when result-to-input identity is carried through, as above).
 - **Smoke-test ladder, always.** Small model first (and any multi-unit path tested small) → smoke → full model → smoke →
   real run. Never jump straight to the full model. On a NEW dataset, smoke the first batches (memory is data-dependent).
 - **Read full samples at every stage** — *actual text*, not just aggregates. This is enforced as a **STANDING two-layer
