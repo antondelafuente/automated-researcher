@@ -273,6 +273,18 @@ def content_identical_fact(repo, path, head, default_ref):
        `default_ref` at all. That last case reads as UNKNOWN rather than a confirmed "different" on purpose
        (scope note, automated-researcher#533): a per-file compare failure fails this fact closed exactly
        like every other fact in this script, rather than the script guessing which kind of failure it saw.
+
+       A path carrying a STAGED ADD/MODIFY (index status other than ' '/'?'/'D') is checked TWICE — the
+       index blob AND the working-tree file, each independently against `default_ref` (round-2 Codex review,
+       automated-researcher#537): a status like `MM` (staged AND further unstaged-modified) means the index
+       holds content the working-tree read alone never sees, so a worktree can have its working-tree file
+       coincidentally byte-identical to `default_ref` while the staged blob holds unique content that exists
+       nowhere else — exactly what a bare working-tree-only comparison would wave through and then lose. A
+       staged DELETION ('D' as the index status) is excluded from this extra check: it has no index blob to
+       read at all (`git show :<path>` fails against a path the index no longer has), and removing a
+       tracked path from the index never withholds unique content the way an add/modify can — the working-
+       tree read below (or step 1's committed-tree diff, for a path the disk copy also lacks) already covers
+       whatever's actually still present.
     """
     rc, out, _ = run_git(["diff", "--name-only", default_ref, head], cwd=repo)
     if rc != 0:
@@ -283,14 +295,20 @@ def content_identical_fact(repo, path, head, default_ref):
     entries, ok = dirty_untracked_entries(path)
     if not ok:
         return None
-    for _, rel in entries:
+    for code, rel in entries:
+        rc, remote_bytes, _ = run_git_bytes(["show", f"{default_ref}:{rel}"], cwd=repo)
+        if rc != 0:
+            return None
+        if code[0] not in (" ", "?", "D"):
+            rc_idx, index_bytes, _ = run_git_bytes(["show", f":{rel}"], cwd=path)
+            if rc_idx != 0:
+                return None
+            if index_bytes != remote_bytes:
+                return False
         try:
             with open(os.path.join(path, rel), "rb") as f:
                 local_bytes = f.read()
         except OSError:
-            return None
-        rc, remote_bytes, _ = run_git_bytes(["show", f"{default_ref}:{rel}"], cwd=repo)
-        if rc != 0:
             return None
         if remote_bytes != local_bytes:
             return False
@@ -648,6 +666,13 @@ def do_reap(reap_plan, dry_run, default_branch):
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
             continue
         dirty, untracked, ignored = status_facts(path)
+        # Re-check the submodule safety gate too (round-2 Codex review, automated-researcher#537): classification
+        # already refuses tier 1 to any worktree with an INITIALIZED submodule (`git worktree remove`
+        # unconditionally refuses those), but that check was never repeated here — a submodule initialized
+        # in the gap between classification and this reap (e.g. `git submodule update --init` run in the
+        # worktree) would otherwise be force-removed anyway, since --force lifts the dirty/untracked refusal
+        # this loop already re-verifies but was never gated on submodule state at reap time.
+        has_submodule_now = submodule_fact(path)
         head_now = run_git(["rev-parse", "HEAD"], cwd=path)[1].strip()
         head_unchanged = bool(head_now) and head_now == item.get("head")
         # Re-resolve the default ref and re-check ancestry too (round-3 code-review Finding 3): mergedness
@@ -666,7 +691,8 @@ def do_reap(reap_plan, dry_run, default_branch):
         squash_safe_now = content_identical_now is True
         merge_ok_now = bool(merged_now) or squash_safe_now
         clean_ok_now = (dirty is False and untracked == 0) or squash_safe_now
-        still_safe = clean_ok_now and ignored == 0 and head_unchanged and merge_ok_now
+        still_safe = (clean_ok_now and ignored == 0 and head_unchanged and merge_ok_now
+                      and has_submodule_now is False)
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
             continue
@@ -696,14 +722,16 @@ def do_reap(reap_plan, dry_run, default_branch):
 
 
 def render_group(lines, entries):
-    """Renders one tier's (or one tier-2 owner's) entries, collapsing any reason string shared by more than
+    """Renders one tier's (or one tier-2 owner's) entries, collapsing any reason string shared by AT LEAST
     a threshold of THIS group's own entries into a single summary line + a flat path list, instead of
     repeating the full reason and action commands once per entry. The threshold is computed from `len(entries)`
     — this group's own size, never the whole sweep's total (Codex review, automated-researcher#537 round 1):
     a shared-total denominator let a large tier/owner group dilute a small one's share, so a tier with five
-    identical entries stayed uncollapsed whenever other tiers/owners were big enough. Order-preserving:
-    reasons render in first-seen order, and entries within an uncollapsed reason render in their original
-    order."""
+    identical entries stayed uncollapsed whenever other tiers/owners were big enough. Inclusive comparison
+    (round 2): a group whose size lands EXACTLY on the threshold (e.g. 5 entries against the 5-count minimum)
+    must still collapse, matching the documented "at least" wording above and in SKILL.md/module docstring —
+    a strict `>` left that boundary case uncollapsed. Order-preserving: reasons render in first-seen order,
+    and entries within an uncollapsed reason render in their original order."""
     collapse_at = max(REPORT_COLLAPSE_MIN_COUNT, len(entries) * REPORT_COLLAPSE_FRACTION)
     by_reason = {}
     order = []
@@ -713,7 +741,7 @@ def render_group(lines, entries):
         by_reason.setdefault(it["reason"], []).append(it)
     for reason in order:
         group = by_reason[reason]
-        if len(group) > collapse_at:
+        if len(group) >= collapse_at:
             lines.append(f"- [{len(group)} worktrees, same root cause] {reason}")
             for it in group:
                 lines.append(f"    {it['path']} [{it['branch'] or '(detached)'}]")

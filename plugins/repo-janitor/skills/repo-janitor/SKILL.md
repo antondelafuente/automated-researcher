@@ -76,7 +76,12 @@ mapping no longer disqualifies every worktree that happens to contain it from ti
    failure is already non-fatal, so the ref survives on its own) loses nothing. A worktree that's still
    genuinely unmerged and carries content of its own not reflected anywhere on the default branch is
    unaffected by this — it's excluded exactly as before, or reads `UNKNOWN` (never a guess) if a comparison
-   itself can't complete. **The reap itself passes `--force`** whenever this bar (rather than plain
+   itself can't complete. **A path with a staged add/modify is checked against both the index blob and the
+   working-tree file, independently** — a status like `MM` (staged, then further modified unstaged) means
+   the working-tree file can coincidentally match the default branch while the staged blob still holds
+   unique content that exists nowhere else; checking the working tree alone would miss that and reap it
+   anyway. A staged deletion needs no such check (there's no index blob left to compare). **The reap itself
+   passes `--force`** whenever this bar (rather than plain
    mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
    to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
    unconditionally refuses, regardless of whether that content is a byte-for-byte match — `--force` is
@@ -128,9 +133,11 @@ fails, behind/ahead is `UNKNOWN` for that repo (never a stale number silently pr
 
 `--reap-tier1` performs the deletions this same invocation just classified as tier 1: prunable entries via
 `git worktree prune`, merged+clean+old entries via `git worktree remove` (re-verified immediately before
-deleting, as a defense against the state changing mid-sweep) + a best-effort `git branch -d` — `--force` is
-added to the `remove` whenever the content-identity bar above (not plain mergedness) is what qualified the
-entry, since that path's byte-identical dirty/untracked residue is exactly what a bare `remove` refuses.
+deleting, as a defense against the state changing mid-sweep — including whether the worktree has since
+gained an initialized submodule, re-checked the same as at classification, not just status/identity/HEAD) +
+a best-effort `git branch -d` — `--force` is added to the `remove` whenever the content-identity bar above
+(not plain mergedness) is what qualified the entry, since that path's byte-identical dirty/untracked residue
+is exactly what a bare `remove` refuses.
 `--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
 anything.
 

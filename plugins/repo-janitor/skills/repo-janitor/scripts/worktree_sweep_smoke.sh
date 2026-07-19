@@ -343,11 +343,23 @@ g "$CI_REPO" worktree add -q -b feat-stray-novel "$TMP/wt-stray-novel" main
 GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stray-novel" commit -q --allow-empty -m oldbase2 --date="$OLD_DATE"
 echo genuinely_novel_scratch > "$TMP/wt-stray-novel/scratch.txt"
 
+# Case D (round-2 Codex review, automated-researcher#537 P0): a tracked file staged with unique content,
+# then the WORKING TREE reverted back to byte-match main on top of that staged change ("MM" status) — the
+# committed tree (HEAD) still matches main exactly, so step 1 stays empty, and a working-tree-only residue
+# check would see f.txt's on-disk bytes match main and wrongly call this content-identical, losing the
+# staged-only content. The index blob must be checked too.
+g "$CI_REPO" worktree add -q -b feat-staged-unique "$TMP/wt-staged-unique" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-staged-unique" commit -q --allow-empty -m oldbase3 --date="$OLD_DATE"
+echo staged_unique_content > "$TMP/wt-staged-unique/f.txt"
+git -C "$TMP/wt-staged-unique" add f.txt
+echo hello > "$TMP/wt-staged-unique/f.txt"  # working tree reverted to match main's f.txt byte-for-byte
+
 J_CI=$(python3 "$SWEEP" --json --repo "$CI_REPO" 2>/dev/null)
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-squashed"; then ok "content-identity: squash-merge-equivalent clean+old worktree reaches tier1 despite merged=False"; else no "content-identity: squash-merge-equivalent worktree NOT classified tier1 (defect not fixed)"; fi
 if echo "$J_CI" | reason_has "d['tier1']" "$TMP/wt-squashed" "squash-merge equivalent"; then ok "content-identity: tier1 reason distinguishes the squash-merge-equivalent path from a literal merge"; else no "content-identity: tier1 reason doesn't explain the squash-merge-equivalent basis"; fi
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-matching"; then ok "content-identity: untracked residue matching main exactly reaches tier1"; else no "content-identity: matching untracked residue NOT classified tier1"; fi
 if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-novel"; then no "content-identity: worktree with genuinely novel untracked content wrongly reached tier1"; else ok "content-identity: novel untracked content (no counterpart on main) correctly excluded from tier1"; fi
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-staged-unique"; then no "content-identity: staged-unique ('MM') worktree WRONGLY reached tier1 (index-only content would be lost on reap)"; else ok "content-identity: staged-unique ('MM') worktree correctly excluded from tier1 (index blob checked, not just the working-tree read)"; fi
 
 # content-identity items must actually survive a REAL --reap-tier1 pass too, not just classification — the
 # do_reap re-verification recomputes merged/content-identity fresh before deleting, and must not gate solely
@@ -361,6 +373,7 @@ if [ -d "$TMP/wt-squashed" ]; then no "content-identity: squash-merge-equivalent
 if [ -d "$TMP/wt-stray-matching" ]; then no "content-identity: matching-residue worktree NOT removed by --reap-tier1"; else ok "content-identity: matching-residue worktree removed by --reap-tier1"; fi
 if git -C "$CI_REPO" branch --format='%(refname:short)' 2>/dev/null | grep -qx feat-squashed; then ok "content-identity: branch ref survives reap (git branch -d is a no-op for a non-ancestor branch, non-fatal)"; else no "content-identity: branch ref feat-squashed was WRONGLY deleted despite never being an ancestor"; fi
 if [ -d "$TMP/wt-stray-novel" ]; then ok "content-identity: novel-content worktree preserved by --reap-tier1"; else no "content-identity: novel-content worktree was WRONGLY removed by --reap-tier1"; fi
+if [ -d "$TMP/wt-staged-unique" ]; then ok "content-identity: staged-unique ('MM') worktree preserved by --reap-tier1"; else no "content-identity: staged-unique ('MM') worktree was WRONGLY removed by --reap-tier1 (staged-only content lost)"; fi
 
 # 3g. automated-researcher#533: submodule-fact per-path degradation. A single gitlink with no `.gitmodules`
 #     mapping makes `git submodule status` fail identically for EVERY worktree whose checkout contains that
@@ -386,6 +399,56 @@ if git -C "$UM_REPO" submodule status >/dev/null 2>&1; then no "fixture setup: e
 
 J_UM=$(python3 "$SWEEP" --json --repo "$UM_REPO" 2>/dev/null)
 if echo "$J_UM" | has_path_in "d['tier1']" "$TMP/wt-um-merged"; then ok "unmapped-gitlink degradation: merged+clean+old worktree still reaches tier1 (submodule fact degrades per-path instead of poisoning UNKNOWN)"; else no "unmapped-gitlink poisoned tier1 classification (submodule check failure not degraded)"; fi
+
+# 3h. round-2 Codex review, automated-researcher#537 P0: do_reap's re-verification must re-check
+#     submodule_fact() too, not just status/identity/HEAD -- a worktree can gain an INITIALIZED submodule in
+#     the gap between classification and the reap loop's --force removal, and `git worktree remove --force`
+#     doesn't spare submodule content just because the surrounding tree read as clean/submodule-free at
+#     classification time. Classification and reap are exercised directly (not via the CLI in one shot) so a
+#     real submodule-init can land in that exact gap.
+RACE_SUBORIGIN="$TMP/race-sub-origin.git"; RACE_SUBREPO="$TMP/race-sub"
+git init -q --bare -b main "$RACE_SUBORIGIN"
+git init -q -b main "$RACE_SUBREPO"
+g "$RACE_SUBREPO" config user.email t@example.com; g "$RACE_SUBREPO" config user.name smoke
+echo subfile > "$RACE_SUBREPO/s.txt"; g "$RACE_SUBREPO" add s.txt; g "$RACE_SUBREPO" commit -q -m subinit
+g "$RACE_SUBREPO" remote add origin "$RACE_SUBORIGIN"; g "$RACE_SUBREPO" push -q origin main
+
+RACE_ORIGIN="$TMP/race-origin.git"; RACE_REPO="$TMP/race-repo"
+git init -q --bare -b main "$RACE_ORIGIN"
+git init -q -b main "$RACE_REPO"
+g "$RACE_REPO" config user.email t@example.com; g "$RACE_REPO" config user.name smoke
+echo hello > "$RACE_REPO/f.txt"; g "$RACE_REPO" add f.txt; g "$RACE_REPO" commit -q -m init
+g "$RACE_REPO" remote add origin "$RACE_ORIGIN"; g "$RACE_REPO" push -q origin main
+g "$RACE_REPO" -c protocol.file.allow=always submodule add -q "$RACE_SUBORIGIN" subm
+g "$RACE_REPO" commit -q -m addsubmodule
+g "$RACE_REPO" push -q origin main
+
+g "$RACE_REPO" worktree add -q -b feat-race-submodule "$TMP/wt-race-submodule" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-race-submodule" commit -q --allow-empty -m oldrace --date="$OLD_DATE"
+g "$RACE_REPO" merge -q --no-edit feat-race-submodule
+g "$RACE_REPO" push -q origin main
+# submodule intentionally left UNINITIALIZED here -> has_submodule reads False right now, so this worktree
+# genuinely, correctly classifies as tier1 at this moment.
+
+python3 -c "
+import sys, subprocess, time
+sys.path.insert(0, '$HERE')
+import worktree_sweep as ws
+
+args = ws.build_parser().parse_args(['--repo', '$RACE_REPO'])
+results = {'tier1': [], 'tier2': {}, 'tier3': []}
+reap_plan = []
+ws.process_repo('$RACE_REPO', args, set(), False, int(time.time()), results, reap_plan)
+assert any(i['path'] == '$TMP/wt-race-submodule' for i in results['tier1']), \
+    'fixture did not classify as tier1 as expected: ' + str(results)
+
+# Simulate the race: the submodule is initialized AFTER classification, BEFORE the reap loop runs.
+subprocess.run(['git', '-C', '$TMP/wt-race-submodule', '-c', 'protocol.file.allow=always',
+                'submodule', 'update', '--init', '-q'], check=True)
+
+ws.do_reap(reap_plan, False, 'main')
+"
+if [ -d "$TMP/wt-race-submodule" ]; then ok "reap re-verification: worktree that gained an initialized submodule mid-run is SKIPPED, not force-removed"; else no "reap re-verification: worktree with a newly-initialized submodule was WRONGLY removed (submodule safety gate not re-checked before --force)"; fi
 
 # 4. --reap-tier1 --dry-run touches nothing
 COUNT_BEFORE=$(git -C "$REPO" worktree list | wc -l)
@@ -470,7 +533,19 @@ out = buf.getvalue()
 assert '[8 worktrees, same root cause] inspection needed: shared root cause' in out, 'shared reason not collapsed:\n' + out
 assert out.count('git -C /wt/') == 2, 'collapsed entries must not repeat action commands: ' + out
 assert 'distinct reason 0' in out and 'distinct reason 1' in out, 'distinct (non-repeated) reasons must still render individually: ' + out
-" && ok "report ergonomics: a reason shared by most of a tier collapses; distinct reasons still render individually" || no "report ergonomics: collapse behavior check failed"
+
+# round-2 Codex review, automated-researcher#537 P1: a group whose size lands EXACTLY on collapse_at (5
+# identical entries alone in the group -> collapse_at == max(5, 5*0.2) == 5) must still collapse — the
+# documented threshold is 'at least', an inclusive bound, not a strict '>'.
+boundary = [entry(200 + i, 'inspection needed: boundary root cause') for i in range(5)]
+results2 = {'tier1': [], 'tier2': {}, 'tier3': boundary}
+buf2 = io.StringIO()
+with contextlib.redirect_stdout(buf2):
+    ws.render_text(results2)
+out2 = buf2.getvalue()
+assert '[5 worktrees, same root cause] inspection needed: boundary root cause' in out2, \
+    'group exactly at collapse_at was not collapsed (off-by-one on the inclusive threshold):\n' + out2
+" && ok "report ergonomics: a reason shared by most of a tier collapses; distinct reasons still render individually; a group exactly at the collapse threshold still collapses" || no "report ergonomics: collapse behavior check failed"
 
 if [ "$fails" = 0 ]; then echo "smoke: all groups passed"; else echo "smoke: FAILURES present (see FAIL lines above)"; fi
 exit "$fails"
