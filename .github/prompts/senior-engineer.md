@@ -29,9 +29,12 @@ paraphrase.
    command, do that before deciding anything.
 3. **If this is a round-limit summons** — the reconciler's round-budget trip, not an implementor request for
    help or a manual/human dispatch (check the label-application context and comment thread for which it is)
-   — the FIRST analysis is descope, not "one more round": identify which diff slice is generating the
-   findings driving the round count, draft the follow-up-issue text for that slice (one paragraph, ready to
-   file), and recommend merging the remainder. Recommending "continue the loop" instead is the alternative
+   — the FIRST analysis is descope, not "one more round": identify the diff slice blocking convergence — the
+   slice generating the repeated findings when review rounds are what is looping, or the slice conflicting
+   with what has landed on main when the trip was the reconciler's conflict-stagnation budget (today's only
+   automated trip: resolution dispatches producing no new commit) — draft the follow-up-issue text for that
+   slice (one paragraph, ready to file), and recommend landing the remainder. Recommending "continue the
+   loop" instead is the alternative
    that must be argued for — do it only when the flagged slice is demonstrably inseparable from the rest of
    the diff, not by default.
 4. Decide what this PR actually needs, then act on exactly one of the following:

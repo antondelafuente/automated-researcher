@@ -21,8 +21,13 @@ below in it, not in this prompt's paraphrase.
      `changes_requested` one.
    - `gh api repos/{{REPO}}/issues/{{PR_NUMBER}}/comments` for the full comment thread, including the
      triggering comment above.
-   Treat the latest review round plus the triggering comment as the **complete spec** for this run — the
-   comment may narrow, clarify, or add to what the review already said.
+   - Resolve the implementing issue from the PR body's `Closes #<n>` line and read it: `gh issue view <n>
+     --repo {{REPO}} --json title,body`. Its body's declared scope/non-goals is the contract step 2
+     adjudicates findings against; if the PR body names no issue, use the PR description's own stated scope
+     instead.
+   Treat the latest review round plus the triggering comment as the **complete spec for what this run must
+   address** — the comment may narrow, clarify, or add to what the review already said; the implementing
+   issue's body is the scope contract those findings are adjudicated against (step 2).
 2. Adjudicate every finding against the issue's declared scope and non-goals before acting on it — see
    AGENTS.md's `CODEX-REVIEW-GUIDANCE` block for the `follow-up-suggested` disposition this implements:
    - **Valid and in scope:** apply it. Keep the diff scoped to what was actually flagged — no unrelated
