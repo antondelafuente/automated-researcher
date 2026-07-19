@@ -237,10 +237,14 @@ re-sent; every one had already been classified correctly (`"answer"`, `"answer, 
 just without the XML tags, so more retries never helped. To the SUCCESS-aware done-check above (#357), a
 bare-text row is indistinguishable from a genuine API failure — both lack a valid tagged success marker — so the
 two failure modes need to be handled together: when the strict tag match fails, fall back to a constrained
-regex — a standalone `\b(answer|deflect|refuse)\b` mode word, and (only if flavor tags are also absent) a
-standalone flavor word, defaulting flavor to `na` when mode=answer. This only ever extracts the classification
-the judge already stated in the row — it never invents or coerces a value — and took one run's 234 cells from as
-low as 93.9% up to 100%.
+regex matched against the ENTIRE trimmed response — not a word search anywhere within it — requiring the whole
+trimmed response to consist of a standalone `\b(answer|deflect|refuse)\b` mode word, optionally followed only
+by a standalone flavor word (only if flavor tags are also absent), defaulting flavor to `na` when mode=answer.
+A longer free-text response that merely contains one of these words (e.g. "I cannot answer; this should be
+refused") must NOT match — an unanchored word search would misread that example as mode=answer, flavor=na,
+exactly the invented/coerced value the fallback must never produce. This only ever extracts the classification
+the judge already stated in a genuine bare-shorthand row — it never invents or coerces a value — and took one
+run's 234 cells from as low as 93.9% up to 100%.
 
 **Multi-wave eval fan-out over many checkpoints needs an explicit canonical checklist, not reactive batching
 (#337).** Batching eval waves reactively — queuing whichever checkpoints/arms/seeds are ready right now — has
