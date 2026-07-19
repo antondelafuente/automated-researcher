@@ -98,9 +98,14 @@ GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-merged" commit -q --allow-empty -
 g "$REPO" merge -q --no-edit feat-merged
 g "$REPO" push -q origin main
 
-# tier-3 candidate: unmerged, old, no owner
+# tier-3 candidate: unmerged, old, no owner. Carries a REAL committed file main doesn't have (not just an
+# --allow-empty commit) so the content-identity alternative bar (automated-researcher#533) can't wave it
+# through vacuously -- this is what keeps it a genuine "stale, no one continuing it" case even once a
+# clean-but-unmerged worktree can otherwise qualify for tier 1 via content-identity.
 g "$REPO" worktree add -q -b stale-unmerged "$TMP/wt-stale" main
-GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stale" commit -q --allow-empty -m stale --date="$OLD_DATE"
+echo stale_unique_content > "$TMP/wt-stale/stale-unique.txt"
+git -C "$TMP/wt-stale" add stale-unique.txt
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stale" commit -q -m stale --date="$OLD_DATE"
 
 # silent: unmerged, fresh (in-progress work)
 g "$REPO" worktree add -q -b wip-fresh "$TMP/wt-wip" main
@@ -294,6 +299,80 @@ if echo "$J_SUBM" | reason_has "d['tier3']" "$TMP/wt-submodule" "submodule"; the
 python3 "$SWEEP" --repo "$SM_REPO" --reap-tier1 >/dev/null 2>&1
 if [ -d "$TMP/wt-submodule" ]; then ok "submodule-bearing worktree not removed by --reap-tier1"; else no "submodule-bearing worktree was WRONGLY removed (or removal was wrongly attempted/succeeded)"; fi
 
+# 3f. automated-researcher#533: the content-identity alternative bar. Under a squash-merge PR flow a
+#     branch's own commit is never an ancestor of the default branch (its content lands as a separate
+#     squashed commit), so `merged_fact` is a confirmed False forever and the classic tier-1 bar can never
+#     pass — this must not mean the worktree nags forever once its content has genuinely landed elsewhere.
+CI_ORIGIN="$TMP/ci-origin.git"; CI_REPO="$TMP/ci-repo"
+git init -q --bare -b main "$CI_ORIGIN"
+git init -q -b main "$CI_REPO"
+g "$CI_REPO" config user.email t@example.com; g "$CI_REPO" config user.name smoke
+echo hello > "$CI_REPO/f.txt"; g "$CI_REPO" add f.txt; g "$CI_REPO" commit -q -m init
+g "$CI_REPO" remote add origin "$CI_ORIGIN"; g "$CI_REPO" push -q origin main
+
+# Case A: squash-merge-equivalent — a clean, old, fully-committed worktree whose branch was never merged,
+# but whose exact file content was independently squash-landed on main under a DIFFERENT commit.
+g "$CI_REPO" worktree add -q -b feat-squashed "$TMP/wt-squashed" main
+echo squashcontent > "$TMP/wt-squashed/newfile.txt"
+git -C "$TMP/wt-squashed" add newfile.txt
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-squashed" commit -q -m addnewfile --date="$OLD_DATE"
+echo squashcontent > "$CI_REPO/newfile.txt"
+git -C "$CI_REPO" add newfile.txt
+g "$CI_REPO" commit -q -m "squash landed newfile"
+g "$CI_REPO" push -q origin main
+
+# Case B: the same idea but as UNCOMMITTED residue — an untracked file that happens to already match main
+# byte-for-byte (the literal case the manual 2026-07-19 verification script checked).
+g "$CI_REPO" worktree add -q -b feat-stray-matching "$TMP/wt-stray-matching" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stray-matching" commit -q --allow-empty -m oldbase --date="$OLD_DATE"
+echo squashcontent > "$TMP/wt-stray-matching/newfile.txt"   # untracked, matches main's newfile.txt exactly
+
+# Case C: genuinely novel untracked content with no counterpart on main at all — must NOT be silently
+# waved through (a per-file compare failure, including "path absent from main", is UNKNOWN, never a guess).
+g "$CI_REPO" worktree add -q -b feat-stray-novel "$TMP/wt-stray-novel" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-stray-novel" commit -q --allow-empty -m oldbase2 --date="$OLD_DATE"
+echo genuinely_novel_scratch > "$TMP/wt-stray-novel/scratch.txt"
+
+J_CI=$(python3 "$SWEEP" --json --repo "$CI_REPO" 2>/dev/null)
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-squashed"; then ok "content-identity: squash-merge-equivalent clean+old worktree reaches tier1 despite merged=False"; else no "content-identity: squash-merge-equivalent worktree NOT classified tier1 (defect not fixed)"; fi
+if echo "$J_CI" | reason_has "d['tier1']" "$TMP/wt-squashed" "squash-merge equivalent"; then ok "content-identity: tier1 reason distinguishes the squash-merge-equivalent path from a literal merge"; else no "content-identity: tier1 reason doesn't explain the squash-merge-equivalent basis"; fi
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-matching"; then ok "content-identity: untracked residue matching main exactly reaches tier1"; else no "content-identity: matching untracked residue NOT classified tier1"; fi
+if echo "$J_CI" | has_path_in "d['tier1']" "$TMP/wt-stray-novel"; then no "content-identity: worktree with genuinely novel untracked content wrongly reached tier1"; else ok "content-identity: novel untracked content (no counterpart on main) correctly excluded from tier1"; fi
+
+# content-identity items must actually survive a REAL --reap-tier1 pass too, not just classification — the
+# do_reap re-verification recomputes merged/content-identity fresh before deleting, and must not gate solely
+# on `merged_now is True` (which a squash-merge branch can never satisfy, at classification OR reap time).
+python3 "$SWEEP" --repo "$CI_REPO" --reap-tier1 >/dev/null 2>&1
+if [ -d "$TMP/wt-squashed" ]; then no "content-identity: squash-merge-equivalent worktree NOT removed by --reap-tier1 (re-verification regressed to requiring literal merged=True)"; else ok "content-identity: squash-merge-equivalent worktree removed by --reap-tier1"; fi
+if [ -d "$TMP/wt-stray-matching" ]; then no "content-identity: matching-residue worktree NOT removed by --reap-tier1"; else ok "content-identity: matching-residue worktree removed by --reap-tier1"; fi
+if git -C "$CI_REPO" branch --format='%(refname:short)' 2>/dev/null | grep -qx feat-squashed; then ok "content-identity: branch ref survives reap (git branch -d is a no-op for a non-ancestor branch, non-fatal)"; else no "content-identity: branch ref feat-squashed was WRONGLY deleted despite never being an ancestor"; fi
+if [ -d "$TMP/wt-stray-novel" ]; then ok "content-identity: novel-content worktree preserved by --reap-tier1"; else no "content-identity: novel-content worktree was WRONGLY removed by --reap-tier1"; fi
+
+# 3g. automated-researcher#533: submodule-fact per-path degradation. A single gitlink with no `.gitmodules`
+#     mapping makes `git submodule status` fail identically for EVERY worktree whose checkout contains that
+#     path — this previously read as UNKNOWN (submodule fact unresolvable) and disqualified every one of
+#     them from tier 1 for a reason that had nothing to do with their own submodule state. Falling back to
+#     a per-path gitlink scan restores a real answer instead.
+UM_ORIGIN="$TMP/um-origin.git"; UM_REPO="$TMP/um-repo"
+git init -q --bare -b main "$UM_ORIGIN"
+git init -q -b main "$UM_REPO"
+g "$UM_REPO" config user.email t@example.com; g "$UM_REPO" config user.name smoke
+echo hello > "$UM_REPO/f.txt"; g "$UM_REPO" add f.txt; g "$UM_REPO" commit -q -m init
+FAKESHA="1234567890123456789012345678901234567890"
+g "$UM_REPO" update-index --add --cacheinfo 160000,$FAKESHA,badlink
+g "$UM_REPO" commit -q -m addbadgitlink
+g "$UM_REPO" remote add origin "$UM_ORIGIN"; g "$UM_REPO" push -q origin main
+
+g "$UM_REPO" worktree add -q -b feat-um-merged "$TMP/wt-um-merged" main
+GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-um-merged" commit -q --allow-empty -m umold --date="$OLD_DATE"
+g "$UM_REPO" merge -q --no-edit feat-um-merged
+g "$UM_REPO" push -q origin main
+
+if git -C "$UM_REPO" submodule status >/dev/null 2>&1; then no "fixture setup: expected 'git submodule status' to fail on the unmapped gitlink (fixture doesn't reproduce the real trigger)"; else ok "fixture: 'git submodule status' fails on the unmapped gitlink, as in the real 2026-07-19 trigger"; fi
+
+J_UM=$(python3 "$SWEEP" --json --repo "$UM_REPO" 2>/dev/null)
+if echo "$J_UM" | has_path_in "d['tier1']" "$TMP/wt-um-merged"; then ok "unmapped-gitlink degradation: merged+clean+old worktree still reaches tier1 (submodule fact degrades per-path instead of poisoning UNKNOWN)"; else no "unmapped-gitlink poisoned tier1 classification (submodule check failure not degraded)"; fi
+
 # 4. --reap-tier1 --dry-run touches nothing
 COUNT_BEFORE=$(git -C "$REPO" worktree list | wc -l)
 python3 "$SWEEP" --repo "$REPO" --worktree-root "$WS" --reap-tier1 --dry-run >/dev/null 2>&1
@@ -349,6 +428,35 @@ d = json.load(sys.stdin)
 assert set(d.keys()) >= {'tier1','tier2','tier3'}
 assert isinstance(d['tier1'], list) and isinstance(d['tier2'], dict) and isinstance(d['tier3'], list)
 " 2>/dev/null && ok "--json shape matches the documented contract" || no "--json shape check failed"
+
+# 8. Report ergonomics (automated-researcher#533): a reason string shared by a large fraction of one tier's
+#    entries collapses into a single summary line + a flat path list, instead of repeating the full reason
+#    and action commands once per entry — the real 2026-07-19 sweep produced 40 duplicate "inspection
+#    needed" lines from one shared root cause, burying the one actionable fact in noise. Exercised directly
+#    against render_text() (a synthetic report) rather than via real fixtures — the collapsing is a pure
+#    function of reason-string repetition, not of any particular git state.
+python3 -c "
+import sys, io, contextlib
+sys.path.insert(0, '$HERE')
+import worktree_sweep as ws
+
+def entry(i, reason):
+    return {'repo': '/r', 'path': f'/wt/{i}', 'branch': 'b', 'owner': None, 'tier': 3, 'reason': reason,
+            'action': {'kind': 'inspect', 'commands': [f'git -C /wt/{i} status']}}
+
+many_same = [entry(i, 'inspection needed: shared root cause') for i in range(8)]
+few_distinct = [entry(100 + i, f'distinct reason {i}') for i in range(2)]
+results = {'tier1': [], 'tier2': {}, 'tier3': many_same + few_distinct}
+
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    ws.render_text(results)
+out = buf.getvalue()
+
+assert '[8 worktrees, same root cause] inspection needed: shared root cause' in out, 'shared reason not collapsed:\n' + out
+assert out.count('git -C /wt/') == 2, 'collapsed entries must not repeat action commands: ' + out
+assert 'distinct reason 0' in out and 'distinct reason 1' in out, 'distinct (non-repeated) reasons must still render individually: ' + out
+" && ok "report ergonomics: a reason shared by most of a tier collapses; distinct reasons still render individually" || no "report ergonomics: collapse behavior check failed"
 
 if [ "$fails" = 0 ]; then echo "smoke: all groups passed"; else echo "smoke: FAILURES present (see FAIL lines above)"; fi
 exit "$fails"
