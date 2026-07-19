@@ -32,6 +32,7 @@ import argparse
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import time
@@ -39,6 +40,16 @@ import time
 DEFAULT_MIN_AGE_DAYS = 7
 DEFAULT_OWNER_DEPTH = 1
 DEFAULT_DEFAULT_BRANCH = "main"
+
+# Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
+# entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
+# identically), which buried the one actionable fact in noise instead of surfacing it once. A reason string
+# is collapsed to one summary line + a flat path list once it accounts for at least this fraction of ITS
+# OWN tier/owner-group's flagged entries (never the whole sweep's total — see render_group), with a minimum
+# absolute count so a small group with a few genuinely identical reasons isn't collapsed just for reaching
+# the percentage.
+REPORT_COLLAPSE_FRACTION = 0.2
+REPORT_COLLAPSE_MIN_COUNT = 5
 
 
 def log(msg):
@@ -60,6 +71,19 @@ def run_git(args, cwd, timeout=30):
         return None, "", "timeout"
     except (FileNotFoundError, OSError) as e:
         return None, "", str(e)
+
+
+def run_git_bytes(args, cwd, timeout=30):
+    """Same contract as run_git, but stdout/stderr stay raw bytes — used for `git show <ref>:<path>`, where
+    decoding through `text=True` (locale-dependent, universal-newline-translating) would corrupt a
+    byte-for-byte comparison against a binary or non-UTF8 file."""
+    try:
+        p = subprocess.run(["git", "-C", cwd] + args, capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return None, b"", b"timeout"
+    except (FileNotFoundError, OSError) as e:
+        return None, b"", str(e).encode()
 
 
 def load_live_sessions():
@@ -193,6 +217,185 @@ def merged_fact(repo, head, default_ref):
     return None  # any other exit (bad ref, unresolvable object, timeout) -> UNKNOWN, never a guess
 
 
+def dirty_untracked_entries(path):
+    """(entries, ok) — entries is the list of (status_code, relpath) for every dirty (tracked, changed) or
+    untracked file in `path`, never ignored. Used only by content_identical_fact below. NUL-parsed (`-z`)
+    rather than line-based, so a path containing a space/newline/quote can't be mis-split the way the
+    plain-line `--porcelain` parsing in status_facts() would (that parsing only ever needs prefix/count,
+    never the exact path, so it's safe as-is; this one hands paths to `open()`, so it isn't). ok=False
+    (entries=None) on any status failure — fails that fact closed, same as every other check here."""
+    rc, out, _ = run_git(["status", "--porcelain=v1", "--untracked-files=all", "--ignored", "-z"], cwd=path)
+    if rc != 0:
+        return None, False
+    entries = []
+    tokens = out.split("\0")
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if not tok:
+            continue
+        code, filepath = tok[:2], tok[3:]
+        if code[0] in ("R", "C") and i < len(tokens):
+            i += 1  # skip the old-path token git emits for renames/copies in -z mode
+        if code == "!!":
+            continue
+        entries.append((code, filepath))
+    return entries, True
+
+
+def content_identical_fact(repo, path, head, default_ref):
+    """Squash-merge-aware ALTERNATIVE to `merged_fact` (automated-researcher#533): under a squash-merge PR
+    flow, a worktree's branch is never itself merged into the default branch — its content lands as a new,
+    unrelated squashed commit — so `merged_fact` returns a confirmed False forever, and no experiment/design
+    worktree from such a repo could ever reach tier 1, however clean and old.
+
+    Reaping the WORKTREE (never the branch ref itself — `remove_action`'s best-effort `git branch -d` is a
+    no-op here since the branch genuinely isn't an ancestor, and that failure is already non-fatal, so the
+    ref simply survives) only risks losing content that exists NOWHERE else: every file this worktree's
+    HEAD commit records, plus everything `git status` reports on top of it (besides ignored files, which
+    already block tier 1 independently). True when ALL of that is byte-identical to `default_ref` — i.e.
+    the tree contains zero content the default branch doesn't already have.
+
+    Two passes, deliberately not one uniform per-file scan (efficiency, and it changes what a "no" means):
+
+    1. **Committed tree vs `default_ref`** — a single `git diff --name-only <default_ref> <head>` (a plain
+       two-tree diff; no common-ancestor requirement, so it works precisely when `merged_fact` can't). An
+       EMPTY result is a confirmed "every tracked file already matches" — this is what actually lets a
+       clean, already-squash-landed worktree through (a fully clean worktree has nothing else to check). A
+       NON-EMPTY result is a confirmed, deterministic "no" (`False`, not UNKNOWN): git has just told us
+       specific files genuinely differ, which is a real answer, not a failed check — this is what keeps an
+       otherwise-clean-but-genuinely-unmerged branch (real content of its own, not reflected on the default
+       branch under any commit) correctly OUT of this alternative, the same as before this feature existed.
+    2. **Working-tree residue on top of that** (untracked files, and uncommitted edits to tracked files —
+       git diff's tree comparison above never sees these) — compared file-by-file against `default_ref`.
+       None (UNKNOWN) on ANY failure to complete one of these comparisons: the local file can't be read, or
+       `git show <default_ref>:<path>` errors for ANY reason, including the path simply not existing at
+       `default_ref` at all. That last case reads as UNKNOWN rather than a confirmed "different" on purpose
+       (scope note, automated-researcher#533): a per-file compare failure fails this fact closed exactly
+       like every other fact in this script, rather than the script guessing which kind of failure it saw.
+
+       A path carrying a STAGED ADD/MODIFY (index status other than ' '/'?'/'D') is checked TWICE — the
+       index blob AND the working-tree file, each independently against `default_ref` (round-2 Codex review,
+       automated-researcher#537): a status like `MM` (staged AND further unstaged-modified) means the index
+       holds content the working-tree read alone never sees, so a worktree can have its working-tree file
+       coincidentally byte-identical to `default_ref` while the staged blob holds unique content that exists
+       nowhere else — exactly what a bare working-tree-only comparison would wave through and then lose. A
+       staged DELETION ('D' as the index status) is excluded from this extra check: it has no index blob to
+       read at all (`git show :<path>` fails against a path the index no longer has), and removing a
+       tracked path from the index never withholds unique content the way an add/modify can — the working-
+       tree read below (or step 1's committed-tree diff, for a path the disk copy also lacks) already covers
+       whatever's actually still present.
+
+       Identity requires byte-identical AND MODE-identical content (100644/100755/120000) — not bytes alone
+       (senior-engineer round, automated-researcher#537): an uncommitted `chmod +x` on a tracked file is
+       byte-identical to `default_ref` but a distinct mode, and a forced reap riding a byte-only "identical"
+       verdict would silently discard that mode change. A symlink is compared by its LINK TARGET, never by
+       reading through it — the previous plain `open()` read followed a symlink to its target's content,
+       which could coincidentally byte-match `default_ref`'s copy of a REGULAR file at that path while the
+       symlink itself (a wholly different, unique thing) got waved through as "identical" and lost on reap.
+       Any other on-disk type at a residue path (fifo, socket, device — `git status` never lists these, so
+       only a directory-vs-file mismatch should reach this branch in practice) fails the fact closed, same
+       as every other unreadable case here.
+    """
+    rc, out, _ = run_git(["diff", "--name-only", default_ref, head], cwd=repo)
+    if rc != 0:
+        return None
+    if out.strip():
+        return False  # confirmed: this branch carries tracked content the default branch doesn't have
+
+    entries, ok = dirty_untracked_entries(path)
+    if not ok:
+        return None
+    if not entries:
+        return True
+
+    ref_modes = ls_tree_modes(repo, default_ref)
+    if ref_modes is None:
+        return None
+    index_modes = ls_files_modes(path)
+    if index_modes is None:
+        return None
+
+    for code, rel in entries:
+        ref_mode = ref_modes.get(rel)
+        if ref_mode is None:
+            return None  # path absent from default_ref -> UNKNOWN, same as the show-failure case below
+        rc, remote_bytes, _ = run_git_bytes(["show", f"{default_ref}:{rel}"], cwd=repo)
+        if rc != 0:
+            return None
+        if code[0] not in (" ", "?", "D"):
+            idx_mode = index_modes.get(rel)
+            if idx_mode is None:
+                return None
+            if idx_mode != ref_mode:
+                return False
+            rc_idx, index_bytes, _ = run_git_bytes(["show", f":{rel}"], cwd=path)
+            if rc_idx != 0:
+                return None
+            if index_bytes != remote_bytes:
+                return False
+        full = os.path.join(path, rel)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            return None
+        if stat.S_ISLNK(st.st_mode):
+            local_mode = "120000"
+            try:
+                local_bytes = os.readlink(full).encode()
+            except OSError:
+                return None
+        elif stat.S_ISREG(st.st_mode):
+            local_mode = "100755" if st.st_mode & stat.S_IXUSR else "100644"
+            try:
+                with open(full, "rb") as f:
+                    local_bytes = f.read()
+            except OSError:
+                return None
+        else:
+            return None  # not a regular file or symlink -> fail closed, never guess
+        if local_mode != ref_mode:
+            return False
+        if remote_bytes != local_bytes:
+            return False
+    return True
+
+
+def ls_tree_modes(repo, ref):
+    """path -> git mode string (e.g. "100644") for every entry in `ref`'s tree, via a single `ls-tree -r -z`
+    (NUL-separated so a tab/newline-containing path parses exactly, same discipline as
+    `dirty_untracked_entries`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look up
+    the default-ref side of its per-file mode comparison without one `git show`-style call per residue
+    entry."""
+    rc, out, _ = run_git(["ls-tree", "-r", "-z", ref], cwd=repo)
+    if rc != 0:
+        return None
+    modes = {}
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, relpath = record.partition("\t")
+        modes[relpath] = meta.split(" ", 1)[0]
+    return modes
+
+
+def ls_files_modes(path):
+    """path -> git mode string for every entry in `path`'s INDEX, via `ls-files -s -z` (NUL-separated, same
+    reasoning as `ls_tree_modes`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look
+    up a staged add/modify's own recorded mode, independent of the working-tree file's mode."""
+    rc, out, _ = run_git(["ls-files", "-s", "-z"], cwd=path)
+    if rc != 0:
+        return None
+    modes = {}
+    for record in out.split("\0"):
+        if not record:
+            continue
+        meta, _, relpath = record.partition("\t")
+        modes[relpath] = meta.split(" ", 1)[0]
+    return modes
+
+
 def behind_ahead_facts(repo, default_ref):
     if not default_ref:
         return None, None
@@ -206,7 +409,8 @@ def behind_ahead_facts(repo, default_ref):
 
 def submodule_fact(path):
     """True if `path` contains at least one INITIALIZED (checked-out) submodule, False if it has none or
-    only uninitialized ones, None (UNKNOWN) if the check itself fails.
+    only uninitialized ones, None (UNKNOWN) only if BOTH the primary check and its degraded fallback below
+    fail to produce an answer.
 
     Verified empirically: `git worktree remove` unconditionally refuses ("fatal: working trees containing
     submodules cannot be moved or removed") once ANY submodule is initialized, regardless of whether that
@@ -215,11 +419,39 @@ def submodule_fact(path):
     index but never checked out — an empty directory) does NOT trigger this refusal.
     `git submodule status` prefixes an uninitialized submodule with '-'; any other prefix (' ' up to date,
     '+' out of sync with the index, 'U' conflicted) means it's checked out.
+
+    `git submodule status` exits non-zero (128) the moment ANY gitlink in the tree lacks a `.gitmodules`
+    mapping — repo-wide for that worktree, not just for the unmapped path (automated-researcher#533's
+    real-world trigger: one historical gitlink with no `.gitmodules` entry made this fail identically for
+    EVERY worktree whose checkout contained that path, which previously read as UNKNOWN and disqualified
+    every one of them from tier 1 for a reason that had nothing to do with their own submodule state).
+    On that failure, fall back to a per-path scan of the index's gitlink entries (mode 160000 in
+    `git ls-files -s`) and check each one directly for a `.git` entry (git's own initialized-vs-not
+    signal) — this degrades a broken `.gitmodules` mapping to a real answer instead of poisoning the whole
+    fact, and still correctly reports True the moment any OTHER, properly-initialized submodule is found.
+    The fallback parses `-z` (NUL-separated) output, not plain `splitlines()` (senior-engineer round,
+    automated-researcher#537): `git ls-files -s` C-quotes a tab/newline-containing path in its default
+    output (e.g. a literal `dir\ttab/inner` renders as `"dir\ttab/inner"`, backslash-t and all), so
+    `os.path.exists()` on that literal quoted spelling would miss the real on-disk path and read a genuinely
+    initialized submodule as absent — `-z` emits the raw, unquoted path instead, and a newline-containing
+    path would otherwise also be shredded by `splitlines()` regardless of quoting.
     """
     rc, out, _ = run_git(["submodule", "status"], cwd=path)
-    if rc != 0:
-        return None
-    return any(line and not line.startswith("-") for line in out.splitlines())
+    if rc == 0:
+        return any(line and not line.startswith("-") for line in out.splitlines())
+
+    log(f"'git submodule status' failed (rc={rc}) for {path} — falling back to a per-path gitlink scan "
+        "instead of marking the whole worktree's submodule fact UNKNOWN (likely an unmapped gitlink)")
+    rc2, out2, _ = run_git(["ls-files", "-s", "-z"], cwd=path)
+    if rc2 != 0:
+        return None  # both checks failed -> genuinely UNKNOWN, fail closed same as before
+    for record in out2.split("\0"):
+        if not record.startswith("160000") or "\t" not in record:
+            continue
+        rel = record.split("\t", 1)[1]
+        if os.path.exists(os.path.join(path, rel, ".git")):
+            return True
+    return False
 
 
 def owner_of(path, root, depth):
@@ -260,8 +492,16 @@ def inspect_action(path):
     return {"kind": "inspect", "commands": [gitcmd("-C", path, "status"), gitcmd("-C", path, "log", "-1")]}
 
 
-def remove_action(repo, path, branch, default_branch):
-    cmds = [gitcmd("-C", repo, "worktree", "remove", path)]
+def remove_action(repo, path, branch, default_branch, force=False):
+    """`force` must be set whenever this tier-1 classification relied on the content-identity bar
+    (`squash_safe`) rather than git's own clean bar (Codex review, automated-researcher#537 round 1): git
+    unconditionally refuses a bare `worktree remove` on a working tree carrying ANY modified-tracked or
+    untracked file, regardless of whether that content is byte-identical to the default branch — exactly
+    the "matching residue" case this PR's own SKILL.md documents as needing `--force`/manual removal. A
+    worktree that's genuinely git-clean doesn't need `--force`, but passing it there too is harmless (git
+    still checks history/attachedness first; `--force` only lifts the dirty/untracked refusal), so callers
+    pass `force=squash_safe` unconditionally rather than re-deriving "was this actually dirty" themselves."""
+    cmds = [gitcmd("-C", repo, "worktree", "remove", *(["--force"] if force else []), path)]
     # NEVER suggest (or later execute) deleting the ref matching the configured default branch name
     # (round-3 code-review Finding 2): a linked worktree can legitimately be checked out ON the default
     # branch itself (git only forbids the SAME branch checked out twice, not a linked worktree on main
@@ -371,11 +611,20 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     merged = merged_fact(repo, head, default_ref)
     age_days = age_days_fact(path, now_ts)
     has_submodule = submodule_fact(path)
+
+    # content-identity: the squash-merge-aware ALTERNATIVE to `merged` (automated-researcher#533) — only
+    # worth computing when `merged` is a CONFIRMED False (a real ancestry check ran and failed); `merged is
+    # None` is a different, unrelated failure (unresolvable ref/object) already routed to UNKNOWN below.
+    content_identical = None
+    if merged is False and default_ref is not None and head:
+        content_identical = content_identical_fact(repo, path, head, default_ref)
+    squash_safe = content_identical is True
+
     unknown = (dirty is None or untracked is None or ignored is None or merged is None or age_days is None
-               or has_submodule is None)
+               or has_submodule is None or (merged is False and content_identical is None))
 
     if unknown:
-        reason = "inspection needed: a status/log/merge-base check failed for this worktree"
+        reason = "inspection needed: a status/log/merge-base/content-identity check failed for this worktree"
         if liveness == "live":
             results["tier2"].setdefault(owner, []).append(dict(base, tier=2, reason=reason, action=inspect_action(path)))
         else:
@@ -385,6 +634,12 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         return
 
     is_old = age_days >= args.min_age_days
+    merge_ok = bool(merged) or squash_safe
+    # clean_ok folds in the content-identity alternative: when squash_safe holds, every dirty/untracked
+    # file this worktree carries is confirmed byte-identical to the default branch already, so the
+    # classic "not dirty and zero untracked" bar isn't the only way to be clean — nothing is lost by
+    # reaping regardless (the worktree's branch ref survives `git branch -d`'s no-op the same as always).
+    clean_ok = (not dirty and untracked == 0) or squash_safe
     # ignored == 0 is part of the tier-1 bar, NOT of stray_or_stale (code-review Finding 1): ignored
     # build-artifact clutter (node_modules, __pycache__, a venv) is common and harmless to leave alone,
     # so it doesn't need to nag a live tier2/3 report every week — but it DOES need to block automatic
@@ -395,17 +650,20 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # ignored content, an otherwise-safe worktree carrying an INITIALIZED submodule can't be silently left
     # alone — `git worktree remove` unconditionally refuses it, so it must be flagged (not silently
     # skipped) for a human to remove manually or with --force.
-    det_safe = merged and not dirty and untracked == 0 and ignored == 0 and is_old and not has_submodule
-    submodule_blocks_reap = (merged and not dirty and untracked == 0 and ignored == 0 and is_old
-                              and has_submodule)
-    stray_or_stale = dirty or untracked > 0 or (not merged and is_old) or submodule_blocks_reap
+    det_safe = merge_ok and clean_ok and ignored == 0 and is_old and not has_submodule
+    submodule_blocks_reap = merge_ok and clean_ok and ignored == 0 and is_old and has_submodule
+    stray_or_stale = ((dirty or untracked > 0) and not squash_safe) or (not merge_ok and is_old) or submodule_blocks_reap
 
     if not (det_safe or stray_or_stale):
         return  # in-progress (unmerged+fresh), just-merged-and-fresh, or merged+clean+old-but-ignored-content
 
+    clean_old_phrase = (f"merged, clean, {age_days}d old" if merged else
+                        f"clean (all residue already on {args.default_branch} — squash-merge equivalent), "
+                        f"{age_days}d old")
+
     if det_safe and liveness == "not_live":
-        entry = dict(base, tier=1, reason=f"merged, clean, {age_days}d old — safe to reap",
-                     action=remove_action(repo, path, branch, args.default_branch))
+        entry = dict(base, tier=1, reason=f"{clean_old_phrase} — safe to reap",
+                     action=remove_action(repo, path, branch, args.default_branch, force=squash_safe))
         results["tier1"].append(entry)
         reap_plan.append(dict(entry, kind="remove", owner=owner, merged=merged, dirty=dirty,
                                untracked=untracked, ignored=ignored, age_days=age_days, head=head))
@@ -413,20 +671,20 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
 
     if det_safe:
         if liveness == "live":
-            reason = f"merged, clean, {age_days}d old, but {owner} is live — confirm this is really unused before it's reaped"
+            reason = f"{clean_old_phrase}, but {owner} is live — confirm this is really unused before it's reaped"
         else:  # "unknown" — treated the same as live for safety (never reaped), reported distinctly
-            reason = (f"merged, clean, {age_days}d old, but owner '{owner}' liveness could not be verified "
+            reason = (f"{clean_old_phrase}, but owner '{owner}' liveness could not be verified "
                       "this sweep — treated conservatively, not reaped")
     else:
         bits = []
-        if dirty:
+        if dirty and not squash_safe:
             bits.append("dirty")
-        if untracked:
+        if untracked and not squash_safe:
             bits.append(f"{untracked} untracked")
-        if not merged and is_old:
+        if not merge_ok and is_old:
             bits.append(f"unmerged, {age_days}d old, no one continuing it")
         if submodule_blocks_reap:
-            bits.append(f"merged, clean, {age_days}d old, but contains an initialized submodule "
+            bits.append(f"{clean_old_phrase}, but contains an initialized submodule "
                         "(`git worktree remove` refuses these — needs manual or forced removal)")
         reason = "; ".join(bits)
         if liveness == "unknown":
@@ -495,6 +753,13 @@ def do_reap(reap_plan, dry_run, default_branch):
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
             continue
         dirty, untracked, ignored = status_facts(path)
+        # Re-check the submodule safety gate too (round-2 Codex review, automated-researcher#537): classification
+        # already refuses tier 1 to any worktree with an INITIALIZED submodule (`git worktree remove`
+        # unconditionally refuses those), but that check was never repeated here — a submodule initialized
+        # in the gap between classification and this reap (e.g. `git submodule update --init` run in the
+        # worktree) would otherwise be force-removed anyway, since --force lifts the dirty/untracked refusal
+        # this loop already re-verifies but was never gated on submodule state at reap time.
+        has_submodule_now = submodule_fact(path)
         head_now = run_git(["rev-parse", "HEAD"], cwd=path)[1].strip()
         head_unchanged = bool(head_now) and head_now == item.get("head")
         # Re-resolve the default ref and re-check ancestry too (round-3 code-review Finding 3): mergedness
@@ -503,14 +768,29 @@ def do_reap(reap_plan, dry_run, default_branch):
         # between classification and this reap. Re-verify both, independently.
         default_ref_now = resolve_default_ref(repo, default_branch)
         merged_now = merged_fact(repo, head_now, default_ref_now) if head_now else None
-        still_safe = (dirty is False and untracked == 0 and ignored == 0 and head_unchanged and merged_now is True)
+        # Re-check the squash-merge content-identity alternative too, same as classification (process_entry)
+        # — a squash-merge branch's `merged_now` is a confirmed False forever, so gating solely on
+        # `merged_now is True` would make every content-identity-qualified tier-1 item SKIP here
+        # unconditionally, defeating the whole point of the alternative bar at the one moment it matters.
+        content_identical_now = None
+        if merged_now is False and default_ref_now is not None and head_now:
+            content_identical_now = content_identical_fact(repo, path, head_now, default_ref_now)
+        squash_safe_now = content_identical_now is True
+        merge_ok_now = bool(merged_now) or squash_safe_now
+        clean_ok_now = (dirty is False and untracked == 0) or squash_safe_now
+        still_safe = (clean_ok_now and ignored == 0 and head_unchanged and merge_ok_now
+                      and has_submodule_now is False)
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
             continue
         if dry_run:
             log(f"DRY-RUN would remove: path={path} branch={branch} head={item.get('head')}")
             continue
-        rc, _, err = run_git(["worktree", "remove", path], cwd=repo)
+        # --force is required whenever this reap is riding the content-identity bar rather than git's own
+        # clean bar (Codex review, automated-researcher#537 round 1): a bare `worktree remove` unconditionally
+        # refuses a working tree carrying modified-tracked/untracked content, even when that content is
+        # byte-identical to the default branch — harmless to pass when the tree is also genuinely clean.
+        rc, _, err = run_git(["worktree", "remove"] + (["--force"] if squash_safe_now else []) + [path], cwd=repo)
         if rc != 0:
             log(f"REMOVE FAILED: path={path}: {err.strip()}")
             fails += 1
@@ -528,6 +808,37 @@ def do_reap(reap_plan, dry_run, default_branch):
     return fails
 
 
+def render_group(lines, entries):
+    """Renders one tier's (or one tier-2 owner's) entries, collapsing any reason string shared by AT LEAST
+    a threshold of THIS group's own entries into a single summary line + a flat path list, instead of
+    repeating the full reason and action commands once per entry. The threshold is computed from `len(entries)`
+    — this group's own size, never the whole sweep's total (Codex review, automated-researcher#537 round 1):
+    a shared-total denominator let a large tier/owner group dilute a small one's share, so a tier with five
+    identical entries stayed uncollapsed whenever other tiers/owners were big enough. Inclusive comparison
+    (round 2): a group whose size lands EXACTLY on the threshold (e.g. 5 entries against the 5-count minimum)
+    must still collapse, matching the documented "at least" wording above and in SKILL.md/module docstring —
+    a strict `>` left that boundary case uncollapsed. Order-preserving: reasons render in first-seen order,
+    and entries within an uncollapsed reason render in their original order."""
+    collapse_at = max(REPORT_COLLAPSE_MIN_COUNT, len(entries) * REPORT_COLLAPSE_FRACTION)
+    by_reason = {}
+    order = []
+    for it in entries:
+        if it["reason"] not in by_reason:
+            order.append(it["reason"])
+        by_reason.setdefault(it["reason"], []).append(it)
+    for reason in order:
+        group = by_reason[reason]
+        if len(group) >= collapse_at:
+            lines.append(f"- [{len(group)} worktrees, same root cause] {reason}")
+            for it in group:
+                lines.append(f"    {it['path']} [{it['branch'] or '(detached)'}]")
+        else:
+            for it in group:
+                lines.append(f"- {it['path']} [{it['branch'] or '(detached)'}] — {it['reason']}")
+                for c in it["action"]["commands"]:
+                    lines.append(f"    $ {c}")
+
+
 def render_text(results):
     lines = []
     t1, t2, t3 = results["tier1"], results["tier2"], results["tier3"]
@@ -536,25 +847,16 @@ def render_text(results):
         return
     if t1:
         lines.append(f"## Tier 1 — safe to reap ({len(t1)})")
-        for it in t1:
-            lines.append(f"- {it['path']} [{it['branch'] or '(detached)'}] — {it['reason']}")
-            for c in it["action"]["commands"]:
-                lines.append(f"    $ {c}")
+        render_group(lines, t1)
     if t2:
-        total = sum(len(v) for v in t2.values())
-        lines.append(f"\n## Tier 2 — owner investigates ({total})")
+        owner_total = sum(len(v) for v in t2.values())
+        lines.append(f"\n## Tier 2 — owner investigates ({owner_total})")
         for owner in sorted(t2):
             lines.append(f"### owner: {owner}")
-            for it in t2[owner]:
-                lines.append(f"- {it['path']} [{it['branch'] or '(detached)'}] — {it['reason']}")
-                for c in it["action"]["commands"]:
-                    lines.append(f"    $ {c}")
+            render_group(lines, t2[owner])
     if t3:
         lines.append(f"\n## Tier 3 — researcher residual ({len(t3)})")
-        for it in t3:
-            lines.append(f"- {it['path']} [{it['branch'] or '(detached)'}] — {it['reason']}")
-            for c in it["action"]["commands"]:
-                lines.append(f"    $ {c}")
+        render_group(lines, t3)
     print("\n".join(lines))
 
 

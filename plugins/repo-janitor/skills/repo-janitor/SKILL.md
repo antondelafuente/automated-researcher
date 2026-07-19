@@ -38,7 +38,14 @@ Per worktree (`git worktree list --porcelain`, including the repo's own primary 
 dirty, untracked count, merged-into-default, commit age, and for the primary checkout, behind/ahead of
 origin — is **fail-closed tri-state**: a `git status`/`log`/`merge-base` call that errors or times out
 leaves that fact `UNKNOWN`, which disqualifies the worktree from tier 1 and routes it to tier 2/3 tagged
-"inspection needed" — never silently treated as the safe value.
+"inspection needed" — never silently treated as the safe value. The submodule check specifically
+**degrades instead of poisoning the whole worktree**: `git submodule status` fails repo-wide the moment
+*any* gitlink lacks a `.gitmodules` mapping, so on that failure the sweep falls back to a per-path scan of
+the index's gitlink entries instead of marking the fact `UNKNOWN` outright — a single historical broken
+mapping no longer disqualifies every worktree that happens to contain it from tier 1. That fallback parses
+`git ls-files -s -z` (NUL-separated), not the plain-line default: git C-quotes a tab/newline-containing path
+in normal output, so a plain-line parse checking for that literal quoted spelling on disk would miss a
+genuinely initialized submodule at such a path and silently let it through a forced reap.
 
 1. **Deterministic ("safe to reap")** — merged into the default branch, clean of both tracked changes AND
    untracked files, carries no ignored content either, and older than `--min-age-days`; or the worktree's
@@ -57,7 +64,36 @@ leaves that fact `UNKNOWN`, which disqualifies the worktree from tier 1 and rout
    ("merged+clean+old, but you're live — confirm this is really unused before it's reaped"). **The
    configured default branch's own ref is never deleted**, even for a linked worktree checked out directly
    on it (trivially "merged") — only its worktree directory is removed, never the branch, since other
-   worktrees/operations depend on that ref existing.
+   worktrees/operations depend on that ref existing. An **initialized submodule** also blocks tier 1
+   outright, merged+clean+old or not (`git worktree remove` unconditionally refuses a working tree that
+   contains one) — flagged into tier 2/3 instead of silently skipped, since only a human can remove it
+   manually or with `--force`.
+   **Content-identity, the squash-merge-aware alternative to "merged"** (automated-researcher#533): under a
+   squash-merge PR flow, a branch's own commit is never itself an ancestor of the default branch — its
+   content lands as a new, unrelated squashed commit — so the plain ancestry check above never passes for
+   it, permanently, however clean and old. A worktree also qualifies for tier 1 when every file it carries
+   beyond `default_ref` — its committed tree (a direct two-tree diff against `default_ref`, not an ancestry
+   check) plus any dirty/untracked residue on top — is byte-identical AND mode-identical to the same path
+   there: the tree contains zero content the default branch doesn't already have, so reaping the *worktree*
+   (never the branch ref — the best-effort `git branch -d` is simply a no-op for a non-ancestor branch, and
+   that failure is already non-fatal, so the ref survives on its own) loses nothing. Mode identity
+   (100644/100755/120000) is checked alongside bytes, not instead of them: an uncommitted `chmod +x` on a
+   tracked file is byte-identical to the default branch but a distinct mode, and a symlink is compared by
+   its link target, never by reading through it to whatever it points at — either mismatch fails this bar,
+   even when the raw bytes would otherwise "match." A worktree that's still genuinely unmerged and carries
+   content of its own not reflected anywhere on the default branch is unaffected by this — it's excluded
+   exactly as before, or reads `UNKNOWN` (never a guess) if a comparison itself can't complete. **A path with
+   a staged add/modify is checked against both the index blob and the working-tree file, independently** — a
+   status like `MM` (staged, then further modified unstaged) means the working-tree file can coincidentally
+   match the default branch while the staged blob still holds unique content (and its own mode) that exists
+   nowhere else; checking the working tree alone would miss that and reap it anyway. A staged deletion needs
+   no such check (there's no index blob left to compare). **The reap itself
+   passes `--force`** whenever this bar (rather than plain
+   mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
+   to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
+   unconditionally refuses, regardless of whether that content is a byte-for-byte match — `--force` is
+   harmless to pass on a worktree that's also genuinely git-clean, so the reap doesn't need to re-derive
+   which case it's in.
 2. **Owner-session investigates** — stray content (dirty/untracked), or a stale unmerged branch nobody is
    continuing, whose derived owner reads as *live*. The report asks that owner to investigate and
    disposition it (or escalate) — ownership assigns *investigation responsibility*, not a memory test: a
@@ -80,7 +116,12 @@ the fact(s) that triggered its tier and a **suggested action** — but the actio
 safe to hand out: a tier-1/prunable entry gets a ready-to-run removal (`git worktree remove` [+ `git branch
 -d` if merged], or `git worktree prune`); a tier-2/3 entry with unresolved dirty/untracked content gets an
 **inspection** command instead (a bare `git worktree remove` refuses a dirty worktree, so printing it there
-would just fail — inspect first, get an explicit disposition, then remove).
+would just fail — inspect first, get an explicit disposition, then remove). When a single reason string
+accounts for a large share of one tier's entries (one shared root cause hitting many worktrees identically
+— a 2026-07-19 real sweep produced 40 such duplicate lines from one unmapped gitlink), the human report
+collapses that group into one summary line plus a flat path list instead of repeating the full reason and
+action per entry, so the shared root cause isn't buried in noise. `--json` is unaffected — every entry is
+always listed individually there for a machine consumer to group however it needs.
 
 `--json` emits `{"tier1": [...], "tier2": {"<owner>": [...]}, "tier3": [...]}` — each entry has `repo`,
 `path`, `branch`, `owner`, `tier`, `reason`, and `action` (`{"kind": "remove"|"prune"|"inspect",
@@ -99,8 +140,13 @@ fails, behind/ahead is `UNKNOWN` for that repo (never a stale number silently pr
 
 `--reap-tier1` performs the deletions this same invocation just classified as tier 1: prunable entries via
 `git worktree prune`, merged+clean+old entries via `git worktree remove` (re-verified immediately before
-deleting, as a defense against the state changing mid-sweep) + a best-effort `git branch -d`. `--dry-run`
-(only meaningful with `--reap-tier1`) logs every removal it would perform without touching anything.
+deleting, as a defense against the state changing mid-sweep — including whether the worktree has since
+gained an initialized submodule, re-checked the same as at classification, not just status/identity/HEAD) +
+a best-effort `git branch -d` — `--force` is added to the `remove` whenever the content-identity bar above
+(not plain mergedness) is what qualified the entry, since that path's byte-identical dirty/untracked residue
+is exactly what a bare `remove` refuses.
+`--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
+anything.
 
 **A scheduled/standing invocation of this sweep must never pass `--reap-tier1`.** Deletion happens only on
 researcher approval, or on deterministic tier-1 evidence the researcher has explicitly, separately
@@ -148,5 +194,9 @@ This plugin owns the classification + report format only. An instance wires:
 live-owner tier-1 veto, fail-closed UNKNOWN handling, the silent cases, `--fetch` freshness, `--reap-tier1`
 with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored content never reaching tier
 1 (with a `status.showUntrackedFiles=no` config bypass attempt), the default branch's ref surviving a reap
-of a linked worktree checked out on it, and a locked (un-removable) tier-1 worktree failing without
-blocking other removals.
+of a linked worktree checked out on it, a locked (un-removable) tier-1 worktree failing without blocking
+other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass, a
+fail-closed novel-content case, a chmod-only mode-mismatch case, and an untracked-symlink mode-mismatch
+case), the per-path submodule-fact degradation on an unmapped gitlink (including a tab-quoted path carrying
+a genuinely initialized submodule, which the NUL-safe fallback parse must still find), and the human
+report's same-reason collapsing.
