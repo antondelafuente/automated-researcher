@@ -16,11 +16,27 @@ name: reconcile-prs
 #   - `mergeable == MERGEABLE` but the head has no completed codex review yet: re-fire review-on-pr.yml via
 #     its `workflow_dispatch` actuator (the residual true-event-loss case, if one exists).
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
+#
+# automated-researcher#513: GitHub emits no event when a PR becomes conflicted, but the event that CAUSES
+# a conflict IS observable -- every merge is a push to main. The `push` trigger below is now the primary,
+# low-latency detector (a sibling merge lands, this fires within ~a minute); the cron stays as the backstop
+# for lost events and crashed runs. Because `mergeable` is computed lazily, a push-triggered run can see
+# `UNKNOWN` (GitHub's background job hasn't finished) where the cron -- ticking minutes later -- would
+# already see the settled value; the reconcile step below retries UNKNOWN a few times before giving up for
+# the tick, rather than treating it as "fine" (which would let a genuinely CONFLICTING PR go unresolved).
+# The `concurrency` group below serializes overlapping sweeps: a merge burst can fire several pushes within
+# seconds, and two sweeps racing over the same PR list could double-dispatch a resolution round.
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch: {}
+
+concurrency:
+  group: reconcile-prs
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -69,6 +85,14 @@ jobs:
           CONFLICT_GRACE_SECONDS=$((55 * 60))
           REVIEW_GRACE_SECONDS=$((30 * 60))
           now_epoch=$(date -u +%s)
+
+          # Lazy-mergeability retry (automated-researcher#513): right after a push, GitHub's mergeability
+          # computation is still running in the background and the API reports UNKNOWN until it finishes.
+          # A few short retries give a push-triggered run a real chance to see the settled CONFLICTING/
+          # MERGEABLE value itself, instead of routinely deferring to the next cron tick and losing most
+          # of the push trigger's latency win.
+          MERGEABILITY_RETRY_ATTEMPTS=3
+          MERGEABILITY_RETRY_SECONDS=10
 
           # last_marker_comment REPO PR_NUMBER MARKER -> most recent matching comment (or "null"), via the
           # same canon_login duplication idiom review-on-pr.yml's history step uses (a jq filter can't
@@ -218,6 +242,20 @@ jobs:
             mergeable=$(jq -r '.mergeable' <<<"$pr")
             head_sha=$(jq -r '.headRefOid' <<<"$pr")
 
+            # Retry a lazily-unresolved UNKNOWN a few times before moving on: never treat it as "fine"
+            # (that would let a genuinely CONFLICTING PR sit unresolved until the next run), and never
+            # dispatch on it directly (only a computed CONFLICTING may dispatch a resolution round).
+            retry_attempt=1
+            while [ "$mergeable" = "UNKNOWN" ] && [ "$retry_attempt" -lt "$MERGEABILITY_RETRY_ATTEMPTS" ]; do
+              sleep "$MERGEABILITY_RETRY_SECONDS"
+              if ! mergeable=$(gh pr view "$n" --repo "$REPO" --json mergeable --jq '.mergeable'); then
+                echo "::warning::PR #$n: re-checking mergeability failed; leaving unresolved for this tick"
+                mergeable="UNKNOWN"
+                break
+              fi
+              retry_attempt=$((retry_attempt + 1))
+            done
+
             # Fault-isolate each PR: one PR's transient API failure must not abort reconciliation of every
             # other PR in the same tick (the reconciler is level-triggered and self-healing -- the next
             # tick, ~10 minutes later, simply retries). `if ! fn; then` is the standard idiom for capturing
@@ -233,6 +271,8 @@ jobs:
                   echo "::warning::PR #$n: review re-fire handling failed this tick"
                 fi
                 ;;
-              *) echo "PR #$n: mergeable status '$mergeable' not yet resolved by GitHub; skipping this tick" ;;
+              *)
+                echo "PR #$n: mergeable status '$mergeable' still not resolved by GitHub after $retry_attempt attempt(s); leaving for the next run"
+                ;;
             esac
           done
