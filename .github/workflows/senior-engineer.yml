@@ -173,9 +173,13 @@ jobs:
 
           # Cutoff = the later of the last APPROVED codex review and the last `needs-human` removal --
           # adjudication comments at or before this point belong to a round that has already resolved
-          # (converged, or cleared by a human) and must not count against the current one.
+          # (converged, or cleared by a human) and must not count against the current one. Restricted to
+          # codex-engineer[bot] specifically (canon_login idiom shared with review-on-pr.yml's own approval
+          # cutoff and reconcile-prs.yml) -- an unfiltered APPROVED would let any other reviewer's approval
+          # reset the cutoff and silently extend the round budget past the guard's intended 2-round trip.
           last_approved=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
-            add // [] | map(select(.state == "APPROVED")) | sort_by(.submitted_at) | last | .submitted_at // "1970-01-01T00:00:00Z"
+            def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
+            add // [] | map(select(.state == "APPROVED" and ((.user.login | canon_login) == "codex-engineer[bot]"))) | sort_by(.submitted_at) | last | .submitted_at // "1970-01-01T00:00:00Z"
           ')
           last_clearance=$(gh api "repos/$REPO/issues/$PR_NUMBER/events" --paginate | jq -s '
             add // [] | map(select(.event == "unlabeled" and .label.name == "needs-human")) | sort_by(.created_at) | last | .created_at // "1970-01-01T00:00:00Z"
