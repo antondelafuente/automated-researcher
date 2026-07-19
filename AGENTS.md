@@ -88,8 +88,10 @@ agentic-engineering#43).
   - **P1 (non-blocking):** style, minor edge cases, suggestions, simplification opportunities. Recorded in
     the review body for a later human pass; never blocks merge on its own.
   - **follow-up-suggested (non-blocking):** a finding that is correct but outside the issue's declared
-    scope/non-goals. Recorded in the review body, never blocks `APPROVE`; the implementor does not expand
-    the PR to cover it (see `.github/prompts/address-review.md`'s scope-adjudication step).
+    scope/non-goals. The review output schema's `severity` enum has no third value for this (`P0`/`P1`
+    only) — encode it as `P1` with a literal `[follow-up-suggested]` prefix on the summary, so it renders
+    distinguishably in the review body without a schema change. Never blocks `APPROVE`; the implementor
+    does not expand the PR to cover it (see `.github/prompts/address-review.md`'s scope-adjudication step).
   <!-- CODEX-REVIEW-GUIDANCE:END -->
 - **The scale principle** (researcher-stated policy, quoted verbatim — not agent paraphrase): "~10
   concurrent agents, a handful of researchers; robustness is priced at that scale; rarity alone never
