@@ -29,16 +29,20 @@ name: reconcile-prs
 #     or a dispatch mention that silently failed to post, strands the PR with no further pipeline event ever
 #     arriving. This third leg re-derives the same round count submit-verdict uses and re-posts (or
 #     escalates past) the same auto-dispatch mention.
-#   - `needs-senior-engineer` present with no senior-engineer-agent[bot] adjudication comment newer than the
-#     label's most recent application, and that application is older than a grace window
-#     (automated-researcher#529): the label alone doesn't prove a summons ran, or is even still in flight --
-#     a workflow_dispatch that failed after the label landed (or whose rollback below also failed) strands
-#     the PR labeled with nothing behind it. The sweep used to skip every needs-senior-engineer PR
-#     unconditionally, which left a stranded one deadlocked forever (it can never regain a pipeline event on
-#     its own). This leg re-dispatches senior-engineer.yml (same `summoned_by=reconciler` marker as the
-#     conflict leg above) instead of leaving it stranded; a PR with a fresh adjudication comment is left
-#     alone since the label's normal lifecycle (adjudicate job clears it, or converts it to needs-human) is
-#     already in progress.
+#   - `needs-senior-engineer` present with the label (or, if newer, the most recent senior-engineer-agent[bot]
+#     adjudication comment) older than a grace window (automated-researcher#529, round-2 review fix): the
+#     label alone doesn't prove a summons ran, or is even still in flight -- a workflow_dispatch that failed
+#     after the label landed (or whose rollback below also failed) strands the PR labeled with nothing behind
+#     it. A comment newer than the label does NOT prove the run finished successfully either: the
+#     senior-engineer agent posts its guidance/escalation comment directly via its own `gh` call mid-run, so a
+#     crash or timeout right after posting -- before the workflow's own verify/clear steps run -- leaves the
+#     label stranded with a comment already sitting in front of it. Since every successful completion path
+#     (the adjudicate job's clear step, or loop-guard-escalate's label swap) removes needs-senior-engineer, the
+#     label still being present is the authoritative "not yet finished" signal regardless of comments; a
+#     comment only extends the in-flight grace window, it never suppresses recovery indefinitely. The sweep
+#     used to skip every needs-senior-engineer PR unconditionally, which left a stranded one deadlocked
+#     forever (it can never regain a pipeline event on its own). This leg re-dispatches senior-engineer.yml
+#     (same `summoned_by=reconciler` marker as the conflict leg above) instead of leaving it stranded.
 # See AGENTS.md "GitHub-native SWE pipeline (BYOK)" for the full trust model this implements.
 #
 # automated-researcher#513: GitHub emits no event when a PR becomes conflicted, but the event that CAUSES
@@ -112,8 +116,9 @@ jobs:
           # the same in-flight window as the conflict leg's mention applies -- same idiom, same value.
           STRANDED_GRACE_SECONDS=$CONFLICT_GRACE_SECONDS
           # Fourth leg (automated-researcher#529): comfortably above senior-engineer.yml's own 30-minute
-          # Claude-CLI timeout on its `adjudicate` job -- a needs-senior-engineer label applied more
-          # recently than this is treated as a summons still in flight, not yet stranded.
+          # Claude-CLI timeout on its `adjudicate` job -- needs-senior-engineer activity (the label
+          # application, or a later adjudication comment) more recent than this is treated as a summons
+          # still in flight, not yet stranded.
           SENIOR_ENGINEER_GRACE_SECONDS=$((40 * 60))
           # Shared budget with review-on-pr.yml's submit-verdict step (its LIMIT=3) -- this leg re-derives
           # and re-acts on the SAME consecutive-CHANGES_REQUESTED count, not a separate counter, so a PR
@@ -146,13 +151,18 @@ jobs:
             '
           }
 
-          # handle_stranded_senior_engineer (automated-researcher#529): decouples the sweep's
-          # needs-senior-engineer skip from the label's mere presence. Skips only when a
-          # senior-engineer-agent[bot] adjudication comment newer than the label's latest application
-          # exists (the normal in-flight/completed case -- senior-engineer.yml's own `adjudicate` job owns
-          # clearing or converting the label from there). Otherwise, once the label is older than
-          # SENIOR_ENGINEER_GRACE_SECONDS with no such comment, the summons that was supposed to run never
-          # produced adjudication evidence -- re-dispatch it rather than leaving the PR deadlocked.
+          # handle_stranded_senior_engineer (automated-researcher#529, round-2 review fix): decouples the
+          # sweep's needs-senior-engineer skip from the label's mere presence -- but a senior-engineer-agent
+          # adjudication comment newer than the label does NOT by itself prove the run finished (see the
+          # header comment above this job's steps for why: the agent posts that comment directly via its own
+          # `gh` call mid-run, so a crash or timeout right after posting -- before senior-engineer.yml's own
+          # verify/clear steps run -- leaves the label stranded behind a comment that already exists).
+          # needs-senior-engineer being present at all is the authoritative "not yet finished" signal (every
+          # successful completion path removes it); a comment only extends the in-flight grace window from
+          # its own timestamp rather than the label's, since a run that comments late is still plausibly
+          # finishing up. Once the later of the label application and the last adjudication comment is older
+          # than SENIOR_ENGINEER_GRACE_SECONDS with the label still present, re-dispatch rather than leaving
+          # the PR deadlocked.
           handle_stranded_senior_engineer() {
             local n="$1"
 
@@ -179,18 +189,19 @@ jobs:
               echo "::warning::PR #$n: reading senior-engineer-agent comment history failed; skipping this tick"
               return 1
             fi
+
+            local reference_ts="$label_ts"
             if [ -n "$comment_ts" ] && [[ "$comment_ts" > "$label_ts" ]]; then
-              echo "PR #$n: needs-senior-engineer set, adjudication comment posted at $comment_ts after label applied at $label_ts; skipping"
-              return
+              reference_ts="$comment_ts"
             fi
 
-            local elapsed=$(( now_epoch - $(date -u -d "$label_ts" +%s) ))
+            local elapsed=$(( now_epoch - $(date -u -d "$reference_ts" +%s) ))
             if [ "$elapsed" -lt "$SENIOR_ENGINEER_GRACE_SECONDS" ]; then
-              echo "PR #$n: needs-senior-engineer applied ${elapsed}s ago with no adjudication comment yet; treating as still in flight, skipping this tick"
+              echo "PR #$n: needs-senior-engineer activity (label applied at $label_ts, most recent adjudication comment at ${comment_ts:-none}) as recently as ${elapsed}s ago; treating as still in flight, skipping this tick"
               return
             fi
 
-            echo "PR #$n: needs-senior-engineer applied ${elapsed}s ago with no adjudication comment since -- that summons appears stranded (e.g. a dispatch that failed, or failed and whose rollback also failed); re-dispatching senior-engineer.yml"
+            echo "PR #$n: needs-senior-engineer applied at $label_ts (most recent adjudication comment at ${comment_ts:-none}) with no activity in the last ${elapsed}s and the label still present -- that summons appears stranded (e.g. a dispatch that failed, a run that crashed or timed out after posting its comment, or a label-removal that itself failed); re-dispatching senior-engineer.yml"
             if ! gh workflow run senior-engineer.yml --repo "$REPO" -f "pr_number=$n" -f "summoned_by=reconciler"; then
               echo "::warning::PR #$n: workflow_dispatch of senior-engineer.yml failed; leaving needs-senior-engineer in place for a later tick to retry"
               return 1

@@ -181,12 +181,16 @@ agentic-engineering#43).
   leg below); `mergeable == MERGEABLE` with no completed codex review at the current head → re-fire
   `review-on-pr.yml` via the actuator above (the residual true-event-loss case, if one exists). It skips a
   PR already carrying `needs-human` — that's a person's call to clear. `needs-senior-engineer` is not an
-  unconditional skip (automated-researcher#529): the sweep skips it only while a
-  `senior-engineer-agent[bot]` adjudication comment newer than the label's latest application exists (that
-  leg is already in progress or done); once the label is older than its own grace window with no such
-  comment, the summons that was supposed to run behind it never produced adjudication evidence, and the
-  sweep re-dispatches `senior-engineer.yml` itself rather than leaving the PR permanently stranded labeled
-  with nothing behind it.
+  unconditional skip (automated-researcher#529): the label being present at all is the authoritative
+  "not yet finished" signal (every successful completion path removes it), so the sweep skips only while
+  the label application, or a later `senior-engineer-agent[bot]` adjudication comment, is within a grace
+  window of now. A comment does not by itself prove the run finished — the agent posts it directly via its
+  own `gh` call mid-run, so a crash or timeout right after posting (before senior-engineer.yml's own
+  verify/clear steps run) would otherwise strand the label behind a comment that looks like completed work;
+  a comment only extends the in-flight grace window from its own timestamp instead of suppressing recovery
+  indefinitely. Once the later of the two is older than the grace window with the label still present, the
+  summons that was supposed to run behind it never produced verified adjudication, and the sweep
+  re-dispatches `senior-engineer.yml` itself rather than leaving the PR permanently stranded.
 - **Label lifecycle:** a ticket rests unlabeled until a triager pass assesses it (#437's original batch
   design, evolved by #497 into a per-ticket event-driven leg plus a backstop sweep leg: proposes a flip,
   posted as an on-ticket assessment comment, for the researcher to confirm; v2: acts autonomously within the
