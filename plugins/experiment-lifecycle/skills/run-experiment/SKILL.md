@@ -609,6 +609,15 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   population. Measured effect from the incident that surfaced this: 1.5-1.9/s -> 6.0-6.7/s (3-4x) at
   concurrency 96-128, same model/prompts/decoding config, with no data-validity change — this is a pure
   scheduling fix (when result-to-input identity is carried through, as above).
+- **`tinker.ServiceClient().create_sampling_client(...).sample(...)` returns a plain
+  `concurrent.futures.Future`, not `tinker.APIFuture` — wrap it, don't call `.result_async()` on it (#552).**
+  `tinker.APIFuture` exists in the SDK namespace and does have `.result_async()` as a real coroutine method,
+  which makes it easy to assume that's what `.sample()` returns — it isn't: `.sample()` returns a plain
+  `concurrent.futures.Future` (`type(fut)` -> `<class 'concurrent.futures._base.Future'>`), which has no
+  `.result_async()` and crashes an asyncio-native driver instantly on `AttributeError: 'Future' object has no
+  attribute 'result_async'`, before any rows are written. Wrap it with `asyncio.wrap_future(fut)` instead — the
+  same `wrap_future` call the completion-order drain loop above already needs for a `concurrent.futures.Future`
+  — then use the result directly in `asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)`.
 - **Smoke-test ladder, always.** Small model first (and any multi-unit path tested small) → smoke → full model → smoke →
   real run. Never jump straight to the full model. On a NEW dataset, smoke the first batches (memory is data-dependent).
 - **Read full samples at every stage** — *actual text*, not just aggregates. This is enforced as a **STANDING two-layer
