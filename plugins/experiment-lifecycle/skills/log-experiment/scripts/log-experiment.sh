@@ -492,6 +492,12 @@ GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
 # out from under it. Never merge-base/ancestry (unsound for a squash-merged branch — the head SHA is never
 # an ancestor of base) and never a force-push. Any other push failure (auth, network, a genuinely conflicting
 # live branch) dies immediately with no recovery attempt.
+# The SHA check above and the delete below are two separate round-trips, so a push landing in between would
+# otherwise race past an already-passed check. Close that gap with --force-with-lease=<ref>:<expect> on the
+# delete itself: git refuses the delete server-side unless the remote ref is STILL at REMOTE_SHA at delete
+# time, so a concurrent update lands as a lease rejection, never a deletion of live work (verified against a
+# scratch bare repo: a lease keyed to a now-stale SHA is rejected "stale info" and the branch survives; keyed
+# to the current SHA it deletes cleanly).
 push_to_branch() {
   local out rc=0
   out="$(git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH" 2>&1)" || rc=$?
@@ -514,8 +520,9 @@ if ! push_to_branch; then
   [ "$STALE_PR_SHA" = "$REMOTE_SHA" ] \
     || die "push to $BRANCH rejected; PR #$STALE_PR (head=$BRANCH) is MERGED, but its head SHA ($STALE_PR_SHA) does not match the branch's CURRENT remote SHA ($REMOTE_SHA) — the branch name has been reused since that merge (e.g. a concurrent run or a newer un-merged PR owns it now) and deleting it would destroy live work; manual recovery: check the branch's current PR/commits on $RESEARCH_REPO before deciding ($PUSH_ERR)"
   note "PR #$STALE_PR (head=$BRANCH) is MERGED and its head SHA matches the branch's current remote SHA — deleting the stale remote branch and retrying the push once"
-  git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" --delete "$BRANCH" \
-    || die "could not delete stale remote branch $BRANCH (confirmed MERGED via PR #$STALE_PR, SHA-verified) — manual recovery needed"
+  git -C "$WT" -c credential.helper= push -q --force-with-lease="refs/heads/$BRANCH:$REMOTE_SHA" \
+    "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" ":refs/heads/$BRANCH" \
+    || die "could not delete stale remote branch $BRANCH (confirmed MERGED via PR #$STALE_PR, SHA-verified) — the remote ref moved past $REMOTE_SHA since that check (a concurrent push?) and the lease-guarded delete was refused, so no branch was destroyed; re-run to re-check the branch's current state"
   push_to_branch || die "push to $BRANCH still failed after deleting its stale merged branch (PR #$STALE_PR): $PUSH_ERR"
 fi
 HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
