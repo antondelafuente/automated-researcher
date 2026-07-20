@@ -223,12 +223,16 @@ jobs:
           # regardless of page count.
           reviews=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s --argjson allow "$REVIEW_ALLOW" '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-            add // [] | map(select((.body // "") != "" and ((.user.login | canon_login) as $c | ($allow | index($c)) != null)))
+            (add // []) as $all
+              | if ($all | type) != "array" then error("reviews fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+              | map(select((.body // "") != "" and ((.user.login | canon_login) as $c | ($allow | index($c)) != null)))
               | map({ts: .submitted_at, kind: "review", user: .user.login, state, body})
           ')
           comments=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s --argjson allow "$COMMENT_ALLOW" --argjson noise "$NOISE_PREFIXES" '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-            add // [] | map(select((.user.login | canon_login) as $c | ($allow | index($c)) != null))
+            (add // []) as $all
+              | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+              | map(select((.user.login | canon_login) as $c | ($allow | index($c)) != null))
               | map(select(((.body // "") as $body | $noise | any(. as $prefix | $body | startswith($prefix))) | not))
               | map({ts: .created_at, kind: "comment", user: .user.login, state: null, body})
           ')
@@ -427,7 +431,8 @@ jobs:
           # against the review this same step is about to post.
           prior_round=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-            add // []
+            (add // []) as $all
+              | if ($all | type) != "array" then error("reviews fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
               | map(select((.user.login | canon_login) == "codex-engineer[bot]" and (.state == "APPROVED" or .state == "CHANGES_REQUESTED")))
               | sort_by(.submitted_at)
               | reduce .[] as $r (0; if $r.state == "CHANGES_REQUESTED" then . + 1 else 0 end)

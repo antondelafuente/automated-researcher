@@ -173,7 +173,9 @@ jobs:
             local n="$1" marker="$2"
             gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg marker "$marker" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              add // [] | map(select(((.user.login | canon_login) == "codex-engineer[bot]") and ((.body // "") | startswith($marker))))
+              (add // []) as $all
+                | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select(((.user.login | canon_login) == "codex-engineer[bot]") and ((.body // "") | startswith($marker))))
                 | sort_by(.created_at) | last
             '
           }
@@ -198,7 +200,9 @@ jobs:
             # absence (which would trigger a spurious re-dispatch).
             local label_ts
             if ! label_ts=$(gh api "repos/$REPO/issues/$n/events" --paginate | jq -r -s '
-              add // [] | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | sort_by(.created_at) | last | .created_at // empty
+              (add // []) as $all
+                | if ($all | type) != "array" then error("events fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select(.event == "labeled" and .label.name == "needs-senior-engineer")) | sort_by(.created_at) | last | .created_at // empty
             '); then
               echo "::warning::PR #$n: reading needs-senior-engineer label history failed; skipping this tick"
               return 1
@@ -211,7 +215,9 @@ jobs:
             local comment_ts
             if ! comment_ts=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -r -s '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              add // [] | map(select((.user.login | canon_login) == "senior-engineer-agent[bot]")) | sort_by(.created_at) | last | .created_at // empty
+              (add // []) as $all
+                | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select((.user.login | canon_login) == "senior-engineer-agent[bot]")) | sort_by(.created_at) | last | .created_at // empty
             '); then
               echo "::warning::PR #$n: reading senior-engineer-agent comment history failed; skipping this tick"
               return 1
@@ -345,7 +351,9 @@ jobs:
             local mentions_json
             if ! mentions_json=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg since "$review_submitted_at" --argjson allow "$DISPATCH_MENTION_ALLOW" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              (add // []) | map(select(((.user.login | canon_login) as $c | ($allow | index($c)) != null)
+              (add // []) as $all
+                | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select(((.user.login | canon_login) as $c | ($allow | index($c)) != null)
                 and ((.body // "") | contains("@claude-code-engineer"))
                 and (.created_at >= $since)))
                 | sort_by(.created_at)
@@ -406,7 +414,9 @@ jobs:
             local review_info
             if ! review_info=$(gh api "repos/$REPO/pulls/$n/reviews" --paginate | jq -s --arg head "$head" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              (add // []) | map(select((.user.login | canon_login) == "codex-engineer[bot]"))
+              (add // []) as $all
+                | if ($all | type) != "array" then error("reviews fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select((.user.login | canon_login) == "codex-engineer[bot]"))
                 | {at_head: (map(select(.commit_id == $head)) | sort_by(.submitted_at) | last), all: .}
             '); then
               echo "::warning::PR #$n: reading review history failed; skipping this tick"
