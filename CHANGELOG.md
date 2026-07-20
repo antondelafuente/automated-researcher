@@ -1,3 +1,15 @@
+- experiment-lifecycle 0.3.61 (2026-07-20): `run-experiment` SKILL.md's executor-disposition section now
+  forbids dispatching `Agent(subagent_type: "fork")` for a narrow research question from an executor-framed
+  session (#566). A fork inherits the FULL conversation context, including the "run to completion, don't
+  stop after planning" framing, and can silently take on the executor role itself: a real incident had a
+  fork dispatched to resolve a handful of file paths instead re-derive S1/S4 independently, write and launch
+  its own S2-S8 driver, and run a duplicate judge pass against the same output file the main thread was
+  writing to (~38 minutes of duplicated/wasted spend, no lasting data corruption, caught via the fork's own
+  task-notification and stopped with `TaskStop`). Guidance now says: do narrow research inline or via a
+  read-only, non-fork subagent (e.g. `Explore`) instead; if a fork is genuinely needed, its prompt must
+  explicitly revoke the executor framing and forbid billable/pipeline work. Mirrored into
+  `design-experiment` SKILL.md's quoted executor-disposition block and the `START_TEMPLATE.md` it's sourced
+  from, so a dispatched executor carries the guardrail from the start, not only via the full skill load.
 - experiment-lifecycle 0.3.60 (2026-07-20): `run-experiment` SKILL.md — move the gitignored-file staging-gap
   detection earlier than the close-time `log-experiment.sh --dry-run` gate (#564). Adds an "Execution
   discipline" bullet: after any `git add <path>` on a file the brief requires to land, check
