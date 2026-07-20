@@ -151,6 +151,16 @@ are not.** Pin:
   is supposed to catch. (This is the generative half; Step 2's design-audit runs the adversarial half — it
   checks the enumeration is complete and the design sits at max fan-out per step, or the researcher explicitly
   declined it.)
+- **A candidate-generation oversample ratio must be sized against the FULL gate pipeline, not just the
+  admission screens.** When a new component's authoring spec pins a length band (or any other draw-gate
+  beyond mode), the schedule table's oversample-ratio reasoning has to account for that draw-gate's
+  attrition too — the admission screens (political/leakage) passing cleanly gives false confidence that
+  enough candidates were drawn (real case, csp1-recipe-reconstruction-1: a component needed both a Task-2
+  mode gate and a 300-1500 character length gate; the screens passed 12/12 candidates on the first batch,
+  but the length gate, interacting with the generation template's short-translation/single-step-math
+  flavors, only let 3/12 through even after a pinned redraw-once — recovered with 2 mechanical backfill
+  batches, ~$1-2 extra spend). Before fixing the ratio, gut-check: does the generation template's own
+  instruction plausibly produce output that clears every gate in the pipeline, not just the screens?
 - **Cost estimate** (GPU $/hr × runtime; API cascade) — one of the three currencies from the posture note above
   (the other two are wall-clock and researcher-attention; implementation effort is never a fourth): price each
   step's max-fan-out alternative alongside its serialized form. "Cheaper" only counts if the billing model
