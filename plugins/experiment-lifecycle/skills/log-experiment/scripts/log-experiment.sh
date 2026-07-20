@@ -387,7 +387,7 @@ check_ignored_files() {
     note "--skip-ignored: proceeding anyway (acknowledged)"
     return 0
   fi
-  die "$KIND has gitignored file(s) excluded from the staged commit (listed above) — if this is an intentional R2-scale exclusion, re-run with --skip-ignored; if any of these should have been committed (e.g. a small pinned instrument file sharing an ignored extension), fix the .gitignore or rename/relocate the file, then retry"
+  die "$KIND has gitignored file(s) excluded from the staged commit (listed above) — if this is an intentional R2-scale exclusion, re-run with --skip-ignored; if any of these should have been committed (e.g. a small pinned instrument file sharing an ignored extension), fix the .gitignore or rename/relocate the file, then retry — NOTE: a per-branch 'git add -f' does NOT make a file survive this staging step (this worktree is fresh off origin/$BASE_BRANCH and stages with a plain 'git add'); see run-experiment's SKILL.md R2-vs-git guidance for the rename-to-a-non-ignored-extension fix (automated-researcher#553)"
 }
 stage_worktree() {
   git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"

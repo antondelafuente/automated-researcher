@@ -442,6 +442,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   of MB into git to satisfy a reproducibility read. If the close audit raises a remote-only reproducibility
   finding, the canonical triage response is to point at the verified `ARTIFACT_MANIFEST.md` + upload (accept-
   with-manifest), recorded in the audit-response section like any other finding.
+  **A per-branch `git add -f` does NOT survive landing (automated-researcher#553).** Force-adding a small
+  pinned record (screen verdicts, slot sets, data-audit samples) past the blanket `registry/**/*.jsonl`
+  ignore rule commits it on your own branch, but `log-experiment` stages from a FRESH worktree off
+  `origin/$BASE_BRANCH` with a plain `git add` (no `-f`) — that worktree has never seen your branch's
+  commit, so the ignore rule still applies in full there and the staging check BLOCKs. The mechanism that
+  actually survives landing: rename the file to a non-ignored extension (e.g. `.jsonl` → `.json`, converting
+  NDJSON content to a genuine JSON array under that name) so a plain `git add` stages it cleanly in ANY
+  worktree, author's or fresh — don't reach for `git add -f` on a file meant to land.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
   (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
