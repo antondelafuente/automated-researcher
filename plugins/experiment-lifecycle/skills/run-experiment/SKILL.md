@@ -544,6 +544,21 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 
 ## Execution discipline (how to run the science well)
 
+- **Verify a `git add` on a newly-built file actually staged it — a clean exit is not evidence (#564).** Git
+  silently omits any path matching `.gitignore` from BOTH `git add` and `git status --short`, with zero visual
+  difference from "already committed, nothing new" — so a dropped file gives no error and no signal at the
+  moment it's dropped. On `csp1-natural-dose-bridge-1`, 4 DESIGN.md-mandated pinned control-draw slot files
+  under a `registry/**/*.jsonl` ignore rule sat silently untracked through an ENTIRE run — build, train, serve,
+  judge, aggregate, upload, `RESULTS.md`, close-audit — surfaced only by `log-experiment.sh`'s `--dry-run`
+  staging gate at the very end, after all the real GPU/API spend was already sunk. **The check, right after any
+  `git add <path>` on a file your brief requires to land:** `git status --short -- <path>` must actually list
+  the file, unless it's already in a prior commit (`git log -1 --name-only -- <path>` shows it) — a file that's
+  neither staged nor already committed silently didn't land. Run this check within minutes of building the
+  file, not only at close, where the same gap would otherwise ride the whole run unrecorded. The mechanism that
+  actually survives landing is automated-researcher#553's fix — rename to a non-ignored extension (e.g.
+  `.jsonl` → `.json`, an NDJSON→JSON-array conversion) so a plain `git add` stages it in ANY worktree — never
+  reach for `git add -f`, which does not survive `log-experiment`'s fresh-worktree restaging (see the close
+  section above).
 - **Parallelize, then iterate.** Run a batch at once (parallel units); use the *whole set* to decide the next batch.
   **Independent units (training runs, evals, API calls) run concurrently by default** — serialize only when it buys
   something real (a validation gate, a true data dependency, a shared-resource limit), matching the design's own
