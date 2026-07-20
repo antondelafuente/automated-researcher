@@ -989,7 +989,9 @@ jobs:
             # instead of us creating our own comment.
             existing_id=$(gh api "repos/$REPO/issues/$n/comments" --paginate | jq -s --arg marker "$ASSESSMENT_MARKER_PREFIX" '
               def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-              add // [] | map(select(((.user.login // "" | canon_login) == "claude-code-engineer[bot]") and ((.body // "") | startswith($marker))))
+              (add // []) as $all
+                | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+                | map(select(((.user.login // "" | canon_login) == "claude-code-engineer[bot]") and ((.body // "") | startswith($marker))))
                 | sort_by(.created_at) | last | .id // empty
             ')
             if [ -n "$existing_id" ]; then
@@ -1195,7 +1197,9 @@ jobs:
           # App identity is treated as "our" existing rollup comment to PATCH.
           existing_id=$(gh api "repos/$REPO/issues/${DIGEST_ISSUE}/comments" --paginate | jq -s --arg marker "$MARKER" '
             def canon_login: if startswith("app/") then (.[4:] + "[bot]") else . end;
-            add // [] | map(select(((.user.login // "" | canon_login) == "claude-code-engineer[bot]") and ((.body // "") | startswith($marker))))
+            (add // []) as $all
+              | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+              | map(select(((.user.login // "" | canon_login) == "claude-code-engineer[bot]") and ((.body // "") | startswith($marker))))
               | sort_by(.created_at) | last | .id // empty
           ')
           if [ -n "$existing_id" ]; then
