@@ -218,7 +218,10 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   this experiment to completion — do not end your turn until you hit a real blocker or you're done; stopping after
   planning is the failure mode. Mechanical/reversible gap → pick a sensible default, record it, keep going.
   Load-bearing gap (changes method/cost/meaning) → notify the researcher and work AROUND it; only a gap that blocks the
-  whole run stops you, and then you notify + arm your self-wake — NEVER park silently."*
+  whole run stops you, and then you notify + arm your self-wake — NEVER park silently. Never dispatch
+  `Agent(subagent_type: "fork")` for a narrow research question — the fork inherits this whole disposition and can
+  silently take on the executor role itself; do narrow research inline or via a read-only, non-fork subagent
+  instead (see `run-experiment`'s executor-disposition section for the incident and the full guardrail)."*
 - **Don't-redesign:** the design is locked; execute per `DESIGN.md`; collect + report the data it specifies (no verdict).
 - **Exact input paths + scripts to adapt**, with filename caveats (a filename can lie about its contents — verify by
   content, not name). Point at battle-tested worked-example drivers; don't make the executor write from scratch.

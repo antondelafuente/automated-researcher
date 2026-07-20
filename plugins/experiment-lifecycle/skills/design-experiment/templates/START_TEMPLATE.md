@@ -10,7 +10,10 @@ watches your progress; talk to it with clear status lines.
 > method/cost/meaning) → notify the designer-of-record and work AROUND it; only a gap that blocks the whole run stops
 > you, and then you notify + arm your self-wake — NEVER park silently. The design is locked: execute per `DESIGN.md`,
 > collect the data it specifies and report it (the numbers / plot); do not redesign and do not pre-register a verdict —
-> interpretation is the researcher's separate step.
+> interpretation is the researcher's separate step. Never dispatch `Agent(subagent_type: "fork")` for a narrow research
+> question — the fork inherits this whole disposition and can silently take on the executor role itself; do narrow
+> research inline or via a read-only, non-fork subagent instead (see `run-experiment`'s executor-disposition section
+> for the incident and the full guardrail).
 
 ## Your one job
 <One sentence: build/train/eval X, upload, report. What new data point this produces.>

@@ -46,6 +46,16 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   a load-bearing flag to the designer-of-record, not a unilateral change.
 - **Record your gaps.** The defaults you had to invent and the things you had to flag are **feedback that grades the
   design**: surface them in the close retro (too many = the design wasn't pinned enough → the design skill needs work).
+- **Never dispatch `Agent(subagent_type: "fork")` from this executor-framed session for a narrow research question.**
+  A fork inherits your FULL conversation context, including this very disposition — "run to completion, don't stop
+  after planning, don't ask questions" — so it can silently take on the executor role itself instead of just
+  answering what you asked, duplicating billable pipeline work and racing you on shared work-dir/registry paths
+  (real incident: a fork dispatched to resolve a handful of file paths instead re-derived S1/S4 independently, wrote
+  and launched its own S2-S8 driver, and ran a duplicate judge pass against the same output file the main thread was
+  writing to — ~38 minutes of wasted spend before it was caught and stopped). Do narrow research **inline** (read the
+  files yourself) or via a **read-only, non-fork subagent** (e.g. `Explore`) instead. If a fork is genuinely needed,
+  its prompt MUST explicitly revoke the executor framing and forbid billable/pipeline work: *"you are NOT the
+  executor; do not write pipeline files or launch any generation/training/judging — answer only: ..."*.
 
 ## Your brief is your world — read it
 
