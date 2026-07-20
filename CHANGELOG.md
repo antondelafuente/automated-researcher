@@ -1,3 +1,12 @@
+- experiment-lifecycle 0.3.60 (2026-07-20): `run-experiment` SKILL.md — move the gitignored-file staging-gap
+  detection earlier than the close-time `log-experiment.sh --dry-run` gate (#564). Adds an "Execution
+  discipline" bullet: after any `git add <path>` on a file the brief requires to land, check
+  `git status --short -- <path>` actually lists it (or it's already in a prior commit) — git silently omits
+  ignored paths from both `git add` and `git status --short`, indistinguishable from "already committed,
+  nothing new." A real run's 4 DESIGN.md-mandated pinned slot files rode an entire multi-hour run untracked,
+  caught only by the close-time dry-run gate after all the GPU/API spend was sunk; this check catches it
+  within minutes instead. Points to automated-researcher#553's existing fix (rename to a non-ignored
+  extension) as the mechanism, not `git add -f`.
 - feedback-loop 0.1.12 (2026-07-19): add `engineer_gh_issue.sh` — a minimal, self-contained engineer-identity
   Issue filer for boxes that lack an `aar-engineering` checkout, so `wf.sh` isn't on PATH (#454). Mints a
   short-lived token via the instance-owned `WF_ENGINEER_TOKEN_CMD_<CLAUDE|CODEX>` seam (#149) and execs
