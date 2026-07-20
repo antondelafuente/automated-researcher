@@ -443,6 +443,15 @@ TOK="$($REVIEWER_MINT "$RESEARCH_REPO" 2>/dev/null || true)"
 # Validate repo access BEFORE any mutation (a token that can't reach the repo would strand a half-open PR).
 GH_TOKEN="$TOK" gh api "repos/$RESEARCH_REPO" -q .full_name >/dev/null 2>&1 \
   || die "reviewer token cannot access $RESEARCH_REPO (is the ${REVIEWER_FAMILY,,}-engineer App installed there?)"
+# #560 defense-in-depth: best-effort, read-only heads-up if $RESEARCH_REPO's own "Automatically delete head
+# branches" setting is off — that setting fixes the stale-reused-branch push failure (below) at the source,
+# but it's a DIFFERENT repo's setting than this one, so this script can only surface the recommendation, not
+# flip it. Never fails the run on this (informational only).
+# NOTE: no `// empty` here — jq's alternative operator treats `false` the same as `null` (both falsy), so
+# `.delete_branch_on_merge // empty` printed nothing (not "false") whenever the setting was actually off,
+# and the check below never matched. `.delete_branch_on_merge` alone prints the literal false/true/null.
+_delete_on_merge="$(GH_TOKEN="$TOK" gh api "repos/$RESEARCH_REPO" -q '.delete_branch_on_merge' 2>/dev/null || true)"
+[ "$_delete_on_merge" = "false" ] && note "heads-up: $RESEARCH_REPO has 'Automatically delete head branches' OFF (repo Settings > General > Pull Requests) — turning it on fixes stale-reused-branch push failures (#560) at the source; the push-time recovery below covers it either way"
 # Author-family token (the bot that pushes / creates / merges) + its commit identity. Fail closed.
 amint_var="LOG_EXPERIMENT_TOKEN_CMD_${AUTHOR_FAMILY^^}"
 AUTHOR_MINT="${!amint_var:-}"
@@ -471,7 +480,51 @@ GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
   git -C "$WT" commit -q -m "Log $KIND: $REL"
 # Push as the AUTHOR bot via a token-scoped remote, with credential helpers DISABLED so no ambient
 # credential machinery can participate (matches the hardened push convention). URL not persisted as a remote.
-git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH"
+# #560: a plain non-force push can be rejected non-fast-forward when a PRIOR run reused this same
+# deterministic branch name ($BRANCH = log/$SLUG, built above) and its merge left the remote head undeleted
+# (the merge step below already passes --delete-branch, so this means that deletion was skipped/failed on an
+# earlier run, or predates the flag — not routine). Recover exactly ONCE, and only when confirmed safe: the
+# stale branch's own PR (looked up by head=$BRANCH) must be MERGED **and** its recorded head SHA must match
+# the branch's CURRENT remote SHA. The SHA check matters because branch names are reused across separate
+# eras, not just once: `gh pr list --state merged --head=$BRANCH` matches on NAME alone, so it can surface an
+# old, unrelated merged PR while a concurrent run (or a newer, still-open PR) currently owns this exact
+# branch name with different, un-merged content — without the SHA check that live branch would be deleted
+# out from under it. Never merge-base/ancestry (unsound for a squash-merged branch — the head SHA is never
+# an ancestor of base) and never a force-push. Any other push failure (auth, network, a genuinely conflicting
+# live branch) dies immediately with no recovery attempt.
+# The SHA check above and the delete below are two separate round-trips, so a push landing in between would
+# otherwise race past an already-passed check. Close that gap with --force-with-lease=<ref>:<expect> on the
+# delete itself: git refuses the delete server-side unless the remote ref is STILL at REMOTE_SHA at delete
+# time, so a concurrent update lands as a lease rejection, never a deletion of live work (verified against a
+# scratch bare repo: a lease keyed to a now-stale SHA is rejected "stale info" and the branch survives; keyed
+# to the current SHA it deletes cleanly).
+push_to_branch() {
+  local out rc=0
+  out="$(git -C "$WT" -c credential.helper= push -q "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" "HEAD:refs/heads/$BRANCH" 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  PUSH_ERR="${out//$ATOK/***}"   # redact the embedded token before this is ever printed
+  return "$rc"
+}
+if ! push_to_branch; then
+  case "$PUSH_ERR" in
+    *"[rejected]"*|*"non-fast-forward"*|*"stale info"*) : ;;
+    *) die "push to $BRANCH failed: $PUSH_ERR" ;;
+  esac
+  note "push to $BRANCH rejected (stale remote branch from a prior run?) — checking whether a PR with head=$BRANCH is MERGED before recovering"
+  STALE_PR="$(GH_TOKEN="$TOK" gh pr list -R "$RESEARCH_REPO" --state merged --head "$BRANCH" --json number -q '.[0].number // empty' 2>/dev/null || true)"
+  [ -n "$STALE_PR" ] || die "push to $BRANCH rejected (stale remote branch) and no MERGED PR found with head=$BRANCH — refusing to delete an unconfirmed branch; manual recovery: check the branch's PR state on $RESEARCH_REPO, and if it's really a stale merged leak, 'git push origin --delete $BRANCH' then retry ($PUSH_ERR)"
+  STALE_PR_SHA="$(GH_TOKEN="$TOK" gh pr view "$STALE_PR" -R "$RESEARCH_REPO" --json headRefOid -q '.headRefOid // empty' 2>/dev/null || true)"
+  REMOTE_SHA="$(GH_TOKEN="$TOK" gh api "repos/$RESEARCH_REPO/git/ref/heads/$BRANCH" -q '.object.sha // empty' 2>/dev/null || true)"
+  [ -n "$STALE_PR_SHA" ] && [ -n "$REMOTE_SHA" ] \
+    || die "push to $BRANCH rejected and PR #$STALE_PR (head=$BRANCH) is MERGED, but could not resolve both its head SHA and the branch's current remote SHA to cross-check them — refusing to delete an unconfirmed branch; manual recovery: check the branch's current PR/commits on $RESEARCH_REPO, and if it's really a stale merged leak, 'git push origin --delete $BRANCH' then retry ($PUSH_ERR)"
+  [ "$STALE_PR_SHA" = "$REMOTE_SHA" ] \
+    || die "push to $BRANCH rejected; PR #$STALE_PR (head=$BRANCH) is MERGED, but its head SHA ($STALE_PR_SHA) does not match the branch's CURRENT remote SHA ($REMOTE_SHA) — the branch name has been reused since that merge (e.g. a concurrent run or a newer un-merged PR owns it now) and deleting it would destroy live work; manual recovery: check the branch's current PR/commits on $RESEARCH_REPO before deciding ($PUSH_ERR)"
+  note "PR #$STALE_PR (head=$BRANCH) is MERGED and its head SHA matches the branch's current remote SHA — deleting the stale remote branch and retrying the push once"
+  git -C "$WT" -c credential.helper= push -q --force-with-lease="refs/heads/$BRANCH:$REMOTE_SHA" \
+    "https://x-access-token:${ATOK}@github.com/${RESEARCH_REPO}.git" ":refs/heads/$BRANCH" \
+    || die "could not delete stale remote branch $BRANCH (confirmed MERGED via PR #$STALE_PR, SHA-verified) — the remote ref moved past $REMOTE_SHA since that check (a concurrent push?) and the lease-guarded delete was refused, so no branch was destroyed; re-run to re-check the branch's current state"
+  push_to_branch || die "push to $BRANCH still failed after deleting its stale merged branch (PR #$STALE_PR): $PUSH_ERR"
+fi
 HEAD_SHA="$(git -C "$WT" rev-parse HEAD)"   # bind the merge to exactly the reviewed commit
 
 # ---- post the already-run audit onto the PR as a browsable thread (additive, best-effort — NOT a re-run) ----
