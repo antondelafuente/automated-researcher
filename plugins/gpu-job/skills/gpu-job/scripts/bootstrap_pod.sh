@@ -8,6 +8,12 @@ set -euo pipefail
 # rclone pulls use it, and (below) written to /etc/environment so later pod shells / ssh eval-drivers
 # inherit it. Overridable — respects a value already set in the environment.
 export RCLONE_MULTI_THREAD_STREAMS="${RCLONE_MULTI_THREAD_STREAMS:-16}" RCLONE_MULTI_THREAD_CUTOFF="${RCLONE_MULTI_THREAD_CUTOFF:-100M}"
+# Disable huggingface_hub's Xet-accelerated downloader by default (automated-researcher #442): on a
+# fresh pod it silently stalls at zero bytes/sec on some host/network paths — no error, no timeout,
+# no retry, it just sits (root-caused via a raw curl range-GET on the same host hitting full
+# bandwidth, proving the network was fine and the stall was Xet-specific). Same resolved-value
+# persistence pattern as RCLONE_MULTI_THREAD_* above — overridable, and inherited by later shells.
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 if [ -n "${RCLONE_CONF_B64:-}" ]; then
   command -v rclone >/dev/null || (curl -fsSL https://rclone.org/install.sh | bash >/dev/null 2>&1)
   mkdir -p ~/.config/rclone
@@ -24,10 +30,10 @@ fi
 # overridable per-call. Needs a root pod (RunPod default); skipped gracefully otherwise.
 if [ "$(id -u)" = 0 ]; then
   # Persist the RESOLVED values (honors an override passed into bootstrap), per-key idempotent.
-  for kv in "RCLONE_MULTI_THREAD_STREAMS=$RCLONE_MULTI_THREAD_STREAMS" "RCLONE_MULTI_THREAD_CUTOFF=$RCLONE_MULTI_THREAD_CUTOFF"; do
+  for kv in "RCLONE_MULTI_THREAD_STREAMS=$RCLONE_MULTI_THREAD_STREAMS" "RCLONE_MULTI_THREAD_CUTOFF=$RCLONE_MULTI_THREAD_CUTOFF" "HF_HUB_DISABLE_XET=$HF_HUB_DISABLE_XET"; do
     grep -q "^${kv%%=*}=" /etc/environment 2>/dev/null || echo "$kv" >> /etc/environment
   done
-  echo "[bootstrap] rclone multi-thread defaults set"
+  echo "[bootstrap] rclone multi-thread + HF Xet defaults set"
 fi
 touch /workspace/.gpu-job-ready 2>/dev/null || touch ~/.gpu-job-ready
 echo "[bootstrap] ready"

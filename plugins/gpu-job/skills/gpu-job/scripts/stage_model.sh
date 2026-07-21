@@ -58,6 +58,10 @@ if rclone lsf "$REMOTE/" 2>/dev/null | grep -q .; then
 fi
 
 # 1. Download into a clean materialized tree (real bytes, not cache symlinks).
+# Disable the Xet-accelerated downloader (automated-researcher #442): it silently stalls at zero
+# bytes/sec on some host/network paths, no error/timeout/retry — root-caused via a raw curl
+# range-GET on the same host hitting full bandwidth, so the stall is Xet-specific, not the network.
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 say "downloading $REPO@$REV from HF (via $HF) -> $TMP"
