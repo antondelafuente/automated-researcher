@@ -44,6 +44,14 @@
   strips a leading `env`/`command` wrapper (looping to also strip any `VAR=value` prefixes it introduces)
   before reading the executable token. `cross_family_verifier_smoke.sh` gains case (k) for the wrapper
   regression; case (h)'s fake `codex` now requires `--with-api-key` and reads the key from stdin.
+- verify-claims 0.7.26 (2026-07-21): #373 review-round-2 fix on top of 0.7.25. Round 1's `env`/`command`
+  wrapper-stripping in `override_exec_tokens` only stripped the bare wrapper word, so `env -u FOO claude
+  -p ...` or `command -p codex ...` left the wrapper's OWN option flag (`-u`, `-p`) sitting in the
+  executable position — classified `custom` and honoring the same-family override underneath unchecked,
+  leaving the cross-family guarantee regressed for that shape. `override_exec_tokens` now also skips a
+  wrapper's dash-led option flags (and, for env's `-u`/`-C`/`-S` forms, the separate argument value that
+  follows) until the real executable token is reached. `cross_family_verifier_smoke.sh` gains case (l)
+  covering both examples.
 - verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
   explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
   next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after

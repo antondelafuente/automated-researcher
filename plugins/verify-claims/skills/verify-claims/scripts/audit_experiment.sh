@@ -127,13 +127,19 @@ esac
 # #373: a literal data/path substring elsewhere in the line (e.g. a scratch dir named /tmp/claude-1000/...)
 # is a much longer whole token than "claude" and never equal-matches it, whereas the old whole-string glob
 # (*claude*) matched that substring anywhere and misclassified an otherwise-codex override as same-family.
+# #373 review round 2: round 1 only stripped a BARE `env`/`command` token — `env -u FOO claude ...` or
+# `command -p codex ...` left the wrapper's OWN option flag (`-u`, `-p`) sitting in the executable position,
+# so it was classified 'custom' and the same-family override underneath was honored unchecked. Once inside
+# a wrapper, also skip the wrapper's dash-led option flags (and, for env's -u/-C/-S forms, the separate
+# argument value that follows) until the real executable token is reached.
 override_exec_tokens(){
-  local rest=$1 seg rawtok tok
+  local rest=$1 seg rawtok tok wrapper
   rest=${rest//&&/$'\n'}; rest=${rest//'||'/$'\n'}; rest=${rest//;/$'\n'}; rest=${rest//|/$'\n'}
   rest=${rest//(/$'\n'};  rest=${rest//)/$'\n'};     rest=${rest//\{/$'\n'}; rest=${rest//\}/$'\n'}
   while IFS= read -r seg; do
     seg="${seg#"${seg%%[![:space:]]*}"}"
     [ -n "$seg" ] || continue
+    wrapper=""
     while :; do
       while [[ $seg =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]* ]]; do
         seg="${seg#"${BASH_REMATCH[0]}"}"
@@ -146,9 +152,31 @@ override_exec_tokens(){
       tok="${tok##*/}"
       case "$tok" in
         env|command)
+          wrapper=$tok
           seg="${seg#"$rawtok"}"
           seg="${seg#"${seg%%[![:space:]]*}"}"
           continue ;;
+        --)
+          if [ -n "$wrapper" ]; then
+            seg="${seg#"$rawtok"}"
+            seg="${seg#"${seg%%[![:space:]]*}"}"
+            continue
+          fi ;;
+        -*)
+          if [ -n "$wrapper" ]; then
+            seg="${seg#"$rawtok"}"
+            seg="${seg#"${seg%%[![:space:]]*}"}"
+            if [ "$wrapper" = env ]; then
+              case "$tok" in
+                -u|--unset|-C|--chdir|-S|--split-string)
+                  if [ -n "$seg" ]; then
+                    seg="${seg#"${seg%%[[:space:]]*}"}"
+                    seg="${seg#"${seg%%[![:space:]]*}"}"
+                  fi ;;
+              esac
+            fi
+            continue
+          fi ;;
       esac
       break
     done

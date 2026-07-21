@@ -2,8 +2,9 @@
 # cross_family_verifier_smoke.sh — deterministic, offline guard for audit_experiment.sh's cross-family
 # auditor selection. Covers #262 (a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD must NOT run
 # same-family and must NOT dead-end), #239 (the claude built-in default must redirect to $OUT_TMP), and
-# #373 (executable-token family-sniffing, BASH_ENV sanitized for this script's own subshells, and the
-# built-in codex auditor's apikey-CODEX_HOME quota fallback).
+# #373 (executable-token family-sniffing including a bare or option-bearing env/command wrapper, BASH_ENV
+# sanitized for this script's own subshells, and the built-in codex auditor's apikey-CODEX_HOME quota
+# fallback).
 # Uses the AUDIT_PRINT_VERIFIER seam: prints the chosen auditor + verifier command, invokes no model.
 # Each case scrubs env (env -u BASH_ENV/AUDIT_VERIFIER_CMD/AAR_SUBSTRATE) so the instance BASH_ENV that
 # re-injects AUDIT_VERIFIER_CMD cannot make the test non-hermetic. Cases (h)-(j) instead run the REAL
@@ -192,5 +193,22 @@ else
   err "(k) command-wrapped same-family override BLOCKED instead of self-correcting"
 fi
 
-[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-k)" >&2
+# (l) #373 review round 2 — a wrapper's OWN option flag (env's `-u NAME`, command's `-p`) must not be
+#     mistaken for the executable: round 1's fix stopped at a bare `env`/`command` token, so `env -u FOO
+#     claude ...` / `command -p codex ...` left the option flag in executable position, classified 'custom',
+#     and honored the same-family override underneath unchecked. Same self-correcting behavior as (a)/(k).
+if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='env -u FOO claude -p > "$OUT_TMP"'); then
+  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$' || err "(l) env -u FOO claude override was not self-corrected to codex auditor: $out"
+  echo "$out" | grep -q 'codex exec'            || err "(l) env -u FOO claude override did not fall back to the codex default: $out"
+else
+  err "(l) env -u FOO claude override BLOCKED instead of self-correcting"
+fi
+if out=$(seam AAR_SUBSTRATE=codex AUDIT_VERIFIER_CMD='command -p codex exec --sandbox read-only -o "$OUT_TMP"'); then
+  echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(l) command -p codex override was not self-corrected to claude auditor: $out"
+  echo "$out" | grep -q 'claude -p'              || err "(l) command -p codex override did not fall back to the claude default: $out"
+else
+  err "(l) command -p codex override BLOCKED instead of self-correcting"
+fi
+
+[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-l)" >&2
 exit "$fail"
