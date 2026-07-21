@@ -372,7 +372,7 @@ jobs:
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["verdict", "findings"],
+              "required": ["verdict", "risk_inventory", "findings"],
               "properties": {
                 "verdict": { "enum": ["approve", "changes_requested"] },
                 "risk_inventory": { "type": ["string", "null"] },
