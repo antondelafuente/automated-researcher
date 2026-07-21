@@ -22,13 +22,22 @@ below in it, not in this prompt's paraphrase.
    - `gh api repos/{{REPO}}/issues/{{PR_NUMBER}}/comments` for the full comment thread, including the
      triggering comment above.
    - Resolve the implementing issue from the PR body's `Closes #<n>` line and read it: `gh issue view <n>
-     --repo {{REPO}} --json title,body`. Its body's declared scope/non-goals is the contract step 2
+     --repo {{REPO}} --json title,body`. Its body's declared scope/non-goals is the contract step 3
      adjudicates findings against; if the PR body names no issue, use the PR description's own stated scope
      instead.
    Treat the latest review round plus the triggering comment as the **complete spec for what this run must
    address** — the comment may narrow, clarify, or add to what the review already said; the implementing
-   issue's body is the scope contract those findings are adjudicated against (step 2).
-2. Adjudicate every finding against the issue's declared scope and non-goals before acting on it — see
+   issue's body is the scope contract those findings are adjudicated against (step 3).
+2. Decide whether this round requires whole-mechanism re-derivation, using the review data step 1 already
+   fetched: count the trailing run of consecutive `CHANGES_REQUESTED` reviews ending at the latest round
+   (no `APPROVED` in between). If this is the **2nd consecutive** `CHANGES_REQUESTED` on this PR, or if the
+   latest round contains any P0 finding that is design-class (about which invariant governs the surface,
+   not a line-level defect), do not go straight to patching the cited lines. Instead, step back first: name
+   the invariant that actually governs the surface the findings sit on, check whether the current design —
+   not just the specific lines flagged — satisfies it, and fix at that level. A third narrow patch-comment
+   round on the same surface is the failure mode this step exists to prevent; converging in one broader fix
+   is cheaper than another round of local patches that only shifts where the next finding lands.
+3. Adjudicate every finding against the issue's declared scope and non-goals before acting on it — see
    AGENTS.md's `CODEX-REVIEW-GUIDANCE` block for the `follow-up-suggested` disposition this implements:
    - **Valid and in scope:** apply it. Keep the diff scoped to what was actually flagged — no unrelated
      cleanup, no speculative abstraction.
@@ -38,19 +47,19 @@ below in it, not in this prompt's paraphrase.
      scope/non-goals even when the reviewer didn't label it as such): do not expand this PR to cover it.
      Reply on the PR proposing a follow-up issue — one paragraph, ready to file as-is — and move on without
      applying it.
-3. Before pushing, run `.aar-ci/checks.sh` against your changed files (compute the changed-path list with
+4. Before pushing, run `.aar-ci/checks.sh` against your changed files (compute the changed-path list with
    `git diff --name-only origin/{{BASE_REF}}...HEAD`) and fix anything it flags. A `checks.yml` Actions
    workflow also runs this as a required status check on the PR — running it yourself first saves a round
    trip.
-4. **If you are fully blocked** — every finding is unaddressable as specified, or acting on the feedback
+5. **If you are fully blocked** — every finding is unaddressable as specified, or acting on the feedback
    would contradict something the issue this PR implements explicitly says — do NOT guess and do NOT force
    a partial/wrong fix just to have something to show. Instead: comment on the PR explaining exactly what's
    blocking you, add the `needs-senior-engineer` label to the PR, and stop.
-5. Once you've addressed what's genuinely right, commit and push to `{{HEAD_REF}}` using the GitHub token
+6. Once you've addressed what's genuinely right, commit and push to `{{HEAD_REF}}` using the GitHub token
    you were given — every git and `gh` operation you perform must run as that identity, never a different
    credential. Do **NOT** invoke a review yourself: pushing fires `synchronize`, which re-runs
    `review-on-pr.yml` automatically (its own `cancel-in-progress` handles any stale in-flight round).
-6. Report your outcome as structured output: `status` (`addressed` if you pushed a fix, or `blocked` if you
+7. Report your outcome as structured output: `status` (`addressed` if you pushed a fix, or `blocked` if you
    escalated to `needs-senior-engineer` without pushing).
 
 ## Constraints
