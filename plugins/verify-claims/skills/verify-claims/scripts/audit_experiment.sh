@@ -66,7 +66,18 @@
 #                                  and it MUST write its final answer to "$OUT_TMP" — see the built-in defaults.
 #                                  A same-family value is ignored (warn) + the opposite-family default is used.)
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
+#      AUDIT_QUOTA_ERROR_PATTERN=  (case-insensitive grep pattern identifying a usage-limit failure from the
+#                                  built-in codex auditor's ChatGPT transport; default 'usage limit' — #373.)
+#      OPENAI_API_KEY=...          (used ONLY for the #373 apikey CODEX_HOME quota fallback below; unrelated
+#                                  to AAR_SUBSTRATE/AUDIT_VERIFIER_CMD selection.)
 set -euo pipefail
+APIKEY_CODEX_HOME=""
+# Defense-in-depth against #262 (an instance ~/.env exporting AUDIT_VERIFIER_CMD, re-injected into every
+# non-interactive shell via BASH_ENV): unset BASH_ENV as soon as THIS script starts so it is never inherited
+# by any subshell/eval/external process it spawns below, and a re-source of that ~/.env can't clobber a
+# caller-supplied override a second time mid-run. This does not fix #262's re-injection into this script's
+# OWN top-level invocation (out of scope here — that still needs the documented `BASH_ENV=` workaround).
+unset BASH_ENV
 MODE=close
 if [ "${1:-}" = "--design" ]; then MODE=design; shift;
 elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
@@ -380,17 +391,56 @@ run_verifier(){
     override) eval "$VERIFIER_OVERRIDE" ;;
   esac
 }
+# codex_apikey_fallback: retries the built-in codex auditor via an ephemeral, apikey-authenticated
+# CODEX_HOME after the ChatGPT-transport run hit a usage-limit error (2026-07-10 incident, #373: the
+# built-in codex auditor hit its ChatGPT usage limit mid-close with no billing fallback). `codex login
+# --with-api-key` (not `-c preferred_auth_method=apikey` alone — that does NOT switch auth in codex 0.144;
+# and not `--api-key VALUE`, which codex-cli 0.144 does not support) writes real credentials into the
+# ephemeral CODEX_HOME so the retry authenticates via OPENAI_API_KEY instead of the ChatGPT subscription.
+# The key is piped via stdin, never as a CLI argument, so it never appears in the process argument list
+# (`ps`) — #373 review round 1. Loud by construction (never a silent switch): this moves the audit onto
+# API billing (~$2-5/audit in the incident) before anything is retried, and again if it fails.
+codex_apikey_fallback(){
+  if [ -z "${OPENAI_API_KEY:-}" ]; then
+    echo "BLOCKED: built-in codex auditor hit a usage-limit error and no OPENAI_API_KEY is set for the" >&2
+    echo "  apikey CODEX_HOME fallback (#373) — last lines of $OUT.run.log:" >&2
+    tail -5 "$OUT.run.log" >&2
+    return 1
+  fi
+  echo "[audit_experiment] WARN: built-in codex auditor hit a usage-limit error — retrying via an" >&2
+  echo "  ephemeral apikey CODEX_HOME. This run is now API-BILLED (~\$2-5/audit, #373), NOT the free" >&2
+  echo "  ChatGPT-subscription transport." >&2
+  trap '[ -z "$APIKEY_CODEX_HOME" ] || rm -rf "$APIKEY_CODEX_HOME"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  APIKEY_CODEX_HOME=$(mktemp -d "${TMPDIR:-/tmp}/audit_codex_home.XXXXXX")
+  if CODEX_HOME="$APIKEY_CODEX_HOME" codex login --with-api-key >>"$OUT.run.log" 2>&1 <<< "$OPENAI_API_KEY" \
+     && CODEX_HOME="$APIKEY_CODEX_HOME" codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" <<< "$PROMPT" >>"$OUT.run.log" 2>&1
+  then
+    rm -rf "$APIKEY_CODEX_HOME"; return 0
+  fi
+  rm -rf "$APIKEY_CODEX_HOME"
+  echo "BLOCKED: apikey CODEX_HOME fallback also failed (#373) — last lines of $OUT.run.log:" >&2
+  tail -5 "$OUT.run.log" >&2
+  return 1
+}
 # Testability seam: print the resolved cross-family selection without invoking a model (mirrors
-# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Cleans up.
+# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Also prints
+# BASH_ENV so the smoke can assert #373's sanitize-for-own-subshells fix. Cleans up.
 if [ -n "${AUDIT_PRINT_VERIFIER:-}" ]; then
-  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\nDESIGN_FILE=%s\n' \
-    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT" "$OUT_TMP" "$VERIFIER_CMD" "${DESIGN_FILE:-}"
+  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\nDESIGN_FILE=%s\nBASH_ENV=%s\n' \
+    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT" "$OUT_TMP" "$VERIFIER_CMD" "${DESIGN_FILE:-}" "${BASH_ENV:-<unset>}"
   rm -f "$OUT_TMP"; exit 0
 fi
 echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
 if ! run_verifier <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
-  echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
-  rm -f "$OUT_TMP"; exit 1; fi
+  if [ "$VERIFIER_KIND" = codex ] && grep -qiE "${AUDIT_QUOTA_ERROR_PATTERN:-usage limit}" "$OUT.run.log"; then
+    codex_apikey_fallback || { rm -f "$OUT_TMP"; exit 1; }
+  else
+    echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
+    rm -f "$OUT_TMP"; exit 1
+  fi
+fi
 [ -s "$OUT_TMP" ] || { echo "BLOCKED: auditor produced no findings file (stale $OUT NOT reused)" >&2; rm -f "$OUT_TMP"; exit 1; }
 mv "$OUT_TMP" "$OUT"
 echo "[audit_experiment] findings -> $OUT" >&2
