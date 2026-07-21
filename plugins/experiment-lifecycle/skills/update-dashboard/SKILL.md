@@ -7,7 +7,8 @@ description: >-
   close-time is visible, edits the bespoke per-experiment `build_<exp>_page.py` builder, rebuilds the page
   + gallery, verifies the served page actually renders (heading text present, no NaN in generated SVG),
   and lands the SOURCE change (builder + the dashboard's own manifest, never the registry record or
-  generated `build/` output) via the `log-experiment` skill (`--skip-ignored`). The experiment registry
+  generated `build/` output) via the `log-experiment` skill (`--skip-ignored`, plus `--only` naming exactly
+  the touched file(s), since the dashboard dir is a shared multi-tenant tree). The experiment registry
   record (`RESULTS.md`/`presentation_manifest.json`/`figures/*.csv`) is strictly READ-ONLY input here — this
   skill writes only inside the dashboard directory it lands. Refuses (BLOCK, points at `run-experiment`) unless the experiment is already CLOSED and
   a dashboard manifest/builder already exists — this is an EDIT loop, not the first-build path. **Routing
@@ -176,12 +177,24 @@ the registry experiment dir, not part of this skill's scope.
 **Invoke the `log-experiment` skill; let it resolve its own script** — never hardcode a path to another
 plugin's scripts (installs are version-pinned; the companion skill is the stable interface, the same
 convention `design-experiment`'s SKILL.md states for its own `verify-claims` dependency). Concretely: **invoke
-the `log-experiment` skill on the dashboard subdirectory (with `--skip-ignored`), from the research-repo
-checkout** — cwd/checkout is a checkout of the dashboard's own repo, the repo the recipe **doc's body** names
-(Step 2, item 1), never `VIEWER_REPO` (that field only locates the recipe document itself, and may point at
-an entirely different repo); the argument you pass it is that repo's own gated landing **subdirectory**,
-never a repo root. Resolve both the repo and the subdirectory from the recipe doc's body, then pass the
-subdirectory relative to the checkout root as the skill's registry-dir argument, plus `--skip-ignored`.
+the `log-experiment` skill on the dashboard subdirectory (with `--skip-ignored` and `--only`), from the
+research-repo checkout** — cwd/checkout is a checkout of the dashboard's own repo, the repo the recipe
+**doc's body** names (Step 2, item 1), never `VIEWER_REPO` (that field only locates the recipe document
+itself, and may point at an entirely different repo); the argument you pass it is that repo's own gated
+landing **subdirectory**, never a repo root. Resolve both the repo and the subdirectory from the recipe
+doc's body, then pass the subdirectory relative to the checkout root as the skill's registry-dir argument,
+plus `--skip-ignored`.
+
+**Always also pass `--only`, naming exactly the file(s) this edit touched, relative to that subdirectory**
+— the dashboard directory is a SHARED, multi-tenant tree (every experiment's builder/manifest under the
+same viewer layout lives side by side in it, written by whichever session happens to be editing at the
+time), so a plain dir-scoped `log-experiment` invocation stages EVERY file under it, including any
+co-tenant session's own unlanded work (automated-researcher#374). Pass `--only build_<exp>_page.py` for the
+edited builder, plus `--only manifests/<exp>.json` (or wherever the recipe's viewer layout keeps a
+per-experiment manifest) if this edit also touched one — never invoke `log-experiment` on this subdirectory
+without `--only`. `log-experiment` fails closed on an `--only` path that doesn't exist under the registry
+dir, so a stale/mistyped filename here dies loudly rather than silently falling back to staging the whole
+shared tree.
 
 `log-experiment` computes the branch name from the input directory's path *relative to the checkout root*;
 passed the checkout root itself, that relative path is `.`, which is not a valid branch component.
