@@ -105,20 +105,36 @@ else
     || err "incomplete recipe failed but without the expected message: $(cat "$T/err4")"
 fi
 
-# 4b. Field-format validation: a bare 'owner' repo (no slash) and an absolute path are both rejected —
-#     not just presence-checked (code-review F3).
-cat > "$T/malformed-fields.toml" <<'EOF'
+# 4b. Field-format validation: a bare 'owner' repo (no slash) is rejected — not just presence-checked
+#     (code-review F3). Isolated from the absolute-path case (4b2 below) so a broken absolute-path
+#     validator can't pass undetected behind the repo check alone already blocking (#368 finding 4).
+cat > "$T/malformed-repo.toml" <<'EOF'
 schema_version = 1
 [recipes.visualization_preview]
 kind = "repo"
 repo = "owner"
-path = "/etc/passwd"
+path = "recipes/visualization-preview.md"
 git_ref = "abc1234"
 EOF
-if AAR_PROFILE="$T/malformed-fields.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4b"; then
+if AAR_PROFILE="$T/malformed-repo.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4b"; then
   err "resolver accepted a repo without an owner/repo slash"
 else
   ok "a non-owner/repo 'repo' value is rejected, not just presence-checked"
+fi
+
+# 4b2. An absolute path is rejected on its own, independent of 4b's repo check (#368 finding 4).
+cat > "$T/malformed-path.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "/etc/passwd"
+git_ref = "abc1234"
+EOF
+if AAR_PROFILE="$T/malformed-path.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4b2"; then
+  err "resolver accepted an absolute path"
+else
+  ok "an absolute path is rejected, not just presence-checked"
 fi
 
 # 4c. A kind=uri value containing shell metacharacters is rejected outright (code-review F2) —
@@ -135,6 +151,103 @@ if AAR_PROFILE="$T/uri-metachars.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4c"; 
   err "resolver accepted a URI containing a shell metacharacter"
 else
   ok "a URI containing shell metacharacters is rejected by the safe charset"
+fi
+
+# 4d. A kind=uri value with a port, a query string, and a fragment — all ordinary, all rejected by the
+#     prior narrow allow-list — is now accepted (#368 finding 1: the charset must not be stricter than
+#     the schema's own supported-scheme semantics require).
+cat > "$T/uri-query-fragment.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "https://example.com:8443/recipes/visualization-preview.md?rev=3&lang=en#section-2"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+EOF
+if out4d=$(AAR_PROFILE="$T/uri-query-fragment.toml" bash "$RESOLVE" 2>"$T/err4d") \
+  && printf '%s\n' "$out4d" | grep -qF 'VISUALIZATION_PREVIEW_URI=https://example.com:8443/recipes/visualization-preview.md?rev=3&lang=en#section-2'; then
+  ok "a URI with a port, query string, and fragment is accepted (#368 finding 1)"
+else
+  err "a URI with a port/query/fragment was wrongly rejected: $(cat "$T/err4d")"
+fi
+
+# 4e. A repo-relative path with ordinary punctuation outside the prior narrow allow-list is accepted
+#     (#368 finding 1), while still going through the same traversal/absolute-path/unsafe-char checks.
+cat > "$T/path-punctuation.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "recipes/notes,v2+final@home!.md"
+git_ref = "abc1234"
+EOF
+if out4e=$(AAR_PROFILE="$T/path-punctuation.toml" bash "$RESOLVE" 2>"$T/err4e") \
+  && printf '%s\n' "$out4e" | grep -qF 'VISUALIZATION_PREVIEW_PATH=recipes/notes,v2+final@home!.md'; then
+  ok "a repo-relative path with ordinary punctuation outside the old narrow charset is accepted (#368 finding 1)"
+else
+  err "a repo-relative path with ordinary punctuation was wrongly rejected: $(cat "$T/err4e")"
+fi
+
+# 4f. A kind=repo table that ALSO sets a kind=uri-only field ('uri') fails closed instead of silently
+#     ignoring the stray field (#368 finding 2, direction 1).
+cat > "$T/repo-with-stray-uri-field.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "recipes/visualization-preview.md"
+git_ref = "abc1234"
+uri = "https://example.com/should-not-be-here"
+EOF
+if AAR_PROFILE="$T/repo-with-stray-uri-field.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4f"; then
+  err "resolver accepted a kind=repo table with a stray 'uri' field instead of failing closed (#368 finding 2)"
+else
+  ok "kind=repo table with a stray kind=uri-only field ('uri') fails closed"
+fi
+
+# 4g. A kind=uri table that ALSO sets a kind=repo-only field ('path') fails closed (#368 finding 2,
+#     direction 2).
+cat > "$T/uri-with-stray-repo-field.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "https://example.com/recipes/visualization-preview.md"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+path = "recipes/visualization-preview.md"
+EOF
+if AAR_PROFILE="$T/uri-with-stray-repo-field.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4g"; then
+  err "resolver accepted a kind=uri table with a stray 'path' field instead of failing closed (#368 finding 2)"
+else
+  ok "kind=uri table with a stray kind=repo-only field ('path') fails closed"
+fi
+
+# 4h. schema_version=true must not be accepted via Python's bool/int equality (True == 1) (#368 finding 3).
+cat > "$T/schema-version-bool.toml" <<'EOF'
+schema_version = true
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "recipes/visualization-preview.md"
+git_ref = "abc1234"
+EOF
+if AAR_PROFILE="$T/schema-version-bool.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4h"; then
+  err "resolver accepted schema_version=true instead of requiring the integer 1 (#368 finding 3)"
+else
+  ok "schema_version=true is rejected, not accepted via Python's bool/int equality"
+fi
+
+# 4i. schema_version=1.0 must not be accepted via Python's float/int equality (1.0 == 1) (#368 finding 3).
+cat > "$T/schema-version-float.toml" <<'EOF'
+schema_version = 1.0
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "recipes/visualization-preview.md"
+git_ref = "abc1234"
+EOF
+if AAR_PROFILE="$T/schema-version-float.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4i"; then
+  err "resolver accepted schema_version=1.0 instead of requiring the integer 1 (#368 finding 3)"
+else
+  ok "schema_version=1.0 is rejected, not accepted via Python's float/int equality"
 fi
 
 # 5. Explicit publish boundary: --publish on the complete profile resolves [recipes.visualization_publish]

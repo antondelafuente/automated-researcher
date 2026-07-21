@@ -86,22 +86,58 @@ if not isinstance(data, dict):
 sv = data.get("schema_version")
 if sv is None:
     block(f"instance profile at {path} is missing required field 'schema_version'")
-if sv != 1:
+# type(sv) is int (not just sv == 1) so Python's numeric equality can't sneak a bool/float schema_version
+# past this gate: True == 1 and 1.0 == 1 are both true in Python, and neither is the integer 1 the schema
+# declares (#368 finding 3).
+if type(sv) is not int or sv != 1:
     block(f"instance profile at {path} declares schema_version={sv!r}; this product understands only 1 (refuse-unknown-MAJOR)")
 
 import re
-# Each restricted to a conservative charset that EXCLUDES every shell metacharacter (no eval/source
-# safety net is assumed downstream — see the header note). Segment-level checks (below) additionally
-# reject a bare ".." path-traversal segment, which the charset alone would not catch.
+# owner/repo names are restricted to GitHub's own charset (never assumed = research_repo) — narrow by
+# construction, not a defensive narrowing.
 _SEG = r"[A-Za-z0-9._-]+"
 _SAFE_OWNER_REPO = re.compile(rf"^{_SEG}/{_SEG}$")           # exactly one '/'; non-empty on both sides
-_SAFE_REL_PATH = re.compile(rf"^{_SEG}(?:/{_SEG})*$")         # no leading '/', no empty segments
 _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SAFE_HEXDIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
-_SAFE_URI = re.compile(rf"^(?:r2|s3|https)://{_SEG}(?:/{_SEG})*$")   # same safe charset, no query/fragment
+_SCHEME_RE = re.compile(r"^(?:r2|s3|https)://")
+# A repo-relative path, or the authority+path+query+fragment tail of a URI, is validated by DENYING
+# shell metacharacters/whitespace/control bytes rather than by an ALLOW-list of a few characters — the
+# prior allow-list (alnum + '.', '_', '-' only) rejected ordinary things the schema's own
+# repo-relative-path/supported-scheme semantics permit, like a URI query string or fragment (#368
+# finding 1). '&' is deliberately NOT excluded despite being a shell metacharacter (backgrounding/&&) —
+# it is how a query string joins more than one parameter, and excluding it would just reintroduce this
+# same finding for any URI with 2+ query params. Excluded here: backtick/$/;/|/</>/(){} and quote/
+# backslash characters, which are what would let a value break out of a KEY=VALUE line if some future
+# caller ever did source/eval it despite the header note; everything else (?, #, %, :, =, &, ,, +, ~, @,
+# !, ^, *, [, ]) is left in-band.
+_UNSAFE_CHARS = re.compile(r'[`$;|<>(){}\\\'"\s\x00-\x1f\x7f]')
 
 def _no_traversal(v):
-    return ".." not in v.split("/")
+    # '..' is only a traversal segment in the path portion; strip any query/fragment first so a query
+    # value that happens to contain '..' (e.g. a version range) isn't mistaken for one.
+    path_part = v.split("?", 1)[0].split("#", 1)[0]
+    return ".." not in path_part.split("/")
+
+def _valid_rel_path(v):
+    if not isinstance(v, str) or not v or v.startswith("/") or _UNSAFE_CHARS.search(v):
+        return False
+    if any(not seg for seg in v.split("/")):
+        return False
+    return _no_traversal(v)
+
+def _valid_uri(v):
+    if not isinstance(v, str) or not v:
+        return False
+    m = _SCHEME_RE.match(v)
+    if not m:
+        return False
+    rest = v[m.end():]
+    if not rest or rest.startswith("/") or _UNSAFE_CHARS.search(rest):
+        return False
+    return _no_traversal(v)
+
+_REPO_ONLY_FIELDS = ("repo", "path", "git_ref")
+_URI_ONLY_FIELDS = ("uri", "sha256")
 
 def resolve_recipe(name, required):
     recipes = data.get("recipes")
@@ -119,17 +155,23 @@ def resolve_recipe(name, required):
         block(f"recipes.{name}.kind must be 'repo' or 'uri' (got: {kind!r})")
     out = {"KIND": kind}
     if kind == "repo":
-        for field, rx in (("repo", _SAFE_OWNER_REPO), ("path", _SAFE_REL_PATH), ("git_ref", _SAFE_SHA)):
+        stray = [f for f in _URI_ONLY_FIELDS if f in table]
+        if stray:
+            block(f"recipes.{name} has kind='repo' but also sets {stray} (kind=uri-only field(s)); a kind/field mismatch must fail closed")
+        for field, validate in (("repo", _SAFE_OWNER_REPO.match), ("path", _valid_rel_path), ("git_ref", _SAFE_SHA.match)):
             v = table.get(field)
             if not isinstance(v, str) or not v:
                 block(f"recipes.{name} is missing required field '{field}' for kind=repo")
-            if not rx.match(v) or not _no_traversal(v):
+            if not validate(v):
                 block(f"recipes.{name}.{field} has an invalid value")
             out[field.upper()] = v
     else:
+        stray = [f for f in _REPO_ONLY_FIELDS if f in table]
+        if stray:
+            block(f"recipes.{name} has kind='uri' but also sets {stray} (kind=repo-only field(s)); a kind/field mismatch must fail closed")
         v = table.get("uri")
-        if not isinstance(v, str) or not _SAFE_URI.match(v) or not _no_traversal(v):
-            block(f"recipes.{name}.uri is missing, has an unsupported scheme (must be r2://, s3://, or https://), or contains characters outside the safe charset")
+        if not _valid_uri(v):
+            block(f"recipes.{name}.uri is missing, has an unsupported scheme (must be r2://, s3://, or https://), or contains an unsafe character")
         out["URI"] = v
         d = table.get("sha256")
         if not isinstance(d, str) or not _SAFE_HEXDIGEST.match(d):
