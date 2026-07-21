@@ -282,6 +282,22 @@ else
   ok "a URI with an empty authority (no host/bucket) is rejected"
 fi
 
+# 4l. A kind=uri https:// value with a non-empty but host-less authority (a bare ':port') is rejected —
+#     the round-1 fix (4k) only caught an authority starting with '/', '?', or '#'; 'https://:8443/recipe'
+#     has a non-empty authority (':8443') with no hostname before the colon (#585 P0, review round 2).
+cat > "$T/uri-authority-no-host.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "https://:8443/recipe"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+EOF
+if AAR_PROFILE="$T/uri-authority-no-host.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4l"; then
+  err "resolver accepted a URI whose authority has a port but no host (#585 P0, round 2)"
+else
+  ok "a URI with a port but no host in its authority is rejected"
+fi
+
 # 5. Explicit publish boundary: --publish on the complete profile resolves [recipes.visualization_publish]
 #    — its OWN publish-destination recipe — and never [recipes.viewer].
 out5=$(AAR_PROFILE="$T/complete.toml" bash "$RESOLVE" --publish 2>"$T/err5")

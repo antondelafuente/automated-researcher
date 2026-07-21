@@ -101,7 +101,7 @@ _SEG = r"[A-Za-z0-9._-]+"
 _SAFE_OWNER_REPO = re.compile(rf"^{_SEG}/{_SEG}$")           # exactly one '/'; non-empty on both sides
 _SAFE_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 _SAFE_HEXDIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
-_SCHEME_RE = re.compile(r"^(?:r2|s3|https)://")
+_SCHEME_RE = re.compile(r"^(r2|s3|https)://")
 # A repo-relative path, or the authority+path+query+fragment tail of a URI, is validated by DENYING
 # shell metacharacters/whitespace/control bytes rather than by an ALLOW-list of a few characters — the
 # prior allow-list (alnum + '.', '_', '-' only) rejected ordinary things the schema's own
@@ -142,9 +142,18 @@ def _valid_uri(v):
     if not m:
         return False
     rest = v[m.end():]
-    # rest must not start with '/', '?', or '#' — otherwise the authority component is empty, i.e. the
-    # URI names no host/bucket at all (e.g. 'https://?query=yes' passed here before, #585 P0).
-    if not rest or rest.startswith(("/", "?", "#")) or _UNSAFE_CHARS.search(rest):
+    if not rest or _UNSAFE_CHARS.search(rest):
+        return False
+    # The authority is the leading run up to the first '/', '?', or '#' (a URI's path/query/fragment
+    # never begins the authority component). It must be non-empty — a bare rest.startswith(('/','?','#'))
+    # check (the round-1 fix) still let an authority-shaped-but-hostless string like a bare ':PORT' prefix
+    # through, since that text starts with none of those chars (#585 P0 round 2). For https specifically,
+    # also require a non-empty host segment before an optional ':port' — a leading ':PORT' is a non-empty
+    # authority with an empty host.
+    authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
+    if not authority:
+        return False
+    if m.group(1) == "https" and not authority.split(":", 1)[0]:
         return False
     return _no_traversal_uri(v)
 
