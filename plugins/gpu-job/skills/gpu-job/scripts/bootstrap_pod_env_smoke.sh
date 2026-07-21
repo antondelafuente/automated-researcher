@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# Smoke test for bootstrap_pod.sh's PASS_ENV persistence (#341): a fresh ssh session doesn't
+# inherit the container's injected env, so job launch scripts on the pod couldn't see
+# TINKER_API_KEY/HF_TOKEN/etc — only RCLONE_CONF_B64 had a special-cased fix. _persist_passed_env
+# generalizes it: read PID 1's environ (deploy_pod.py's PASSED_ENV_NAMES tells it which keys to
+# look for) and persist each to /workspace/.env (always) and /etc/environment (root pods only).
+# Fully OFFLINE: fakes a NUL-separated "/proc/1/environ" file and scratch workspace/etc paths —
+# never touches the real filesystem locations.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# Sourcing (not executing) reaches the guard in bootstrap_pod.sh and returns before the real
+# bootstrap (rclone install, real /etc/environment writes) runs — see that file's header.
+source "$HERE/bootstrap_pod.sh" || { echo "FAIL: cannot source bootstrap_pod.sh"; exit 1; }
+
+TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
+trap 'rm -rf "$TMP"' EXIT
+
+fails=0
+ok(){ echo "ok   $1"; }
+no(){ echo "FAIL $1"; fails=1; }
+
+fake_environ(){ # fake_environ <file> <KEY=VALUE>... — write a NUL-separated environ blob
+  local f=$1; shift
+  printf '%s\0' "$@" > "$f"
+}
+
+# --- 1. persists exactly the PASSED_ENV_NAMES-listed vars, to BOTH files when root ------------------
+ENV1="$TMP/environ1"
+fake_environ "$ENV1" "PASSED_ENV_NAMES=TINKER_API_KEY,HF_TOKEN" "TINKER_API_KEY=tk-abc" "HF_TOKEN=hf-xyz" "UNRELATED_VAR=nope"
+WS1="$TMP/ws1/.env"; ETC1="$TMP/etc1/environment"
+_persist_passed_env "$ENV1" "$WS1" "$ETC1" 1
+if grep -qx 'TINKER_API_KEY=tk-abc' "$WS1" && grep -qx 'HF_TOKEN=hf-xyz' "$WS1"; then ok persists-listed-vars-to-workspace-env; else no "persists-listed-vars-to-workspace-env ($(cat "$WS1" 2>/dev/null))"; fi
+if grep -qx 'TINKER_API_KEY=tk-abc' "$ETC1" && grep -qx 'HF_TOKEN=hf-xyz' "$ETC1"; then ok root-also-persists-to-etc-environment; else no "root-also-persists-to-etc-environment ($(cat "$ETC1" 2>/dev/null))"; fi
+if grep -q 'UNRELATED_VAR' "$WS1" 2>/dev/null; then no "unrelated-var-not-in-passed-names-must-not-leak"; else ok unrelated-var-not-in-passed-names-must-not-leak; fi
+
+# --- 2. non-root pod: workspace/.env written, /etc/environment left untouched -----------------------
+ENV2="$TMP/environ2"
+fake_environ "$ENV2" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS2="$TMP/ws2/.env"; ETC2="$TMP/etc2/environment"
+_persist_passed_env "$ENV2" "$WS2" "$ETC2" 0
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS2"; then ok non-root-still-writes-workspace-env; else no non-root-still-writes-workspace-env; fi
+if [ -e "$ETC2" ]; then no "non-root-must-not-write-etc-environment ($(cat "$ETC2"))"; else ok non-root-must-not-write-etc-environment; fi
+
+# --- 3. no PASSED_ENV_NAMES at all (no PASS_ENV used) -> no-op, no files created ---------------------
+ENV3="$TMP/environ3"
+fake_environ "$ENV3" "SOME_OTHER_VAR=x"
+WS3="$TMP/ws3/.env"; ETC3="$TMP/etc3/environment"
+_persist_passed_env "$ENV3" "$WS3" "$ETC3" 1
+if [ -e "$WS3" ]; then no "no-passed-env-names-must-be-a-no-op ($(cat "$WS3"))"; else ok no-passed-env-names-must-be-a-no-op; fi
+
+# --- 4. a listed name with no/empty value in the environ is skipped, not written as VAR= -------------
+ENV4="$TMP/environ4"
+fake_environ "$ENV4" "PASSED_ENV_NAMES=MISSING_VAR,HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS4="$TMP/ws4/.env"; ETC4="$TMP/etc4/environment"
+_persist_passed_env "$ENV4" "$WS4" "$ETC4" 1
+if grep -q '^MISSING_VAR=' "$WS4" 2>/dev/null; then no "missing-value-name-not-written"; else ok missing-value-name-not-written; fi
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS4"; then ok present-name-still-written-alongside-missing-one; else no present-name-still-written-alongside-missing-one; fi
+
+# --- 5. idempotent: a second bootstrap run doesn't duplicate an already-persisted line ---------------
+ENV5="$TMP/environ5"
+fake_environ "$ENV5" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS5="$TMP/ws5/.env"; ETC5="$TMP/etc5/environment"
+_persist_passed_env "$ENV5" "$WS5" "$ETC5" 1
+_persist_passed_env "$ENV5" "$WS5" "$ETC5" 1
+if [ "$(grep -c '^HF_TOKEN=' "$WS5")" = 1 ] && [ "$(grep -c '^HF_TOKEN=' "$ETC5")" = 1 ]; then ok idempotent-rerun; else no "idempotent-rerun (ws=$(cat "$WS5") etc=$(cat "$ETC5"))"; fi
+
+# --- 6. a value with shell metacharacters is single-quoted, not corrupted/executed on `source` --------
+ENV6="$TMP/environ6"
+fake_environ "$ENV6" "PASSED_ENV_NAMES=INJECT_VAR" 'INJECT_VAR=has $(touch '"$TMP"'/pwned) space'"'"'quote'
+WS6="$TMP/ws6/.env"; ETC6="$TMP/etc6/environment"
+_persist_passed_env "$ENV6" "$WS6" "$ETC6" 1
+( set +u; INJECT_VAR=""; source "$WS6" )
+if [ -e "$TMP/pwned" ]; then no "sourcing-workspace-env-must-not-execute-injected-command"; else ok sourcing-workspace-env-must-not-execute-injected-command; fi
+( set +u; INJECT_VAR=""; source "$WS6"; [ "$INJECT_VAR" = 'has $(touch '"$TMP"'/pwned) space'"'"'quote' ] ) \
+  && ok quoted-value-round-trips-through-source || no "quoted-value-round-trips-through-source"
+
+# --- 7. a value containing a newline is skipped (can't be a single KV line), other vars unaffected -----
+ENV7="$TMP/environ7"
+fake_environ "$ENV7" $'PASSED_ENV_NAMES=MULTILINE_VAR,HF_TOKEN' $'MULTILINE_VAR=line1\nline2' "HF_TOKEN=hf-xyz"
+WS7="$TMP/ws7/.env"; ETC7="$TMP/etc7/environment"
+_persist_passed_env "$ENV7" "$WS7" "$ETC7" 1
+if grep -q '^MULTILINE_VAR=' "$WS7" 2>/dev/null; then no "newline-value-must-be-skipped-not-written"; else ok newline-value-must-be-skipped-not-written; fi
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS7"; then ok other-var-still-persisted-alongside-skipped-newline-var; else no other-var-still-persisted-alongside-skipped-newline-var; fi
+
+# --- 8. workspace/.env is chmod 600 (secrets now live there; default umask is not enough) -------------
+ENV8="$TMP/environ8"
+fake_environ "$ENV8" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS8="$TMP/ws8/.env"; ETC8="$TMP/etc8/environment"
+_persist_passed_env "$ENV8" "$WS8" "$ETC8" 1
+if [ "$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null)" = "600" ]; then ok workspace-env-is-chmod-600; else no "workspace-env-is-chmod-600 (mode=$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null))"; fi
+
+# --- 9. /etc/environment is chmod 600 too (root pods), not just /workspace/.env ------------------------
+ENV9="$TMP/environ9"
+fake_environ "$ENV9" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS9="$TMP/ws9/.env"; ETC9="$TMP/etc9/environment"
+_persist_passed_env "$ENV9" "$WS9" "$ETC9" 1
+if [ "$(stat -c '%a' "$ETC9" 2>/dev/null || stat -f '%Lp' "$ETC9" 2>/dev/null)" = "600" ]; then ok etc-environment-is-chmod-600; else no "etc-environment-is-chmod-600 (mode=$(stat -c '%a' "$ETC9" 2>/dev/null || stat -f '%Lp' "$ETC9" 2>/dev/null))"; fi
+
+# --- 10. a rotated value REPLACES the stale one on re-run, in both files (not left stuck on the first) --
+ENV10a="$TMP/environ10a"; ENV10b="$TMP/environ10b"
+fake_environ "$ENV10a" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-old"
+fake_environ "$ENV10b" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-new"
+WS10="$TMP/ws10/.env"; ETC10="$TMP/etc10/environment"
+_persist_passed_env "$ENV10a" "$WS10" "$ETC10" 1
+_persist_passed_env "$ENV10b" "$WS10" "$ETC10" 1
+if [ "$(grep -c '^HF_TOKEN=' "$WS10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$WS10"; then ok rotated-value-replaces-stale-workspace-env; else no "rotated-value-replaces-stale-workspace-env ($(cat "$WS10"))"; fi
+if [ "$(grep -c '^HF_TOKEN=' "$ETC10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$ETC10"; then ok rotated-value-replaces-stale-etc-environment; else no "rotated-value-replaces-stale-etc-environment ($(cat "$ETC10"))"; fi
+if [ "$(stat -c '%a' "$WS10" 2>/dev/null || stat -f '%Lp' "$WS10" 2>/dev/null)" = "600" ]; then ok rotate-workspace-env-still-chmod-600; else no "rotate-workspace-env-still-chmod-600 (mode=$(stat -c '%a' "$WS10" 2>/dev/null || stat -f '%Lp' "$WS10" 2>/dev/null))"; fi
+if ls "$(dirname "$WS10")"/*.tmp.* >/dev/null 2>&1; then no "rotate-leaves-no-tmp-sibling ($(ls "$(dirname "$WS10")"))"; else ok rotate-leaves-no-tmp-sibling; fi
+
+# --- 11. a value that is ONLY trailing newline(s) is rejected, not silently truncated -------------------
+ENV11="$TMP/environ11"
+fake_environ "$ENV11" $'PASSED_ENV_NAMES=TRAIL_ONLY,HF_TOKEN' $'TRAIL_ONLY=abc\n\n' "HF_TOKEN=hf-xyz"
+WS11="$TMP/ws11/.env"; ETC11="$TMP/etc11/environment"
+_persist_passed_env "$ENV11" "$WS11" "$ETC11" 1
+if grep -q '^TRAIL_ONLY=' "$WS11" 2>/dev/null; then no "trailing-newline-value-must-be-skipped-not-truncated ($(cat "$WS11"))"; else ok trailing-newline-value-must-be-skipped-not-truncated; fi
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS11"; then ok other-var-still-persisted-alongside-skipped-trailing-newline-var; else no other-var-still-persisted-alongside-skipped-trailing-newline-var; fi
+
+# --- 12. a quoted value (embedded apostrophe) round-trips through job_lib.sh's env_get, not just `source` -
+ENV12="$TMP/environ12"
+fake_environ "$ENV12" "PASSED_ENV_NAMES=QUOTE_VAR" "QUOTE_VAR=it's a token"
+WS12="$TMP/ws12/.env"; ETC12="$TMP/etc12/environment"
+_persist_passed_env "$ENV12" "$WS12" "$ETC12" 1
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get QUOTE_VAR "$WS12")
+  [ "$got" = "it's a token" ]
+) && ok quoted-value-round-trips-through-job_lib-env_get || no "quoted-value-round-trips-through-job_lib-env_get (got: $(( set +u -e; source "$HERE/job_lib.sh"; env_get QUOTE_VAR "$WS12" ) 2>&1))"
+
+
+# --- 13. a value needing quoting (apostrophe+space) round-trips via the workspace file (source and
+#     env_get) but is ABSENT from /etc/environment (PAM has no escape syntax); a plain bare-safe
+#     value alongside it still lands in /etc/environment BARE, unquoted ------------------------------
+ENV13="$TMP/environ13"
+fake_environ "$ENV13" "PASSED_ENV_NAMES=QUOTE_VAR,PLAIN_VAR" "QUOTE_VAR=it's a token" "PLAIN_VAR=tk-abc123"
+WS13="$TMP/ws13/.env"; ETC13="$TMP/etc13/environment"
+_persist_passed_env "$ENV13" "$WS13" "$ETC13" 1
+( set +u; QUOTE_VAR=""; source "$WS13"; [ "$QUOTE_VAR" = "it's a token" ] ) \
+  && ok quote-var-round-trips-via-source-on-workspace-env || no "quote-var-round-trips-via-source-on-workspace-env"
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get QUOTE_VAR "$WS13")
+  [ "$got" = "it's a token" ]
+) && ok quote-var-round-trips-via-env_get-on-workspace-env || no "quote-var-round-trips-via-env_get-on-workspace-env"
+if grep -q '^QUOTE_VAR=' "$ETC13" 2>/dev/null; then no "quote-var-must-be-absent-from-etc-environment ($(cat "$ETC13"))"; else ok quote-var-must-be-absent-from-etc-environment; fi
+if grep -qx 'PLAIN_VAR=tk-abc123' "$ETC13"; then ok plain-var-still-persisted-bare-to-etc-environment; else no "plain-var-still-persisted-bare-to-etc-environment ($(cat "$ETC13" 2>/dev/null))"; fi
+
+# --- 14. persisting into a workspace file that PRE-EXISTS with no trailing newline doesn't corrupt
+#     the old line or swallow the new one -------------------------------------------------------------
+ENV14="$TMP/environ14"
+fake_environ "$ENV14" "PASSED_ENV_NAMES=NEW_SECRET" "NEW_SECRET=value"
+WS14="$TMP/ws14/.env"; ETC14="$TMP/etc14/environment"
+mkdir -p "$(dirname "$WS14")"
+printf 'OLD=x' > "$WS14"
+_persist_passed_env "$ENV14" "$WS14" "$ETC14" 1
+if grep -qx 'OLD=x' "$WS14"; then ok preexisting-no-trailing-newline-line-preserved; else no "preexisting-no-trailing-newline-line-preserved ($(cat "$WS14"))"; fi
+if grep -qx 'NEW_SECRET=value' "$WS14"; then ok new-var-not-swallowed-by-missing-newline; else no "new-var-not-swallowed-by-missing-newline ($(cat "$WS14"))"; fi
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get NEW_SECRET "$WS14")
+  [ "$got" = "value" ]
+) && ok new-var-readable-via-env_get-after-noeol-preexisting-file || no "new-var-readable-via-env_get-after-noeol-preexisting-file"
+
+
+# --- 15. rotating a bare-safe value to a PAM-unsafe one drops the STALE /etc/environment entry
+#     entirely, instead of leaving the old credential active there ------------------------------------
+ENV15a="$TMP/environ15a"; ENV15b="$TMP/environ15b"
+fake_environ "$ENV15a" "PASSED_ENV_NAMES=TOKEN" "TOKEN=old"
+fake_environ "$ENV15b" "PASSED_ENV_NAMES=TOKEN" "TOKEN=new value"
+WS15="$TMP/ws15/.env"; ETC15="$TMP/etc15/environment"
+_persist_passed_env "$ENV15a" "$WS15" "$ETC15" 1
+_persist_passed_env "$ENV15b" "$WS15" "$ETC15" 1
+if grep -q '^TOKEN=' "$ETC15" 2>/dev/null; then no "rotate-bare-to-unsafe-must-drop-stale-etc-entry ($(cat "$ETC15"))"; else ok rotate-bare-to-unsafe-must-drop-stale-etc-entry; fi
+if grep -qx "TOKEN='new value'" "$WS15"; then ok rotate-bare-to-unsafe-workspace-has-new-value; else no "rotate-bare-to-unsafe-workspace-has-new-value ($(cat "$WS15"))"; fi
+
+# --- 16. rotating a persisted value to one containing a newline drops the STALE entry in BOTH files,
+#     rather than leaving the old credential active while the new one is (correctly) skipped ----------
+ENV16a="$TMP/environ16a"; ENV16b="$TMP/environ16b"
+fake_environ "$ENV16a" "PASSED_ENV_NAMES=TOKEN" "TOKEN=old"
+fake_environ "$ENV16b" $'PASSED_ENV_NAMES=TOKEN' $'TOKEN=new\nline'
+WS16="$TMP/ws16/.env"; ETC16="$TMP/etc16/environment"
+_persist_passed_env "$ENV16a" "$WS16" "$ETC16" 1
+_persist_passed_env "$ENV16b" "$WS16" "$ETC16" 1
+if grep -q '^TOKEN=' "$WS16" 2>/dev/null; then no "rotate-to-newline-must-drop-stale-workspace-entry ($(cat "$WS16"))"; else ok rotate-to-newline-must-drop-stale-workspace-entry; fi
+if grep -q '^TOKEN=' "$ETC16" 2>/dev/null; then no "rotate-to-newline-must-drop-stale-etc-entry ($(cat "$ETC16"))"; else ok rotate-to-newline-must-drop-stale-etc-entry; fi
+
+# --- 17. persistence fails closed when chmod 600 cannot be established: the secret must not land in
+#     either file, and root-only permissions must not be silently assumed ------------------------------
+ENV17="$TMP/environ17"
+fake_environ "$ENV17" "PASSED_ENV_NAMES=SECRET" "SECRET=tk-supersecret"
+WS17="$TMP/ws17/.env"; ETC17="$TMP/etc17/environment"
+chmod(){ return 1; }
+_persist_passed_env "$ENV17" "$WS17" "$ETC17" 1
+unset -f chmod
+if grep -q 'tk-supersecret' "$WS17" 2>/dev/null; then no "chmod-fail-must-not-persist-to-workspace-env ($(cat "$WS17"))"; else ok chmod-fail-must-not-persist-to-workspace-env; fi
+if grep -q 'tk-supersecret' "$ETC17" 2>/dev/null; then no "chmod-fail-must-not-persist-to-etc-environment ($(cat "$ETC17"))"; else ok chmod-fail-must-not-persist-to-etc-environment; fi
+
+[ "$fails" = 0 ] && { echo "PASS bootstrap_pod_env_smoke"; exit 0; } || { echo "FAIL bootstrap_pod_env_smoke"; exit 1; }
