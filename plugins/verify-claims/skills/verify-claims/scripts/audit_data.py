@@ -12,11 +12,19 @@ label/arm balance. The LLM (layer 2) reads the SAMPLE for semantics a script can
 leakage, off-distribution, mislabeling, "does this match the design intent").
 
 Usage:
-  python3 audit_data.py DATA.jsonl --out data_audit.json --sample data_audit_sample.jsonl \
+  python3 audit_data.py DATA.jsonl --out data_audit.json [--sample data_audit_sample.jsonl] \
       [--cot] [--require-finish-reason] [--source-field source] [--label-field arm] [--text-field assistant] \
       [--dup-field response] [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — looping over N files (the common per-arm/per-wave case): `--sample` defaults to
+`<out-stem>_sample.jsonl`, DERIVED FROM `--out`, not a fixed literal — so a unique `--out` per
+invocation also gets a unique sample by default. Built 2026-07-21 after automated-researcher#521:
+a 19-arm loop passed a unique `--out data_audit_train_<arm>.json` per invocation but relied on the
+old fixed-literal `--sample` default, so all 19 runs wrote the SAME sample file and only the last
+arm's stratified sample survived on disk — caught before it was relied on, but silent. Pass
+`--sample` explicitly only when you want a SHARED or otherwise different sample path.
 
 IMPORTANT — eval-rollout-shaped data (rows carrying per-row keys like `id`+`sample` or a
 `gen_config.seed` that make the WHOLE ROW unique by construction, e.g. `{id, sample, response,
@@ -39,7 +47,7 @@ minority inside a much larger majority they can miss the minority entirely — y
 a "clean" sample that is 100% base rows and 0% added rows. --label-field guarantees per-label
 coverage regardless of how small the minority is.
 """
-import argparse, hashlib, json, statistics, sys
+import argparse, hashlib, json, os, statistics, sys
 
 
 def load(path):
@@ -100,7 +108,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data")
     ap.add_argument("--out", default="data_audit.json")
-    ap.add_argument("--sample", default="data_audit_sample.jsonl")
+    ap.add_argument("--sample", default=None, help="stratified-sample output path; defaults to "
+                     "'<out-stem>_sample.jsonl' (derived from --out) so looping over N files with a "
+                     "unique --out each also gets a unique sample by default — pass this explicitly "
+                     "to share/override the sample path")
     ap.add_argument("--cot", action="store_true", help="CoT invariants: finish_reason==stop when present, closed </think>, non-empty answer")
     ap.add_argument("--require-finish-reason", action="store_true", help="In --cot mode, hard-fail rows missing finish_reason")
     ap.add_argument("--source-field", default="source")
@@ -115,6 +126,8 @@ def main():
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
     a = ap.parse_args()
+    if a.sample is None:
+        a.sample = os.path.splitext(a.out)[0] + "_sample.jsonl"
 
     rows = load(a.data)
     n = len(rows)
