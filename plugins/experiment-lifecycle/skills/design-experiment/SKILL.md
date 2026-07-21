@@ -351,6 +351,14 @@ must resolve **with evidence**, ticked in place (it becomes both protocol and re
 - **Seed it from the `CHECKLIST` template in this skill's `templates/`** — a UNIVERSAL core (lifecycle gates) + a
   STANDING data-audit gate + a CONDITIONAL menu (sample reads, smoke, anchor-gate, co-measure — each phrased as a
   *declared invariant*).
+- **Seed from THIS skill's templates only — never from a sibling experiment's registry copy** (#512): a closed
+  sibling's `CHECKLIST.md` / `data_audit_manifest.md` is that experiment's completed RECORD (ticks, evidence, and
+  resolved counts included), not a template — copying it and string-replacing fields ships fabricated evidence
+  (a stale field left behind reads as verified when it isn't, and a pre-ticked gate can get treated as already
+  satisfied). This applies to any registry file a design stage seeds from a sibling's completed record, not
+  `CHECKLIST.md` alone. (Parameter-descendant designs may inherit gate WORDING by citation if desired, never
+  tick-state or resolved counts.) `log-experiment`'s design-stage gate deterministically BLOCKs a staged
+  `CHECKLIST.md` that still carries any ticked gate marker, as a backstop.
 - **The checklist is YOURS to shape — this is the anti-overfitting rule.** Keep the universal gates; for each
   conditional gate, either instantiate its invariant for THIS experiment or mark it N.A.; then **ADD the
   experiment-specific gates** — you know this experiment's failure modes, the executor can't invent them (a gen step →

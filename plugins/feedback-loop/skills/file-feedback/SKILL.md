@@ -21,6 +21,10 @@ The config keys are:
 
 - `FEEDBACK_PRODUCT_REPO`: required `OWNER/REPO` for product Issues.
 - `FEEDBACK_INSTANCE_GUIDANCE`: optional path or URI for deployment-only feedback instructions.
+- `FEEDBACK_WF_CMD`: optional command to invoke `wf.sh` when it isn't on `PATH` (e.g. an absolute path to
+  the `aar-engineering` plugin's `skills/ship-change/scripts/wf.sh` in its own repo checkout). Set this when
+  `aar-engineering` is installed on this box but not discoverable by bare name — see the resolution order in
+  "Route It" step (1) below.
 
 Before filing, read the config if it exists:
 
@@ -92,12 +96,31 @@ repository owner's identity instead of the agent's — that is exactly what happ
 owner's identity because a box without an `aar-engineering` checkout let a raw-`gh` fallback through. Try, in
 order:
 
-1. **`wf.sh issue`, when `aar-engineering` is installed and configured:**
+1. **`wf.sh issue`, when `aar-engineering` is installed and configured.** Resolve the `wf.sh` command in
+   this order before concluding it isn't on this box — a bare-name lookup finding nothing is not the same as
+   `wf.sh` not existing:
+
+   1. `$FEEDBACK_WF_CMD`, when set (see Config above) — invoke it quoted (`"$FEEDBACK_WF_CMD"`) as the
+      `wf.sh` command, since it's a single absolute path that may contain spaces; an unquoted substitution
+      would word-split it.
+   2. `wf.sh` on `PATH`.
+   3. A sibling plugin-source checkout next to this repo: the `aar-engineering` plugin ships `wf.sh` but
+      lives in a separate repo checkout (e.g. `~/agentic-engineering/plugins/aar-engineering/skills/ship-change/scripts/wf.sh`),
+      never this one. `--plugin-dir` loading puts the plugin's skill *names* in context but not its source
+      path, so this step is a real search (sibling directories of this repo checkout, common plugin-source
+      roots), not a guess. If found this way, set `FEEDBACK_WF_CMD` via `feedback_loop_init.sh` so future
+      filings skip the search.
+
+   Only fall through to step (2) below once all three resolution steps come up empty.
 
    ```bash
    wf.sh issue <claude|codex> create -R "$FEEDBACK_PRODUCT_REPO" -t "<title>" -b "<body>" -l <type> -l <provenance>
    wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
    ```
+
+   (`wf.sh` here means whichever of the three resolution steps above found it — substitute the
+   sibling-checkout path for the bare name if that's what resolved, or `"$FEEDBACK_WF_CMD"` (quoted, per
+   step (1) above) if that's what resolved.)
 
 2. **`scripts/engineer_gh_issue.sh`, when `wf.sh` isn't installed but the box has the #149
    `WF_ENGINEER_TOKEN_CMD_<CLAUDE|CODEX>` seam configured.** This skill ships its own minimal, self-contained
