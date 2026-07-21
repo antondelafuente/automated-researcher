@@ -409,16 +409,36 @@ is_trivial_ignore() {
 # that still claims the file landed is not, and that flag must never wave a committed-claim through. The real
 # escape on a false positive is per the die message below — fix the ignore rule or reword the offending prose
 # line, then retry.
+#
+# #467: a basename+commit-claim match alone false-positives when the SAME basename legitimately exists TWICE
+# under $REL by design — once committed outside work/, once as a gitignored working copy under work/ (the
+# run-experiment R2-mirrored dual-copy layout, close-audit F1 fix). The manifest's claim is then plausibly
+# about the STAGED committed copy, not this excluded one. Before dying, check whether a file with this same
+# basename IS present in THIS run's own staged set (`git diff --cached` under $REL, already computed by the
+# caller's stage_worktree) — if so, downgrade to a printed note instead of a die. Preserves the #331 fail-
+# closed behavior EXACTLY when no staged counterpart shares the basename (the original scenario: a doc claims
+# committed, the file is staged nowhere) — that path still has no --skip-ignored escape.
 check_excluded_claim() {
-  local claim_file bn hit f
+  local claim_file bn hit f staged_path is_staged
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   local -r NEGATION_RE=' not |n'"'"'t '
+  local -a staged_paths=()
+  while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
+    < <(git -C "$WT" diff --cached -z --name-only -- "$REL")
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
     for f in "$@"; do
       bn="$(basename "$f")"
       if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE")"; then
-        die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        is_staged=0
+        for staged_path in "${staged_paths[@]}"; do
+          [ "$(basename "$staged_path")" = "$bn" ] && { is_staged=1; break; }
+        done
+        if [ "$is_staged" = 1 ]; then
+          note "excluded file '$f' shares a basename with a file that IS staged under $REL — treating $(basename "$claim_file")'s commit-claim as referring to that staged counterpart, not this excluded copy: $hit"
+        else
+          die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        fi
       fi
     done
   done
