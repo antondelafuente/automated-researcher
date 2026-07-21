@@ -82,6 +82,8 @@ FP_LINE='anchor: my-agent-task-always-succeeds-in-suspicious-ways'
 # Real-looking secret VALUES (assembled so this smoke file itself stays clean of a literal secret pattern).
 REAL_SK="sk-$(printf 'a%.0s' {1..28})"                 # sk- + 28 chars, after a non-word boundary
 REAL_GHP="ghp_$(printf 'A%.0s' {1..30})"
+# A format-valid (but not a real content hash) 64-hex-character sha256-shaped digest, for dataset MANIFEST.md fixtures.
+FAKE_SHA256="$(printf '0123456789abcdef%.0s' {1..4})"
 
 # make_repo <dir>: a fresh git repo with origin/main carrying a pre-existing journal page (the FP line).
 make_repo() {
@@ -453,6 +455,13 @@ if run_dry "$T/reg/note" --only mine.py; then fail "--only on a symlink to a co-
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
+# #358: also covers the first-class 'exploration' (FINDINGS.md, no DESIGN.md) and 'dataset' (MANIFEST.md, no
+# DESIGN.md) record kinds (research-lab#136) — auto-classification, the KIND override no longer dying with
+# "unknown KIND override" for these two values, their structural gates (Status: EXPLORATORY header;
+# sha256 table + r2:// path), that the shared secret scan still runs for both, that DESIGN.md takes
+# precedence over FINDINGS.md/MANIFEST.md in auto-classification, and that --only is still refused for both
+# (same #374 restriction as design-stage/experiment, since their gates read evidence straight from $DIR).
+#
 # #467: check_excluded_claim's basename+commit-claim match false-positived when the SAME basename legitimately
 # exists TWICE by design — once committed outside work/, once as a gitignored working copy under work/ (the
 # run-experiment R2-mirrored dual-copy layout). Downgrade to a note ONLY when a same-basename file IS staged.
@@ -504,6 +513,143 @@ echo "[smoke] case 40: no TEMP.md anywhere in the staged set -> PASS (no false-p
 T=$(mktemp_d); make_repo "$T"
 printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note40.md"
 if run_dry "$T/reg/note"; then pass "clean note with no TEMP.md logs fine"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+# #358: 'exploration' (FINDINGS.md, no DESIGN.md) and 'dataset' (MANIFEST.md, no DESIGN.md) record kinds
+# (research-lab#136). Reuse make_design_stage_repo's empty-base-then-add-new-content fixture (the directory
+# it hands back is just a fresh, empty registry dir ready for whatever content a case writes into it — the
+# helper's name is a historical artifact of the first gate it was written for).
+
+echo "[smoke] case 41: FINDINGS.md with a Status: EXPLORATORY header, no DESIGN.md -> classifies as exploration and PASSes"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nStatus: EXPLORATORY\n\nSome exploratory notes.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then
+  case "$LAST_ERR" in *"classified: exploration"*) pass "FINDINGS.md classifies as exploration and the gate passes";;
+    *) fail "passed but did not classify as exploration: $LAST_ERR";; esac
+else fail "valid exploration record was BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 42: FINDINGS.md with no Status: EXPLORATORY marker -> BLOCK"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nSome exploratory notes, no status line.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "exploration record with no Status: EXPLORATORY marker was NOT blocked"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "missing Status: EXPLORATORY marker blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 43: MANIFEST.md with a sha256 table + an r2:// path, no DESIGN.md -> classifies as dataset and PASSes"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then
+  case "$LAST_ERR" in *"classified: dataset"*) pass "MANIFEST.md classifies as dataset and the gate passes";;
+    *) fail "passed but did not classify as dataset: $LAST_ERR";; esac
+else fail "valid dataset record was BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 44: MANIFEST.md with an r2:// path but no sha256 table -> BLOCK"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\nNo hash table here.\n' > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then fail "dataset record with no sha256 table was NOT blocked"; else
+  case "$LAST_ERR" in *"no sha256 table"*) pass "missing sha256 table blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 45: MANIFEST.md with a sha256 table but no r2:// path -> BLOCK"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Manifest\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then fail "dataset record with no R2 path was NOT blocked"; else
+  case "$LAST_ERR" in *"no R2 path"*) pass "missing R2 path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 46: explicit KIND=exploration override (with a valid FINDINGS.md) -> PASS, not the 'unknown KIND override' die (the #358 bug this issue fixes)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'Status: EXPLORATORY\n\nNotes.\n' > "$T/reg/design/FINDINGS.md"
+printf 'exploration\n' > "$T/reg/design/KIND"
+if run_dry "$T/reg/design"; then pass "KIND=exploration override passes the gate"; else
+  fail "KIND=exploration override was BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 47: explicit KIND=dataset override (with a valid MANIFEST.md) -> PASS, not the 'unknown KIND override' die (the #358 bug this issue fixes)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'R2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
+printf 'dataset\n' > "$T/reg/design/KIND"
+if run_dry "$T/reg/design"; then pass "KIND=dataset override passes the gate"; else
+  fail "KIND=dataset override was BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 48: exploration record with a real secret in FINDINGS.md -> BLOCK (the shared secret scan still runs for exploration)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'Status: EXPLORATORY\n\nkey = %s\n' "$REAL_SK" > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "exploration record with a real secret was NOT blocked"; else
+  case "$LAST_ERR" in *"secret-value pattern"*) pass "exploration record's secret scan still runs and blocks";;
+    *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 49: dataset record with a real secret in MANIFEST.md -> BLOCK (the shared secret scan still runs for dataset)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'R2 path: r2://bucket/dataset-1/\nkey = %s\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$REAL_GHP" "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then fail "dataset record with a real secret was NOT blocked"; else
+  case "$LAST_ERR" in *"secret-value pattern"*) pass "dataset record's secret scan still runs and blocks";;
+    *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 50: --only against an exploration dir (KIND != note) -> BLOCK (same #374 restriction as design-stage/experiment — its gate reads FINDINGS.md straight from \$DIR, not the staged set)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'Status: EXPLORATORY\n\nNotes.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design" --only FINDINGS.md; then fail "--only on an exploration dir was NOT blocked"; else
+  case "$LAST_ERR" in *"--only is only supported for KIND=note"*) pass "--only on an exploration dir refused";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 51: unrecognized KIND override -> BLOCK ('unknown KIND override'), and the message now lists exploration/dataset too"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf 'bogus\n' > "$T/reg/design/KIND"
+printf 'anything\n' > "$T/reg/design/whatever.md"
+if run_dry "$T/reg/design"; then fail "unrecognized KIND override was NOT blocked"; else
+  case "$LAST_ERR" in *"unknown KIND override: 'bogus'"*"exploration"*"dataset"*) pass "unrecognized KIND override blocked, message mentions the new kinds";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 52: DESIGN.md + FINDINGS.md both present -> classifies design-stage, not exploration (FINDINGS.md only applies when DESIGN.md is absent)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Design\n' > "$T/reg/design/DESIGN.md"
+printf 'Status: EXPLORATORY\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then :; fi
+case "$LAST_ERR" in *"classified: design-stage"*) pass "DESIGN.md takes precedence over FINDINGS.md in auto-classification";;
+  *) fail "did not classify as design-stage when DESIGN.md is present: $LAST_ERR";; esac
+rm -rf "$T"
+
+echo "[smoke] case 53: FINDINGS.md merely MENTIONS 'Status: EXPLORATORY' in prose (not as its own header line) -> BLOCK (P0: gate must not accept a substring match anywhere in the file)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nMissing Status: EXPLORATORY marker in this draft, will add before landing.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "prose-only mention of Status: EXPLORATORY was NOT blocked (accepted a substring match instead of requiring a header line)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "prose-only mention of the marker blocked, header still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 54: FINDINGS.md's own line BEGINS WITH 'Status: EXPLORATORY' but continues as prose (not a bare header) -> BLOCK (round-3 review: the end of the marker must be anchored too, not just the start — case 53 only covers a prefixed prose mention)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nStatus: EXPLORATORY header is missing from the upstream draft.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "prose continuing past the marker on its own line was NOT blocked (end of marker not anchored)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "prose trailing the marker on its own line blocked, bare header still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 55: MANIFEST.md sha256 table names the column but every row is a placeholder (no real 64-hex digest) -> BLOCK (P1: gate must verify an actual digest, not just the word 'sha256')"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then fail "dataset record with a placeholder (non-hex, non-64-char) hash was NOT blocked"; else
+  case "$LAST_ERR" in *"no real 64-character hex digest"*) pass "placeholder sha256 value blocked, real digest still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 56: FINDINGS.md's own line is 'StatusEXPLORATORY' (no colon, no separator at all) -> BLOCK (round-4 review: a bare \`[^A-Za-z0-9]{0,4}\` quantifier accepted zero separator characters — the colon must now be required text, not optional decoration)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nStatusEXPLORATORY\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "a colon-less 'StatusEXPLORATORY' line was NOT blocked (zero-separator form accepted)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "colon-less marker blocked, literal ':' separator still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

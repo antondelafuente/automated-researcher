@@ -1,13 +1,16 @@
 ---
 name: log-experiment
 description: >-
-  Log a finished experiment, a design-stage pre-registration, or a plain note to the research repo as a GATED
-  pull request and merge it — the research counterpart to ship-change. Classifies by the registry convention
-  (DESIGN.md+RESULTS.md = experiment; DESIGN.md alone = design-stage, the design PR; otherwise note) and gates
-  by context: an experiment verifies its close-audit is present + triaged; a design-stage verifies its
-  design-audit is present + secret scan; a note runs a deterministic secret scan. A cross-family engineer bot
-  (the family opposite the author) approves to satisfy branch protection. Run this instead of hand-doing branch/PR/approve/merge.
-  Self-contained (does not source wf.sh); config via RESEARCH_REPO + the instance engineer seam.
+  Log a finished experiment, a design-stage pre-registration, an exploration, a dataset, or a plain note to
+  the research repo as a GATED pull request and merge it — the research counterpart to ship-change.
+  Classifies by the registry convention (DESIGN.md+RESULTS.md = experiment; DESIGN.md alone = design-stage,
+  the design PR; FINDINGS.md alone = exploration; MANIFEST.md alone = dataset; otherwise note) and gates by
+  context: an experiment verifies its close-audit is present + triaged; a design-stage verifies its
+  design-audit is present + secret scan; an exploration verifies a Status: EXPLORATORY header + secret scan;
+  a dataset verifies a sha256 table + an R2 path + secret scan; a note runs a deterministic secret scan. A
+  cross-family engineer bot (the family opposite the author) approves to satisfy branch protection. Run this
+  instead of hand-doing branch/PR/approve/merge. Self-contained (does not source wf.sh); config via
+  RESEARCH_REPO + the instance engineer seam.
 ---
 # log-experiment — log an experiment or note to GitHub as a gated PR
 
@@ -52,8 +55,8 @@ narrowed set with no `--only`-awareness of their own. Fail-closed: a named path 
 dies — it never silently falls back to staging the whole dir; a named path that is itself a symlink is never
 resolved to its target, so it stages (and then symlink-scan-BLOCKs) as the symlink you named, not a co-tenant
 file it happens to point at. Only supported when `<registry-dir>` classifies as **note** — the
-experiment/design-stage gates read their audit/design evidence straight from the dir itself, not the
-allowlisted staged set, so narrowing there is refused rather than risk approving evidence that never actually
+experiment/design-stage/exploration/dataset gates read their audit/design/marker evidence straight from the
+dir itself, not the allowlisted staged set, so narrowing there is refused rather than risk approving evidence that never actually
 lands in the commit.
 
 The driver **classifies by the registry convention** (no label needed):
@@ -62,6 +65,8 @@ The driver **classifies by the registry convention** (no label needed):
 |---|---|---|
 | `DESIGN.md` **and** `RESULTS.md` | **experiment** | verify the close-audit is present + triaged |
 | `DESIGN.md`, **no** `RESULTS.md` | **design-stage** | verify the design-audit is present (`DESIGN_AUDIT*.md`), the Presentation section is locked with the researcher, + deterministic secret scan |
+| `FINDINGS.md`, **no** `DESIGN.md` | **exploration** | verify the `Status: EXPLORATORY` header + deterministic secret scan |
+| `MANIFEST.md`, **no** `DESIGN.md` | **dataset** | verify a sha256 table + an R2 path + deterministic secret scan |
 | anything else | **note** | deterministic secret scan |
 
 The two legs of the **two-PR experiment flow** map onto the two design-bearing kinds: log a dir at design
@@ -69,7 +74,13 @@ time → **design-stage** (the design PR, design-audit gate); run the experiment
 **experiment** (the results PR, close-audit gate; its diff is the new `RESULTS.md`/`AUDIT.md`, the design
 files already merged).
 
-A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is honored as an explicit override.
+**exploration** and **dataset** (research-lab#136) are two lighter-weight record kinds that never get a
+design/close audit: an exploration is a distilled exploratory burst, never citable as evidence; a dataset
+pins generated data's R2 bytes, shas, provenance, and consumers. Both were previously indistinguishable from
+a plain note (safe fall-through — secret scan only) until this convention made them first-class.
+
+A `KIND` file in the dir (containing `experiment`, `design-stage`, `exploration`, `dataset`, or `note`) is
+honored as an explicit override.
 
 ## The gates (fail-closed — an unparseable verdict BLOCKS, never passes)
 
@@ -102,6 +113,12 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   and passes; a missing/stale/unparseable snapshot does not — this closes the #347 silent miss where three
   closed experiments never got a viewer page because nothing ever wrote or checked this block. A missing
   design-audit, a missing/unlocked Presentation section, a secret hit, or a missing/stale snapshot, BLOCKS.
+- **Exploration.** A distilled exploratory burst (`FINDINGS.md`, no `DESIGN.md`), never citable as evidence —
+  no design/close audit. BLOCK unless `FINDINGS.md` carries a `Status: EXPLORATORY` marker (so it's never
+  mistaken downstream for an audited result), plus the deterministic secret scan.
+- **Dataset.** Generated data with its R2 bytes, shas, provenance, and consumers (`MANIFEST.md`, no
+  `DESIGN.md`) — no design/close audit. BLOCK unless `MANIFEST.md` carries both a sha256 table (pinning the
+  data's content hashes) and an `r2://` path (locating the actual bytes), plus the deterministic secret scan.
 - **Note.** A note has nothing to adversarially audit, so there is **no LLM review** — only a deterministic
   scan for secret-value patterns (`ghp_…`, `github_pat_…`, `sk-…`, `AKIA…`, PEM private keys). A hit BLOCKS.
 
@@ -118,7 +135,7 @@ never actually landed. After staging, the driver diffs "files present in the dir
 staged": any non-trivial excluded file (well-known junk like `.DS_Store`/`__pycache__`/`*.pyc` is filtered
 out) is printed and **BLOCKS**. If the exclusion really is an intentional R2-scale one, re-run with
 `--skip-ignored` to acknowledge and proceed; otherwise fix the `.gitignore` or rename/relocate the file so it
-lands, then retry. Applies to every kind (experiment/design-stage/note) — the underlying `git add` behavior
+lands, then retry. Applies to every kind (experiment/design-stage/exploration/dataset/note) — the underlying `git add` behavior
 is generic, not gate-specific.
 
 `--skip-ignored` never bypasses one thing, though: if `RESULTS.md` or `ARTIFACT_MANIFEST.md` verbatim-claims

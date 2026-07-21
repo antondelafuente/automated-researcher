@@ -19,11 +19,16 @@
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
-#   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
-#   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present, the
-#                                               Presentation section carries the researcher's lock line, any
-#                                               staged CHECKLIST.md is UNSTARTED (#512), + secret scan.
-#   - note         (anything else):            deterministic secret scan only.
+#   - experiment   (DESIGN.md + RESULTS.md):    verify the close-audit is present and clean.
+#   - design-stage (DESIGN.md, no RESULTS.md):  verify the design-audit (DESIGN_AUDIT*.md) is present, the
+#                                                Presentation section carries the researcher's lock line, any
+#                                                staged CHECKLIST.md is UNSTARTED (#512), + secret scan.
+#   - exploration  (FINDINGS.md, no DESIGN.md): distilled exploratory burst, never citable as evidence
+#                                                (research-lab#136); verify the Status: EXPLORATORY marker
+#                                                + secret scan.
+#   - dataset      (MANIFEST.md, no DESIGN.md): generated data with R2 bytes/shas/provenance (research-lab
+#                                                #136); verify a sha256 table + an R2 path + secret scan.
+#   - note         (anything else):             deterministic secret scan only.
 # Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
 # staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
 # BLOCK regardless of KIND — a committed symlink's target is only ever meaningful on the machine, or worse the
@@ -203,18 +208,21 @@ KIND=""
 if [ -z "$KIND" ]; then
   if   [ -f "$DIR/DESIGN.md" ] && [ -f "$DIR/RESULTS.md" ]; then KIND="experiment"     # results leg: close-audit gate
   elif [ -f "$DIR/DESIGN.md" ];                                then KIND="design-stage"  # design leg: design-audit gate
+  elif [ -f "$DIR/FINDINGS.md" ];                              then KIND="exploration"   # distilled exploratory burst, never citable (research-lab#136)
+  elif [ -f "$DIR/MANIFEST.md" ];                              then KIND="dataset"       # generated data: R2 bytes + shas + provenance (research-lab#136)
   else                                                              KIND="note"; fi       # everything else: secret scan
 fi
 note "classified: $KIND  ($REL)"
 
-# --only is restricted to KIND=note (#374 review): gate_experiment/gate_design_stage validate close-audit /
-# design-audit / Presentation-lock evidence by reading RESULTS.md/AUDIT.md/AUDIT_RESPONSE.md/DESIGN.md/
-# DESIGN_AUDIT*.md/START.md straight from $DIR, NOT from STAGE_PATHS — so an --only allowlist that leaves
-# those files out of the staged set would let the gate verify evidence that never actually lands in the
-# commit/PR, while the approval body still claims it did. gate_note reads no evidentiary file at all (secret
-# scan runs on the staged set only), so it's the only KIND where narrowing the staged set can't create that
-# gap — and it's also the actual reported use case (a shared multi-tenant dashboard dir has no DESIGN.md/
-# RESULTS.md, so it always classifies as 'note').
+# --only is restricted to KIND=note (#374 review): gate_experiment/gate_design_stage/gate_exploration/
+# gate_dataset validate close-audit / design-audit / Presentation-lock / Status-marker / sha256+R2 evidence
+# by reading RESULTS.md/AUDIT.md/AUDIT_RESPONSE.md/DESIGN.md/DESIGN_AUDIT*.md/START.md/FINDINGS.md/
+# MANIFEST.md straight from $DIR, NOT from STAGE_PATHS — so an --only allowlist that leaves those files out
+# of the staged set would let the gate verify evidence that never actually lands in the commit/PR, while the
+# approval body still claims it did. gate_note reads no evidentiary file at all (secret scan runs on the
+# staged set only), so it's the only KIND where narrowing the staged set can't create that gap — and it's
+# also the actual reported use case (a shared multi-tenant dashboard dir has no DESIGN.md/RESULTS.md, so it
+# always classifies as 'note').
 if [ "${#ONLY_REL[@]}" -gt 0 ] && [ "$KIND" != "note" ]; then
   die "--only is only supported for KIND=note — this dir classified as '$KIND', whose gate reads audit/design evidence directly from $DIR rather than the staged set, so an --only allowlist could approve/merge a record whose cited evidence was never actually committed; log the whole dir (drop --only), or split the allowlisted content into its own single-owner registry dir"
 fi
@@ -330,8 +338,9 @@ temp_handoff_scan() {
   hit="$(git -C "$WT" diff --cached --name-only -z -- "$REL" | tr '\0' '\n' | grep -xF "$REL/TEMP.md" || true)"
   [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
 }
-# Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved).
-scan_if_needed() { case "$KIND" in note|design-stage) secret_scan ;; esac; }
+# Which kinds get a secret scan (note + design-stage + exploration + dataset; the experiment gate never
+# scanned — preserved).
+scan_if_needed() { case "$KIND" in note|design-stage|exploration|dataset) secret_scan ;; esac; }
 gate_note() {
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok (secret scan runs on the staged set)"
@@ -404,11 +413,57 @@ gate_design_stage() {
   APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, instance-profile snapshot in START.md verified (#469), CHECKLIST.md unstarted (#512), and secret scan clean; pre-launch leg of the two-PR flow."
   note "design-stage gate ok: design-audit present + Presentation lock found + instance-profile snapshot verified + checklist unstarted (secret scan runs on the staged set)"
 }
+gate_exploration() {
+  # An exploration record (research-lab#136): a distilled exploratory burst — no design-audit/close-audit,
+  # never citable as evidence. The only structural requirement beyond the shared secret scan is that
+  # FINDINGS.md visibly carries the Status: EXPLORATORY marker AS A HEADER LINE, so nobody downstream
+  # mistakes it for an audited result. Tolerant of markdown decoration around the marker (heading level,
+  # bold, a leading '>'), not of the marker text itself — same tolerant-of-decoration/precise-on-text split
+  # as the design-stage Presentation-lock check above. The decoration is anchored at BOTH the START
+  # (`^[[:space:]#>*_]*`) and the END (`[[:space:]#*_]*$`) of the line, so neither a prose sentence merely
+  # MENTIONING the marker (e.g. "no Status: EXPLORATORY header found") nor one that merely BEGINS with it
+  # (e.g. "Status: EXPLORATORY header is missing") satisfies the gate — the marker must open AND close its
+  # own line, not appear as a prefix or substring anywhere in the file's text. The separator between
+  # `Status` and `EXPLORATORY` is ALSO anchored on required text, not just tolerant of decoration: it must
+  # contain a literal `:` (whitespace/`*`/`_` allowed on either side of it), so a colon-less line like
+  # `StatusEXPLORATORY` — which a bare `[^A-Za-z0-9]{0,4}` quantifier previously accepted with zero
+  # separator characters — no longer satisfies the gate either.
+  # Defend the invariant on the KIND-override path too (auto-classify only reaches here when DESIGN.md is
+  # absent, but a KIND=exploration file bypasses that).
+  [ -f "$DIR/FINDINGS.md" ] || die "exploration dir missing FINDINGS.md — an exploration record is a distilled exploratory burst, never citable as evidence"
+  [ -f "$DIR/DESIGN.md" ] && die "exploration dir unexpectedly has DESIGN.md — should classify as experiment/design-stage"
+  grep -qE '^[[:space:]#>*_]*Status[[:space:]*_]*:[[:space:]*_]*EXPLORATORY[[:space:]#*_]*$' "$DIR/FINDINGS.md" \
+    || die "exploration dir's FINDINGS.md has no 'Status: EXPLORATORY' header — an exploration record must carry this marker as its own line (not merely mentioned in prose) so it is never mistaken for citable evidence — surface for human"
+  APPROVAL_BODY="Exploration record — FINDINGS.md carries the Status: EXPLORATORY marker; secret scan clean; never citable as evidence per registry convention."
+  note "exploration gate ok: Status: EXPLORATORY marker found in FINDINGS.md (secret scan runs on the staged set)"
+}
+gate_dataset() {
+  # A dataset record (research-lab#136): generated data with its R2 bytes, shas, provenance, and consumers —
+  # no design-audit/close-audit. The structural requirement beyond the shared secret scan: MANIFEST.md must
+  # carry both a sha256 table with at least one REAL 64-hex-character digest (pinning the generated data's
+  # content hashes, the same discipline ARTIFACT_MANIFEST.md uses for heavy artifacts elsewhere in this
+  # registry — a table that merely names the 'sha256' column but carries no actual digest, e.g. a
+  # placeholder like 'abcabc', does not pin anything) and an R2 path (the r2:// scheme this repo uses
+  # everywhere else for artifact-store pointers) locating the actual bytes.
+  # Defend the invariant on the KIND-override path too, same reasoning as gate_exploration above.
+  [ -f "$DIR/MANIFEST.md" ] || die "dataset dir missing MANIFEST.md — a dataset record pins the generated data's R2 bytes, shas, provenance, and consumers"
+  [ -f "$DIR/DESIGN.md" ] && die "dataset dir unexpectedly has DESIGN.md — should classify as experiment/design-stage"
+  grep -qiE '^[[:space:]]*\|.*sha256' "$DIR/MANIFEST.md" \
+    || die "dataset dir's MANIFEST.md has no sha256 table (expected a markdown table row naming 'sha256') — a dataset record must pin the generated data's content hashes — surface for human"
+  grep -qE '\|[[:space:]]*[0-9a-fA-F]{64}[[:space:]]*\|' "$DIR/MANIFEST.md" \
+    || die "dataset dir's MANIFEST.md sha256 table names the column but has no real 64-character hex digest in any row (e.g. a placeholder like 'abcabc') — a dataset record must pin actual content hashes, not placeholder text — surface for human"
+  grep -qE 'r2://' "$DIR/MANIFEST.md" \
+    || die "dataset dir's MANIFEST.md has no R2 path (expected an 'r2://' URI) — a dataset record must locate the generated data's bytes in the artifact store — surface for human"
+  APPROVAL_BODY="Dataset record — MANIFEST.md carries a sha256 table and an R2 path; secret scan clean; per registry convention."
+  note "dataset gate ok: sha256 table + R2 path found in MANIFEST.md (secret scan runs on the staged set)"
+}
 case "$KIND" in
   experiment)   gate_experiment ;;
   design-stage) gate_design_stage ;;
+  exploration)  gate_exploration ;;
+  dataset)      gate_dataset ;;
   note)         gate_note ;;
-  *)            die "unknown KIND override: '$KIND' (expected experiment|design-stage|note)" ;;
+  *)            die "unknown KIND override: '$KIND' (expected experiment|design-stage|exploration|dataset|note)" ;;
 esac
 
 # ---- dedicated worktree: stage $REL off origin/$BASE_BRANCH so the secret scan sees EXACTLY the commit set ----

@@ -1,3 +1,11 @@
+- experiment-lifecycle 0.3.75 (2026-07-21): `log-experiment.sh` gains two first-class registry record kinds
+  (research-lab#136): **exploration** (`FINDINGS.md`, no `DESIGN.md`) and **dataset** (`MANIFEST.md`, no
+  `DESIGN.md`). Both previously fell through to a plain `note` (safe — secret scan only, correct gate) with
+  no structural check of their own; an explicit `KIND=exploration`/`KIND=dataset` override also died outright
+  as an "unknown KIND override" instead of falling through, which this fixes. Each new kind keeps the shared
+  secret scan and adds one cheap fail-closed structural check: exploration requires a `Status: EXPLORATORY`
+  header in `FINDINGS.md`; dataset requires a sha256 table and an `r2://` path in `MANIFEST.md`. PR
+  title/body already key off `$KIND`, so they reflect the new kinds with no separate change (#358).
 - verify-claims 0.7.27 (2026-07-21): `audit_experiment.sh` fixes from the 2026-07-10 csp1-scrub-ladder-1
   close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery needed undocumented
   moves), #373. (1) The built-in codex auditor now retries a usage-limit failure via an ephemeral,
