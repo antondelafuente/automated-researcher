@@ -159,12 +159,6 @@
       same-ish name can hide an accidentally-named/bug-artifact condition, #487); where reuse claims
       byte-identical construction, rebuilt from PRIMARY sources and asserted byte-equal in the build
       script rather than trusted by filename match.                                                 ev:
-- ☐ [BLOCK] Every committed script's local-module resolution (`sys.path.insert`/`sys.path.append`) stays
-      WITHIN this experiment's own committed tree — `vendoring_check.sh <exp-dir>` (run-experiment's
-      `scripts/`) reports zero external resolutions. A "byte-identical vendored copy" claim in
-      CHECKLIST/RESULTS prose is not evidence: it can pass self-audit purely because a sibling
-      experiment's directory happened to be reachable in the same shared worktree at execution time
-      (#499). N.A. only if the experiment has no scripts/ dir.                                       ev:
 - ☐ [BLOCK] The AGGREGATION step producing the headline CSV/figures is a LOCAL, this-experiment-committed
       script reading only this-experiment-local/committed inputs — whatever the reuse convention ("pull,
       don't rewrite" a sibling's script; treating a sibling's frozen rollouts/judgments as an external

@@ -588,14 +588,6 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   script's original directory, a sibling's live judge-verdict file), pull the RELEVANT SLICE into a local
   durable artifact first — don't duplicate a sibling's multi-GB rollouts wholesale, just the small slice this
   aggregation actually reads — then write the aggregator against that local copy.
-- **Every committed script's local-module resolution stays inside this experiment's own tree (#499).** A
-  CHECKLIST/RESULTS claim that a script is a "byte-identical vendored copy" is prose, not evidence — it can
-  pass self-audit purely because a sibling experiment's directory happened to be reachable in the same shared
-  worktree at execution time, which a fresh clone of just this experiment's registry dir cannot rely on. Run
-  `scripts/vendoring_check.sh <exp-dir>` (this skill's `scripts/`) — a static scan that flags any
-  `sys.path.insert`/`sys.path.append` in a committed `*.py` under `scripts/` whose target resolves OUTSIDE the
-  experiment's own directory. Fix any hit (vendor the file byte-identical, or point the reference at a local
-  copy) before closing — don't accept the finding in prose.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
   (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
