@@ -403,6 +403,15 @@ rollouts CI-overlap historical values before trusting it for the real run. A loc
 needed for two remaining cases — vLLM serving of models too large for direct Tinker-side sampling, and offline
 artifact archival — see the archive-download guidance immediately below (#330) for those.
 
+**Tinker's sampling seed is NOT byte-exact replay — it gives row-identity/bookkeeping determinism only
+(#477).** A recorded `(prompt, seed, temperature)` triple does not reproduce byte-identical text across
+separate `sample()` calls on Tinker's direct-sampling stack: 3 back-to-back calls in the SAME process with an
+IDENTICAL seed/prompt/params produced 3 mutually different completions. A depth-independent `seed_for(...)`
+scheme still recomputes each row's recorded `gen_config.seed` exactly, so presence-based resume/dedup and
+"extend samples without re-rolling earlier ones" hold at the row-identity/bookkeeping level — but don't design
+a CHECKLIST/design gate around "row N regenerates byte-identically," and don't phrase a design/results doc as
+claiming byte-exact replay from the seed alone.
+
 **Tinker checkpoint-archive downloads, for the remaining cases above where a local adapter file is genuinely
 required (#330): timeout AND concurrency guidance differ by code path.** Archive creation server-side can take up
 to ~1hr even for a modest rank-32 LoRA adapter (observed 29-55min for a 3B-base adapter) — a plain
@@ -772,6 +781,26 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   (e.g. >$5). `judge_balance_check.sh` in this skill's `scripts/` does the threshold/comparison arithmetic so it
   doesn't get re-derived per run — it takes the balance and rate numbers you already have and tells you OK or
   BLOCKED; it has no opinion on the provider or how you fetched the balance.
+- **Smoke-test the EXACT provider-pinned request before writing a driver, not just the models/endpoints listing
+  (#453).** Pinning OpenRouter's `provider.only`/`provider.order` to a specific provider slug can 404 for reasons
+  invisible anywhere in the API: `provider={"only":["deepseek"]}` failed every call with `HTTP 404 "No endpoints
+  available matching your guardrail restrictions and data policy"`, even though `/api/v1/models/.../endpoints`
+  showed that same endpoint healthy at 99.9% uptime — caused by an account-level privacy/data-policy exclusion
+  that has no REST surface to read or set (`/api/v1/key`, `/api/v1/settings`, `/api/v1/user` all checked, none
+  expose it), while every third-party re-host of the same model routed fine. One curl of the exact
+  provider-restricted request body, before any driver code, catches this before a paid smoke run does — one
+  incident burned a full 100-call smoke cycle misdiagnosing it as a driver bug before isolating it via manual
+  curl probing outside the driver. Not fixable from the API side: fall back to default/unpinned routing (or a
+  different provider slug) rather than trying to change the account setting mid-run.
+- **Provider Batch APIs: error files nest under `response.body.error`, and `custom_id` has a hard length cap
+  (#363).** OpenAI Batch API error files (`error_file_id` content) put the actual per-row error object under
+  `response.body.error`, not a top-level `error` field — a naive `rec.get("error")` parse silently returns
+  `None` for genuine content-policy-blocked rows, corrupting the error audit trail with no exception raised.
+  Anthropic's Message Batches `custom_id` is capped at `^[a-zA-Z0-9_-]{1,64}$`: on a real pool keyed by natural
+  (non-index) ids, 10,755/19,996 rows exceeded 64 chars (max observed 111) and would be rejected outright at
+  batch-creation time. Fix: parse `response.body.error` as a fallback when reading OpenAI batch error files, and
+  use an index-based `custom_id` scheme (e.g. `r{idx:06d}`) with a persisted local `custom_id -> source_id` join
+  table — for BOTH providers, for join-logic consistency — rather than keying batches by natural ids.
 
 ## Gotchas
 
