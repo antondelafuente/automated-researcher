@@ -137,9 +137,10 @@ else
   ok "an absolute path is rejected, not just presence-checked"
 fi
 
-# 4c. A kind=uri value containing shell metacharacters is rejected outright (code-review F2) —
-#     the safe charset, not caller-side quoting, is what prevents injection if this output is ever
-#     naively sourced.
+# 4c. A kind=uri value containing shell metacharacters is rejected outright (code-review F2). The
+#     charset reduces shell-metacharacter exposure but deliberately keeps '&' in-band, so it does NOT
+#     make sourcing/eval of resolver output safe — the actual safeguard is the resolver header's
+#     prohibition on ever sourcing/eval'ing this output (#585 P1).
 cat > "$T/uri-metachars.toml" <<'EOF'
 schema_version = 1
 [recipes.visualization_preview]
@@ -297,6 +298,24 @@ if AAR_PROFILE="$T/uri-authority-no-host.toml" bash "$RESOLVE" >/dev/null 2>"$T/
 else
   ok "a URI with a port but no host in its authority is rejected"
 fi
+
+# 4m. The host/bucket requirement applies to every scheme, not just https — the round-2 fix checked
+#     https only, so 'r2://:8443/recipe' (port, no bucket) and 's3://@/recipe' (userinfo, no bucket)
+#     still passed (#585 P0, review round 3).
+for bad_uri in "r2://:8443/recipe" "s3://@/recipe"; do
+  cat > "$T/uri-hostless-scheme.toml" <<EOF
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "$bad_uri"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+EOF
+  if AAR_PROFILE="$T/uri-hostless-scheme.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4m"; then
+    err "resolver accepted hostless URI '$bad_uri' (#585 P0, round 3)"
+  else
+    ok "hostless URI '$bad_uri' is rejected (host/bucket check is scheme-independent)"
+  fi
+done
 
 # 5. Explicit publish boundary: --publish on the complete profile resolves [recipes.visualization_publish]
 #    — its OWN publish-destination recipe — and never [recipes.viewer].

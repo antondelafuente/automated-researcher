@@ -145,15 +145,14 @@ def _valid_uri(v):
     if not rest or _UNSAFE_CHARS.search(rest):
         return False
     # The authority is the leading run up to the first '/', '?', or '#' (a URI's path/query/fragment
-    # never begins the authority component). It must be non-empty — a bare rest.startswith(('/','?','#'))
-    # check (the round-1 fix) still let an authority-shaped-but-hostless string like a bare ':PORT' prefix
-    # through, since that text starts with none of those chars (#585 P0 round 2). For https specifically,
-    # also require a non-empty host segment before an optional ':port' — a leading ':PORT' is a non-empty
-    # authority with an empty host.
+    # never begins the authority component). Every supported scheme names its target in the host/bucket
+    # position, so the check is scheme-independent (#585 P0 round 3 — the round-2 fix applied it to
+    # https only, letting 'r2://:PORT/x' and 's3://@/x' through): strip an optional 'userinfo@' prefix
+    # and an optional ':port' suffix; what remains must be non-empty. This also subsumes the round-1
+    # empty-authority case ('https://?query=yes' has an empty host).
     authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
-    if not authority:
-        return False
-    if m.group(1) == "https" and not authority.split(":", 1)[0]:
+    host = authority.rsplit("@", 1)[-1].split(":", 1)[0]
+    if not host:
         return False
     return _no_traversal_uri(v)
 
