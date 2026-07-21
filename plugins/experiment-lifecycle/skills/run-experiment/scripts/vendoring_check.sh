@@ -145,10 +145,14 @@ for root, _dirs, files in os.walk(scripts_dir):
             else:
                 # A bare relative string literal: Python resolves it against the process's CWD at
                 # invocation time, which this static scan cannot know. Check every plausible invocation
-                # CWD -- the script's own directory, and the experiment root (the common CWD when a
-                # script is invoked as `python scripts/main.py` from the experiment root) -- and flag a
-                # violation if EITHER anchor escapes, fail-closed rather than trusting one guessed anchor.
-                anchors = sorted({script_dir, exp_dir})
+                # CWD -- the script's own directory; the experiment root (the common CWD when a script is
+                # invoked as `python scripts/main.py` from the experiment root); and the shared registry
+                # root one directory above the experiment (the CWD when invoked as
+                # `python <exp-dir-name>/scripts/main.py` from there -- #499 round-2 P0 review:
+                # `sys.path.insert(0, "scripts/lib")` passed both prior anchors but escaped to an external
+                # sibling path once resolved from the registry root) -- and flag a violation if ANY anchor
+                # escapes, fail-closed rather than trusting a guessed subset.
+                anchors = sorted({script_dir, exp_dir, os.path.dirname(exp_dir)})
             for anchor in anchors:
                 resolved = target if anchor is None else os.path.normpath(os.path.join(anchor, target))
                 resolved = os.path.realpath(resolved)

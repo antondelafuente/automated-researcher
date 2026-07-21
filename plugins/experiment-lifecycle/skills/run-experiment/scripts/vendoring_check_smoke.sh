@@ -68,14 +68,16 @@ OUT=$(bash "$V" "$T/exp"); RC=$?
 [ "$RC" = 0 ] && echo "$OUT" | grep -q '^OK:' && ok file-relative-subdir-in-tree-ok || no "file-relative-subdir-in-tree-ok (rc=$RC out=$OUT)"
 rm -rf "$T"
 
-# --- 7. sys.path.insert to a relative "." (the script's own dir) -> OK -------------------------
+# --- 7. sys.path.insert to a relative "." -> VIOLATION: "." is just as CWD-dependent as any other bare
+# relative literal, and escapes the experiment tree if invoked as `python exp/scripts/main2.py` from the
+# registry root (CWD=registry root, so "." resolves to the registry root itself, outside the experiment) --
 T=$(mktemp_d); mkdir -p "$T/exp/scripts"
 cat > "$T/exp/scripts/main2.py" <<'PY'
 import sys
 sys.path.insert(0, ".")
 PY
 OUT=$(bash "$V" "$T/exp"); RC=$?
-[ "$RC" = 0 ] && echo "$OUT" | grep -q '^OK:' && ok relative-dot-in-tree-ok || no "relative-dot-in-tree-ok (rc=$RC out=$OUT)"
+[ "$RC" = 1 ] && echo "$OUT" | grep -q 'VIOLATION' && ok relative-dot-registry-root-escape-violation || no "relative-dot-registry-root-escape-violation (rc=$RC out=$OUT)"
 rm -rf "$T"
 
 # --- 8. an UNRESOLVABLE dynamic sys.path argument -> UNRESOLVED, but non-fatal (exit 0) ----------
@@ -113,6 +115,19 @@ sys.path.insert(0, "..")
 PY
 OUT=$(bash "$V" "$T/exp"); RC=$?
 [ "$RC" = 1 ] && echo "$OUT" | grep -q 'VIOLATION' && ok cwd-anchored-relative-escape-violation || no "cwd-anchored-relative-escape-violation (rc=$RC out=$OUT)"
+rm -rf "$T"
+
+# --- 10c. a BARE relative literal that stays in-tree when resolved from script_dir OR the experiment
+# root, but escapes when resolved from the shared registry root one directory above the experiment (the
+# process's CWD when invoked as `python exp/scripts/main.py` from there -- the review's exact #499 round-2
+# P0 repro) -> VIOLATION (fail closed on the registry-root-anchored read, not just the two prior anchors) --
+T=$(mktemp_d); mkdir -p "$T/exp/scripts"
+cat > "$T/exp/scripts/main.py" <<'PY'
+import sys
+sys.path.insert(0, "scripts/lib")
+PY
+OUT=$(bash "$V" "$T/exp"); RC=$?
+[ "$RC" = 1 ] && echo "$OUT" | grep -q 'VIOLATION' && ok registry-root-anchored-relative-escape-violation || no "registry-root-anchored-relative-escape-violation (rc=$RC out=$OUT)"
 rm -rf "$T"
 
 # --- 10. a script with a syntax error -> reported as a violation (fail closed, not silently skipped) ---
