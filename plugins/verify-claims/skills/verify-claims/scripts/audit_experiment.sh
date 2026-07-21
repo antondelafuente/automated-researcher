@@ -21,6 +21,11 @@
 # claim overreach) PLUS two more, with zero false findings. Hardened 2026-06-12 (audit-the-auditor):
 # stale-output guard, cross-family enforcement, DATA SANITY dimension, durable-vs-committed wording.
 #
+# Close-mode dimension 8 (VIEWER-PUBLISH GATE, #362) added because the #347 publish gate (run-experiment's
+# close leg gates on a PUBLISHED / NO RECIPE / RECIPE INCOMPLETE end-state in CHECKLIST.md, landed via
+# PR #360) shipped with no matching close-audit check — an unsupported "PUBLISHED" claim, or a wrong "no
+# [recipes.viewer] in snapshot" claim, could pass this audit unexamined.
+#
 # Usage: audit_experiment.sh <experiment-dir> [out-file]              # close-side (post-hoc) audit
 #        audit_experiment.sh --design <experiment-dir> [design-file] [out-file]   # PRE-LAUNCH design audit
 #        audit_experiment.sh --data <experiment-dir> [manifest] [out-file]        # MID-RUN data audit
@@ -334,6 +339,23 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    (are the decisive artifacts/probes/logs present, not only referenced on remote storage)?
 7. HONEST BOUNDS — are the real limitations (n, single model/organism, in-sample fits, selected
    sweeps) stated?
+8. VIEWER-PUBLISH GATE — CONDITIONAL: fires only if the START.md profile snapshot carries a
+   '[recipes.viewer]' pointer, or CHECKLIST.md claims a publish outcome (PUBLISHED / NO RECIPE / RECIPE
+   INCOMPLETE, #347). Neither present — 'no material finding,' not incomplete (a manifest-only close with
+   no viewer recipe in the snapshot needs nothing here). Otherwise: does CHECKLIST.md's selected end-state
+   actually match the snapshot (e.g. a claimed NO RECIPE while the snapshot DOES carry '[recipes.viewer]',
+   or a claimed PUBLISHED/RECIPE INCOMPLETE with no pointer at all, is a mismatch)? If the claimed end-state
+   is PUBLISHED, verify its cited evidence actually RESOLVES rather than trusting the prose: the cited
+   source commit/PR exists and is landed (merged, not just opened) in the viewer repo, the per-experiment
+   page path is present in the committed gallery/bundle source at that commit, AND the gallery-rebuild
+   verification (the rebuild command actually run, plus the matching output line showing the experiment's
+   slug in the built index/gallery — not just the page having been rendered) is cited. Split what you check:
+   from the experiment dir ALONE you can read the START.md snapshot and CHECKLIST.md's own citations
+   (commit/PR reference, page path, rebuild command + output line) for internal consistency; resolving
+   whether a cited commit/PR is actually merged and the path is actually present in the viewer repo needs
+   viewer-repo access. If you have that access, use it and check the citations resolve; if you don't, do
+   NOT silently skip the dimension — flag the PUBLISHED claim's remote evidence as UNVERIFIABLE-FROM-HERE
+   (state exactly which citation you could not resolve) rather than passing it unexamined.
 
 PRIOR-ROUND DEBATE (when this is a RE-RUN on a revised dir): if the dir contains the author's RESPONSES
 to earlier findings ('RESPONSE:' lines, an audit-response section, a later AUDIT2.md), this is a PEER
