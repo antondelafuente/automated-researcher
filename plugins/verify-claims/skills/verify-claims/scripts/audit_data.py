@@ -276,11 +276,38 @@ def main():
     order = sorted(range(n), key=lambda i: lens[i])
     cap = max(40, a.sample_k * 8)
 
+    def spread_order(indices):
+        """Reorder `indices` (a list already sorted along the axis picks should spread across —
+        callers sort by length) via recursive bisection so ANY prefix of the result stays close
+        to evenly spread across the full range, instead of a contiguous run: first pick is the
+        head, second the tail, then the midpoints of the widening gaps (Van-der-Corput-style).
+        Fixes automated-researcher#478: allocate_coverage's `next(i for i in groups[k] ...)` scans
+        each group's index list in whatever order group_by() built it in, and that was file order
+        — so a group's first N picks were its first N rows as they appear in the file (id-ordinal-
+        adjacent, near-identical length), missing the group's actual extremes entirely."""
+        n = len(indices)
+        if n <= 2:
+            return list(indices)
+        order = [0, n - 1]
+        seen = {0, n - 1}
+        queue = [(0, n - 1)]
+        while len(order) < n:
+            lo, hi = queue.pop(0)
+            if hi - lo <= 1:
+                continue
+            mid = (lo + hi) // 2
+            if mid not in seen:
+                order.append(mid)
+                seen.add(mid)
+            queue.append((lo, mid))
+            queue.append((mid, hi))
+        return [indices[i] for i in order]
+
     def group_by(field):
         g = {}
         for i, r in enumerate(rows):
             g.setdefault(str(r.get(field)), []).append(i)
-        return g
+        return {k: spread_order(sorted(idxs, key=lambda i: lens[i])) for k, idxs in g.items()}
 
     def fair_share_budget(n_groups, remaining):
         """Cap a coverage pass's budget at half the remaining cap, EXCEPT never below `n_groups` —
