@@ -9,6 +9,7 @@ CFG="$CFG_DIR/env"
 
 IN_FEEDBACK_PRODUCT_REPO=${FEEDBACK_PRODUCT_REPO-}
 IN_FEEDBACK_INSTANCE_GUIDANCE=${FEEDBACK_INSTANCE_GUIDANCE-}
+IN_FEEDBACK_WF_CMD=${FEEDBACK_WF_CMD-}
 
 if [ -f "$CFG" ]; then
   # shellcheck disable=SC1090
@@ -19,6 +20,7 @@ fi
 
 [ -n "$IN_FEEDBACK_PRODUCT_REPO" ] && FEEDBACK_PRODUCT_REPO=$IN_FEEDBACK_PRODUCT_REPO
 [ -n "$IN_FEEDBACK_INSTANCE_GUIDANCE" ] && FEEDBACK_INSTANCE_GUIDANCE=$IN_FEEDBACK_INSTANCE_GUIDANCE
+[ -n "$IN_FEEDBACK_WF_CMD" ] && FEEDBACK_WF_CMD=$IN_FEEDBACK_WF_CMD
 
 ask_required() {
   local var=$1 prompt=$2 val
@@ -54,6 +56,7 @@ if ! [[ "$FEEDBACK_PRODUCT_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
 fi
 
 ask_optional FEEDBACK_INSTANCE_GUIDANCE "Instance feedback guidance path or URI (optional)"
+ask_optional FEEDBACK_WF_CMD "wf.sh command, if not on PATH (optional, e.g. an absolute path to aar-engineering's wf.sh)"
 
 umask 077
 mkdir -p "$CFG_DIR"
@@ -66,6 +69,9 @@ trap cleanup EXIT
   printf 'FEEDBACK_PRODUCT_REPO=%q\n' "$FEEDBACK_PRODUCT_REPO"
   if [ -n "${FEEDBACK_INSTANCE_GUIDANCE:-}" ]; then
     printf 'FEEDBACK_INSTANCE_GUIDANCE=%q\n' "$FEEDBACK_INSTANCE_GUIDANCE"
+  fi
+  if [ -n "${FEEDBACK_WF_CMD:-}" ]; then
+    printf 'FEEDBACK_WF_CMD=%q\n' "$FEEDBACK_WF_CMD"
   fi
 } > "$tmp"
 chmod 600 "$tmp"
