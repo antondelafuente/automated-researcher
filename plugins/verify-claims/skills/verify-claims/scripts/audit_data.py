@@ -22,10 +22,14 @@ IMPORTANT — eval-rollout-shaped data (rows carrying per-row keys like `id`+`sa
 `gen_config.seed` that make the WHOLE ROW unique by construction, e.g. `{id, sample, response,
 gen_config: {seed, ...}}`): the default `exact_duplicate_rows` hashes the whole row, so it reads
 ~0 almost regardless of how much the actual CONTENT repeats — a false "0% duplicate" reads as
-"checked, none found" when it actually means "this check was vacuous for this shape." Pass
-`--dup-field <content-field>` (e.g. `--dup-field response`) to check duplication of that field's
-value specifically. The script emits a runtime WARNING when it detects this shape and
-`--dup-field` was not passed — don't rely on catching that after the fact.
+"checked, none found" when it actually means "this check was vacuous for this shape." Built
+2026-07-21 after automated-researcher#522 (run csp1-hot8-attribution-1): this check read
+`exact_duplicate_rows: 0` across all 26 rollout files while the run's own separately-computed
+response-text-only metric showed 60.22% duplicate content in one subject's pool, and that false
+"0% duplicate" got written into a closing RESULTS.md before the cross-family close audit caught
+the contradiction. Pass `--dup-field <content-field>` (e.g. `--dup-field response`) to check
+duplication of that field's value specifically. The script emits a runtime WARNING when it
+detects this shape and `--dup-field` was not passed — don't rely on catching that after the fact.
 
 IMPORTANT — auditing an added/edited subset within a larger unchanged base (ablations, add-back
 waves, targeted edits): ALWAYS pass --label-field pointing at whatever column distinguishes the
@@ -65,13 +69,15 @@ def get_field(r, path):
 def looks_deterministically_unique(rows):
     """Heuristic for eval-rollout-shaped data: per-row keys (id+sample, or a gen_config.seed-shaped
     field) that make every row unique BY CONSTRUCTION, so a whole-row exact-duplicate check is
-    almost always ~0 regardless of actual content duplication."""
+    almost always ~0 regardless of actual content duplication. Checks every parseable row (not just
+    the first) since schema can drift row-to-row (see schema_variants above)."""
     for r in rows:
         if "__parse_error__" in r:
             continue
         has_id_sample = "id" in r and "sample" in r
         has_seed = "seed" in r or get_field(r, "gen_config.seed") is not None
-        return has_id_sample or has_seed
+        if has_id_sample or has_seed:
+            return True
     return False
 
 
