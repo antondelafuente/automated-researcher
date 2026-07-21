@@ -90,4 +90,40 @@ WS8="$TMP/ws8/.env"; ETC8="$TMP/etc8/environment"
 _persist_passed_env "$ENV8" "$WS8" "$ETC8" 1
 if [ "$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null)" = "600" ]; then ok workspace-env-is-chmod-600; else no "workspace-env-is-chmod-600 (mode=$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null))"; fi
 
+# --- 9. /etc/environment is chmod 600 too (root pods), not just /workspace/.env ------------------------
+ENV9="$TMP/environ9"
+fake_environ "$ENV9" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS9="$TMP/ws9/.env"; ETC9="$TMP/etc9/environment"
+_persist_passed_env "$ENV9" "$WS9" "$ETC9" 1
+if [ "$(stat -c '%a' "$ETC9" 2>/dev/null || stat -f '%Lp' "$ETC9" 2>/dev/null)" = "600" ]; then ok etc-environment-is-chmod-600; else no "etc-environment-is-chmod-600 (mode=$(stat -c '%a' "$ETC9" 2>/dev/null || stat -f '%Lp' "$ETC9" 2>/dev/null))"; fi
+
+# --- 10. a rotated value REPLACES the stale one on re-run, in both files (not left stuck on the first) --
+ENV10a="$TMP/environ10a"; ENV10b="$TMP/environ10b"
+fake_environ "$ENV10a" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-old"
+fake_environ "$ENV10b" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-new"
+WS10="$TMP/ws10/.env"; ETC10="$TMP/etc10/environment"
+_persist_passed_env "$ENV10a" "$WS10" "$ETC10" 1
+_persist_passed_env "$ENV10b" "$WS10" "$ETC10" 1
+if [ "$(grep -c '^HF_TOKEN=' "$WS10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$WS10"; then ok rotated-value-replaces-stale-workspace-env; else no "rotated-value-replaces-stale-workspace-env ($(cat "$WS10"))"; fi
+if [ "$(grep -c '^HF_TOKEN=' "$ETC10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$ETC10"; then ok rotated-value-replaces-stale-etc-environment; else no "rotated-value-replaces-stale-etc-environment ($(cat "$ETC10"))"; fi
+
+# --- 11. a value that is ONLY trailing newline(s) is rejected, not silently truncated -------------------
+ENV11="$TMP/environ11"
+fake_environ "$ENV11" $'PASSED_ENV_NAMES=TRAIL_ONLY,HF_TOKEN' $'TRAIL_ONLY=abc\n\n' "HF_TOKEN=hf-xyz"
+WS11="$TMP/ws11/.env"; ETC11="$TMP/etc11/environment"
+_persist_passed_env "$ENV11" "$WS11" "$ETC11" 1
+if grep -q '^TRAIL_ONLY=' "$WS11" 2>/dev/null; then no "trailing-newline-value-must-be-skipped-not-truncated ($(cat "$WS11"))"; else ok trailing-newline-value-must-be-skipped-not-truncated; fi
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS11"; then ok other-var-still-persisted-alongside-skipped-trailing-newline-var; else no other-var-still-persisted-alongside-skipped-trailing-newline-var; fi
+
+# --- 12. a quoted value (embedded apostrophe) round-trips through job_lib.sh's env_get, not just `source` -
+ENV12="$TMP/environ12"
+fake_environ "$ENV12" "PASSED_ENV_NAMES=QUOTE_VAR" "QUOTE_VAR=it's a token"
+WS12="$TMP/ws12/.env"; ETC12="$TMP/etc12/environment"
+_persist_passed_env "$ENV12" "$WS12" "$ETC12" 1
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get QUOTE_VAR "$WS12")
+  [ "$got" = "it's a token" ]
+) && ok quoted-value-round-trips-through-job_lib-env_get || no "quoted-value-round-trips-through-job_lib-env_get (got: $(( set +u -e; source "$HERE/job_lib.sh"; env_get QUOTE_VAR "$WS12" ) 2>&1))"
+
 [ "$fails" = 0 ] && { echo "PASS bootstrap_pod_env_smoke"; exit 0; } || { echo "FAIL bootstrap_pod_env_smoke"; exit 1; }

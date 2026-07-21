@@ -11,8 +11,14 @@ _proc1_get(){ # _proc1_get <environ-file> <name> — <name>'s value from a NUL-s
               # environ file (e.g. /proc/1/environ — PID 1's env is the one place guaranteed to
               # hold every var RunPod/deploy_pod.py injected into THIS container, regardless of
               # whether the ssh session running bootstrap itself inherited it). Empty if
-              # absent/unreadable; never errors (safe under `set -e` at every call site).
-  awk -v k="$2" 'BEGIN{RS="\0"} index($0, k"=")==1{print substr($0, length(k)+2); exit}' "$1" 2>/dev/null || true
+              # absent/unreadable; never errors (safe under `set -e` at every call site). Uses
+              # awk's `printf` (not `print`) so it never appends a newline of its own — a caller
+              # that needs to detect a value's OWN trailing newline(s) (see the read/printf '\0'
+              # idiom at its call site below) would otherwise be checking an artifact `print`
+              # added, not the real content (code-review Finding: command-substitution's universal
+              # trailing-newline strip was masking this, silently turning a would-be-rejected
+              # trailing-newline value into a truncated one instead).
+  awk -v k="$2" 'BEGIN{RS="\0"} index($0, k"=")==1{printf "%s", substr($0, length(k)+2); exit}' "$1" 2>/dev/null || true
 }
 
 _shell_quote(){ # _shell_quote <value> — bash-single-quote-safe iff VALUE contains a character that
@@ -27,6 +33,25 @@ _shell_quote(){ # _shell_quote <value> — bash-single-quote-safe iff VALUE cont
   esac
 }
 
+_persist_kv(){ # _persist_kv <file> <name> <name=value line> — append <line> to <file>, first
+               # dropping any existing `^name=` line so a stale value from an earlier
+               # bootstrap/experiment can't shadow the CURRENT PASS_ENV value (code-review
+               # Finding: the old grep -q-guarded append only ever wrote a name's FIRST value —
+               # a reused <file>, e.g. one that outlives pod teardown on a mounted persistent
+               # volume, or a plain repeated bootstrap on the same pod, kept the OLD credential
+               # forever instead of picking up a rotated one). Rewrites <file>'s content via `>`
+               # (not `mv` from a fresh temp file) so its existing permission bits (e.g. the
+               # chmod 600 below) survive the update.
+  local file=$1 name=$2 line=$3 tmp
+  if [ -e "$file" ] && grep -q "^${name}=" "$file" 2>/dev/null; then
+    tmp="${file}.tmp.$$"
+    grep -v "^${name}=" "$file" > "$tmp" 2>/dev/null || : > "$tmp"
+    cat "$tmp" > "$file"
+    rm -f "$tmp"
+  fi
+  printf '%s\n' "$line" >> "$file"
+}
+
 _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/workspace/.env]
   # [etc-environment=/etc/environment] [is-root=auto] — generalizes the R2-only env persistence
   # below to ANY var deploy_pod.py injected via PASS_ENV (#341: TINKER_API_KEY/HF_TOKEN/etc were
@@ -39,8 +64,11 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
   # corrupt/inject on `source`) — and, on a root pod, to <etc-environment> too — the PRIMARY
   # mechanism, since PAM applies /etc/environment to every later non-interactive `ssh pod 'cmd'`
   # with no per-script source to forget (same pattern the RCLONE_MULTI_THREAD_* write below
-  # already uses). <workspace-env> is chmod 600 immediately since (unlike the pre-existing
-  # RCLONE_MULTI_THREAD_*/etc.-environment convention it's modeled on) it now carries secrets.
+  # already uses). Both files are chmod 600 immediately, <etc-environment> included — the issue's
+  # own "persisting to a root-only file doesn't broaden exposure" non-goal only holds if that file
+  # actually IS root-only, and /etc/environment's normal mode is world-readable (code-review
+  # Finding: only <workspace-env> was locked down, leaving the PRIMARY mechanism's file readable
+  # by any user on the pod instead of just root).
   local environ_file=$1 workspace_env=${2:-/workspace/.env} etc_env=${3:-/etc/environment} is_root=${4:-}
   [ -n "$is_root" ] || { [ "$(id -u)" = 0 ] && is_root=1 || is_root=0; }
   local names name val qval old_ifs
@@ -49,12 +77,22 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
   mkdir -p "$(dirname "$workspace_env")"
   [ -e "$workspace_env" ] || : > "$workspace_env"
   chmod 600 "$workspace_env" 2>/dev/null || true
-  [ "$is_root" = 1 ] && mkdir -p "$(dirname "$etc_env")"
+  if [ "$is_root" = 1 ]; then
+    mkdir -p "$(dirname "$etc_env")"
+    [ -e "$etc_env" ] || : > "$etc_env"
+    chmod 600 "$etc_env" 2>/dev/null || true
+  fi
   old_ifs=$IFS; IFS=','
   for name in $names; do
     IFS=$old_ifs
     [ -n "$name" ] || continue
-    val=$(_proc1_get "$environ_file" "$name")
+    # read -d '' (not `val=$(...)`) so a genuine trailing newline in the value survives to the
+    # newline check below instead of being silently stripped by command substitution (code-review
+    # Finding: a value ending in one or more newlines was persisted with those bytes quietly
+    # removed rather than rejected, since command substitution strips ALL trailing newlines
+    # unconditionally — _proc1_get's own `printf` change above means nothing here is stripping
+    # newlines except that universal command-substitution behavior, which this idiom avoids).
+    IFS= read -r -d '' val < <(_proc1_get "$environ_file" "$name"; printf '\0')
     [ -n "$val" ] || continue
     case "$val" in
       *$'\n'*)
@@ -62,9 +100,9 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
         continue ;;
     esac
     qval=$(_shell_quote "$val")
-    grep -q "^${name}=" "$workspace_env" 2>/dev/null || printf '%s=%s\n' "$name" "$qval" >> "$workspace_env"
+    _persist_kv "$workspace_env" "$name" "${name}=${qval}"
     if [ "$is_root" = 1 ]; then
-      grep -q "^${name}=" "$etc_env" 2>/dev/null || printf '%s=%s\n' "$name" "$qval" >> "$etc_env"
+      _persist_kv "$etc_env" "$name" "${name}=${qval}"
     fi
   done
   IFS=$old_ifs
