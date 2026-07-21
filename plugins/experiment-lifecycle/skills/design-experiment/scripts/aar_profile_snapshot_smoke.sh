@@ -9,8 +9,9 @@
 # detection via the re-rendered-block comparison (a stripped [recipes.viewer] section, a hand-edited
 # git_ref, a type-coerced schema_version, and an edited profile_path — none of these change
 # profile_sha256, so each is caught independently of the hash-staleness check), and TOML-escaping of
-# interpolated strings (a quote/backslash profile path, and a non-BMP/emoji profile path, both round-trip
-# through tomllib.loads), and rejection of a [github].branch_prefix that isn't exactly 'run/' (#129's
+# interpolated strings (a quote/backslash profile path, a non-BMP/emoji profile path, and a literal-DEL
+# profile path per #474, all round-trip through tomllib.loads), and rejection of a [github].branch_prefix
+# that isn't exactly 'run/' (#129's
 # convention — a permissive charset regex used to let e.g. "other/" through). Also asserts the
 # design-experiment and log-experiment copies stay byte-identical (checks.sh's own drift check duplicates
 # this at the repo level; this smoke additionally proves the copy under test actually behaves correctly,
@@ -383,6 +384,40 @@ else
   err "check failed against a non-BMP profile path snapshot: $out"
 fi
 
+# 11d. profile path containing a literal DEL (U+007F): snapshot must still succeed, the emitted block must
+#      round-trip through tomllib.loads (automated-researcher#474 — json.dumps's ensure_ascii=False leaves
+#      DEL/C1 control characters as literal bytes, which tomllib's basic-string parser rejects outright,
+#      so the un-fixed emitter reported success while writing an unparsable block).
+DEL_DIR="del-$(printf '\x7f')-dir"
+mkdir -p "$T/$DEL_DIR"
+DEL_PROFILE="$T/$DEL_DIR/aar-profile.toml"
+complete_profile "$DEL_PROFILE"
+fresh_start "$T/START9d.md"
+if out=$(AAR_PROFILE="$DEL_PROFILE" bash "$SCRIPT" snapshot "$T/START9d.md" 2>&1); then
+  ok "snapshot succeeds against a profile path containing a literal DEL"
+else
+  err "snapshot failed against a DEL-containing profile path: $out"
+fi
+if out=$(python3 - "$T/START9d.md" "$DEL_PROFILE" <<'PY'
+import re, sys, tomllib
+start_path, expected_path = sys.argv[1], sys.argv[2]
+text = open(start_path, encoding="utf-8").read()
+m = re.search(r"```toml\n(.*?)\n```", text, re.DOTALL)
+assert m, "no fenced toml block found"
+snap = tomllib.loads(m.group(1))
+assert snap["profile_path"] == expected_path, (snap.get("profile_path"), expected_path)
+PY
+); then
+  ok "emitted TOML block round-trips through tomllib.loads and preserves the DEL-containing path"
+else
+  err "emitted TOML block for a DEL-containing path failed to round-trip through tomllib.loads: $out"
+fi
+if out=$(AAR_PROFILE="$DEL_PROFILE" bash "$SCRIPT" check "$T/START9d.md" 2>&1); then
+  ok "check passes immediately after snapshotting a DEL-containing profile path"
+else
+  err "check failed against a DEL-containing profile path snapshot: $out"
+fi
+
 # 12. hardcoded-instance-path absence: static grep over the NEW files this issue ships (the helper +
 #     this smoke script itself is excluded, since its own source necessarily quotes the forbidden
 #     literals as toy fixtures/patterns). Scoped to scripts/ (not the whole skill dir) so this check does
@@ -399,4 +434,4 @@ else
   ok "no hardcoded home-anton/hostname-port/cloudflare values in the new aar_profile_snapshot files"
 fi
 
-[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + render-block tamper detection + TOML escaping (quote/backslash + non-BMP)" >&2; exit 0; } || exit 1
+[ "$fail" = 0 ] && { echo "  smoke ok: aar_profile_snapshot snapshot/check round-trip + staleness + fail-closed + manifest-only + render-block tamper detection + TOML escaping (quote/backslash + non-BMP + DEL)" >&2; exit 0; } || exit 1
