@@ -66,11 +66,19 @@ So every path (box-side invoke, pod-side `scp`) resolves back to this one direct
 run. If you find a divergent `deploy_pod.py` under an experiment/pipeline dir, treat it as stale and repoint
 it at this canonical — do not patch the fork.
 
-## Staging a base model (optional)
+## Staging a base model
 
 Pods re-pulling the same base model from HF every run is the root of a paid gotcha cluster
 (~25-min first-touch network-FS stalls; missing-shard races; rclone symlink loss). Stage it
 in the store **once** and pull from there:
+
+- **Frozen-recipe evals must durably pin their base — staging (or an `HF repo@revision` pin) stops being
+  optional (#106).** Adapters get archived; the base they were trained/served on does not, by default — so a
+  later re-run can silently grab a different base and the absolute numbers shift (real incident: an adapter's
+  `adapter_config.json` pointed at a bare local path on a since-deleted volume; the re-pulled base scored
+  measurably above the original anchor, breaking cross-panel absolute comparability, and the original base was
+  unrecoverable). The archival step that captures adapters + run outputs must also durably cover the base they
+  depend on — stage it here, or pin it as `repo@revision` in the run's docs; never a bare local path.
 
 - **Box-side, once:** `scripts/stage_model.sh <hf-repo>[@rev] <remote-path>` downloads from
   HF, `rclone copy -L`s it to the store, and writes a `_STAGED.json` completeness manifest
