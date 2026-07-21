@@ -21,7 +21,8 @@
 # The gate is chosen by the directory's own content (auditability via the registry convention):
 #   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
 #   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present, the
-#                                               Presentation section carries the researcher's lock line, + secret scan.
+#                                               Presentation section carries the researcher's lock line, any
+#                                               staged CHECKLIST.md is UNSTARTED (#512), + secret scan.
 #   - note         (anything else):            deterministic secret scan only.
 # Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
 # staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
@@ -366,8 +367,28 @@ gate_design_stage() {
   [ -f "$DIR/START.md" ] || die "design-stage dir missing START.md — cannot verify its instance-profile snapshot (#469)"
   _snap_out="$("$SNAPSHOT_HELPER" check "$DIR/START.md" 2>&1)" || die "instance-profile snapshot check failed: $_snap_out"
   note "instance-profile snapshot: $_snap_out"
-  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, instance-profile snapshot in START.md verified (#469), and secret scan clean; pre-launch leg of the two-PR flow."
-  note "design-stage gate ok: design-audit present + Presentation lock found + instance-profile snapshot verified (secret scan runs on the staged set)"
+  # Require an UNSTARTED checklist (#512): a design-stage PR shipped a `CHECKLIST.md` that was already fully
+  # ticked — a verbatim copy of a closed sibling's COMPLETED close checklist, string-replaced but with stale
+  # fields. A less attentive executor could treat pre-ticked [BLOCK] gates as already satisfied, silently
+  # skipping the claim/data-audit/anchor gate. A design-stage record is a pre-registration: every gate must
+  # still read ☐ (unstarted) — ticks are the EXECUTOR's, written at run-experiment close, never at design
+  # time. Match ticked GATE LIST lines only (a line beginning `- ☑` / `- ☒`), never a bare occurrence of the
+  # ☑/☒ characters: the CHECKLIST template's own instruction header uses those characters in PROSE examples
+  # (e.g. "☑ PASS ev: <artifact path + numbers>"), and a correctly-seeded UNSTARTED gate line legitimately
+  # carries non-empty `ev:` hint text (e.g. `ev: rclone lsf`) — a bare character grep or an ev-payload check
+  # would fail-closed on every correctly seeded checklist. This gate adds no new file-presence requirement:
+  # N.A. (skipped) when no CHECKLIST.md is staged at all.
+  # An alternation `(☑|☒)`, NOT a bracket character class `[☑☒]`, on purpose: under a byte-oriented locale
+  # (e.g. LC_ALL=C), grep -E's character class matches on the INDIVIDUAL BYTES of its members, and ☑/☒/☐'s
+  # UTF-8 encodings share a byte prefix (e2 98 91 / e2 98 92 / e2 98 90) — so `[☑☒]` also matches an unstarted
+  # ☐ line under that locale, false-positive-blocking every correctly seeded checklist. An alternation matches
+  # each option as a whole multi-byte literal instead, so it stays correct regardless of locale.
+  if [ -f "$DIR/CHECKLIST.md" ]; then
+    _ticked="$(grep -nE '^[[:space:]]*-[[:space:]]*(☑|☒)' "$DIR/CHECKLIST.md" || true)"
+    [ -z "$_ticked" ] || die "design-stage dir's CHECKLIST.md has ticked gate marker(s) — a design-stage record is a pre-registration with an UNSTARTED checklist (every gate ☐); a ticked ☑/☒ line is executed/completed-record content (e.g. copied from a closed sibling's registry record instead of the design-experiment template) leaking into this seed — reset every gate to ☐ before logging, then retry: $(printf '%s' "$_ticked" | head -n5)"
+  fi
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, instance-profile snapshot in START.md verified (#469), CHECKLIST.md unstarted (#512), and secret scan clean; pre-launch leg of the two-PR flow."
+  note "design-stage gate ok: design-audit present + Presentation lock found + instance-profile snapshot verified + checklist unstarted (secret scan runs on the staged set)"
 }
 case "$KIND" in
   experiment)   gate_experiment ;;
