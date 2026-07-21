@@ -280,16 +280,21 @@ every confirm wave and risks restatement-drift — a restated pin silently diver
 one (real case: csp1-orig250-attribution-2, a 6-arm rerun of csp1-orig250-attribution-1 with only slot manifests
 changed, where ~80% of DESIGN/START/CHECKLIST was pure restatement and the facts gate re-verified facts the
 parent's own gate had already cleared). Declare it explicitly:
-- **Header + authorization.** `DESIGN.md` opens with `## Rerun of <parent-exp-dir> (researcher-authorized <ISO
-  date>)` — the researcher's go-ahead to use this mode at all is the trigger, same standing as the Presentation
-  lock's authorization line (Step 1 above).
+- **Header + authorization.** `DESIGN.md` opens with `## Rerun of <parent-exp-dir>@<parent-DESIGN.md
+  commit-sha> (researcher-authorized <ISO date>)` — pin the parent's `DESIGN.md` at the exact commit it was in
+  when authorization was given, not just the directory name, so there is a fixed baseline to check citations
+  against later even if the parent doc is amended afterward. The researcher's go-ahead to use this mode at all
+  is the trigger, same standing as the Presentation lock's authorization line (Step 1 above).
 - **Inherit unchanged sections by citation, not restatement** — "purpose/comparability/metric as `<parent-exp>`,
   re-locked `<date>`," generalizing the existing Presentation inherit-by-citation precedent (Step 1) to every
   section that didn't change.
 - **Gates scope to the DELTA, plus one parent-drift check.** verify-claim and design-audit run against only what
   changed (the new arms/manifests/parameters) — not a full re-verification of facts/comparability the parent's own
   gates already cleared — plus one mechanical check that every inherited-by-citation section still matches the
-  parent's committed `DESIGN.md` (drift since the parent locked is exactly the risk this mode must not reintroduce).
+  parent's `DESIGN.md` AT THE PINNED COMMIT from the header, not whatever the parent file says now (`git show
+  <pinned-sha>:DESIGN.md`) — a citation checked against the parent's current HEAD instead of the pinned commit
+  would silently pass even if the parent doc was amended after this rerun was authorized, which is exactly the
+  drift this check exists to catch.
 - **No new record kind needed downstream.** The rerun's `DESIGN.md` still classifies as design-stage under
   `log-experiment`'s existing rule (a `DESIGN.md` + audit present, no `RESULTS.md`) — the delta-scoped audit above
   is simply what gets posted as its review record, same mechanism, smaller payload.

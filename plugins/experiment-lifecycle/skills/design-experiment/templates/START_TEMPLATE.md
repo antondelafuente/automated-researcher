@@ -26,9 +26,10 @@ e.g. "if any single arm wins >90% the selection is degenerate".>
 - <label>: `<storage path / URI>`  (<discriminator: avg length, label rate, etc.>)
 - <label>: `<storage path / URI>`
 - Scripts: `<where the executor pulls the worked-example drivers from>` (pull them; don't write from scratch).
-- Base model / artifacts: `<HF repo@revision, or the artifact-store staged path>` — never a bare local path (a
-  base living only on disposable storage becomes unrecoverable the moment that volume is gone, #106). <Any
-  cache/env setup needed before download.>
+- Base model / artifacts: `<HF repo@<commit-sha>, or the artifact-store staged path>` — never a bare local path
+  (a base living only on disposable storage becomes unrecoverable the moment that volume is gone, #106), and
+  never a mutable ref (a branch/tag like `@main` can move to different weights before the next rerun — pin the
+  commit SHA itself). <Any cache/env setup needed before download.>
 
 ## Environment
 - <The readiness signal to wait for before training/eval, and how the env is provisioned.>
