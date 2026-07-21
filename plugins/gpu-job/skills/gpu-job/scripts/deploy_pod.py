@@ -289,7 +289,7 @@ def deploy(nonce=None):
     print(f"[deploy] GPU type(s): {types} "
           f"(source={'GPU_TYPES' if env('GPU_TYPES') else 'GPU_TYPE' if env('GPU_TYPE') else 'default'})",
           flush=True)
-    base = {"computeType": "GPU",
+    base = {"cloudType": "SECURE",
             "gpuCount": int(env("GPU_COUNT", "1")),
             "gpuTypeIds": types,
             "gpuTypePriority": "availability",
