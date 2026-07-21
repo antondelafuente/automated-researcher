@@ -38,6 +38,19 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    (`Can't follow symlink` ⇒ INCOMPLETE), so an incomplete upload never reads as success. Before
    teardown, verify EVERY unique artifact is in the store (`r2_exists`/`r2_done` — list the directory
    and check the final artifact's bytes; never trust a zero-byte done-marker).
+   - **Gotcha — N parallel subjects uploading to one shared R2 prefix:** `rclone copy <file> <dir>/`
+     keeps the *local* basename at the destination, so N fan-out drivers (one per subject, one pod
+     each) that all run `rclone copy out/${SUBJECT}/rollouts.jsonl <remote>/rollouts/` land every
+     subject's file on the identical object name — whichever pod's upload finishes last silently
+     overwrites every subject before it, no error from rclone, regardless of how far apart in time
+     the uploads land (the collision is the shared object name, not a timing race). It only shows
+     up once a real fan-out with two or more subjects runs, so a driver written and tested against
+     a single subject at a time looks correct. Give each subject an explicit destination filename
+     with `copyto` instead:
+     ```bash
+     rclone copyto "out/${SUBJECT}/rollouts.jsonl" "<remote>/rollouts/${SUBJECT}.jsonl"
+     ```
+     (#446 — caught by luck in a 7-pod fan-out before any subject's rollouts were actually lost.)
 5. **Tear down:** `scripts/teardown.sh <pod-id> [lease-nonce]`. Default the moment artifacts verify.
    Pass the `LEASE_NONCE` so the lease is **closed only after the delete is verified gone** (an
    unverified delete leaves the lease for the standing reaper to retry). Never use provider "stop"
@@ -66,11 +79,21 @@ So every path (box-side invoke, pod-side `scp`) resolves back to this one direct
 run. If you find a divergent `deploy_pod.py` under an experiment/pipeline dir, treat it as stale and repoint
 it at this canonical — do not patch the fork.
 
-## Staging a base model (optional)
+## Staging a base model
 
 Pods re-pulling the same base model from HF every run is the root of a paid gotcha cluster
 (~25-min first-touch network-FS stalls; missing-shard races; rclone symlink loss). Stage it
 in the store **once** and pull from there:
+
+- **Frozen-recipe evals must durably pin their base — staging (or an `HF repo@<commit-sha>` pin) stops being
+  optional (#106).** Adapters get archived; the base they were trained/served on does not, by default — so a
+  later re-run can silently grab a different base and the absolute numbers shift (real incident: an adapter's
+  `adapter_config.json` pointed at a bare local path on a since-deleted volume; the re-pulled base scored
+  measurably above the original anchor, breaking cross-panel absolute comparability, and the original base was
+  unrecoverable). The archival step that captures adapters + run outputs must also durably cover the base they
+  depend on — stage it here, or pin it as `repo@<commit-sha>` in the run's docs; never a bare local path, and
+  never a mutable ref (a branch/tag like `@main` is not a pin — it can move out from under a later re-run the
+  same way a bare local path can vanish).
 
 - **Box-side, once:** `scripts/stage_model.sh <hf-repo>[@rev] <remote-path>` downloads from
   HF, `rclone copy -L`s it to the store, and writes a `_STAGED.json` completeness manifest

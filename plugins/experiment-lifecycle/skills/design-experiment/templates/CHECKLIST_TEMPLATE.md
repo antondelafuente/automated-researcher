@@ -178,6 +178,10 @@
       mid-run correction) greps clean against every sibling doc (data_audit_manifest.md, CHECKLIST.md,
       gate_evidence/*) for the amended clause before the run continues — `grep -l "<amended term>"
       <dir>/*.md <dir>/gate_evidence/*` (#375). N.A. only if no amendment occurred.                  ev:
+- ☐ [BLOCK] Judge/classifier instrument capacity sized against THIS wave's estimated call volume + deadline
+      (rows/min the pinned instrument can actually absorb at its provisioned concurrency, not its theoretical
+      rate) BEFORE dispatch — pre-provisioned (e.g. multiple validated keys/accounts) if the check would
+      otherwise fall short (#352). N.A. only for a run with no LLM-judge/classification leg.        ev:
 
 ## EXPERIMENT-SPECIFIC  (designer writes these — the domain-knowledge part the executor can't invent)
 - ☐ ...

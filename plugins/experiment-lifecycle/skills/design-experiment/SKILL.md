@@ -67,6 +67,12 @@ are not.** Pin:
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
+- **Every model choice gets named and cleared with the researcher, never inherited by default (#335).** Generation,
+  training, judge/classifier, and embedding (leakage-screen) models each get stated explicitly in this pass, with your
+  recommendation, same posture as any other load-bearing choice — a model silently inherited from whatever a prior
+  design used is the failure mode this closes off (real incident: a judge model rode unexamined across four
+  experiments before anyone re-checked whether it was still the right one). Sign-off happens in this SAME
+  design-clearance conversation, no separate gate.
 - **Train/eval leakage screen — DEFAULT to a semantic-embedding near-dup check, not token overlap alone.**
   Whenever training data and eval data are drawn from overlapping domains (a training pool that intentionally
   shares an eval battery's topic area is the common case), token-overlap screens (e.g. Jaccard on word sets) miss
@@ -152,6 +158,15 @@ are not.** Pin:
   "byte-identical where DESIGN's rule matches," don't trust the filename — rebuild the file from PRIMARY sources and
   assert byte-equality in the build script; this also catches the naming trap by failing loudly instead of silently
   anchoring on the wrong condition.
+- **Pin a runnable reference, not prose, for any non-trivial selection/matching algorithm whose hash gets pinned
+  (#336).** When a design-stage receipt pins an exact hash/checksum produced by anything beyond a plain sort or
+  filter (a greedy match, a tie-break rule, an ordering-sensitive selection), commit the exact code that produced it
+  — inline in the receipt, or a small linked script — alongside the pinned hash. A natural-language description
+  under-specifies exact behavior (real incident: "greedily take nearest-unused composite, ties resolved by
+  bisect-left adjacency" reproduced the aggregate stats but not the pinned hash bit-for-bit across two reasonable
+  implementations) — and the design stage has, by definition, already run the algorithm once to compute the hash, so
+  committing it costs nothing extra. Trivial derivations (a plain sort/filter) stay out of scope; prose remains
+  sufficient there.
 - **While sketching the schedule, ENUMERATE — don't justify (#322).** For each step, name its max sensible
   fan-out and price it, rather than defending whatever serialization is already on the page: justification
   recruits motivated reasoning in both author and auditor (real case, restriction-sweep-1: "single shared GPU
@@ -179,6 +194,11 @@ are not.** Pin:
   flavors, only let 3/12 through even after a pinned redraw-once — recovered with 2 mechanical backfill
   batches, ~$1-2 extra spend). Before fixing the ratio, gut-check: does the generation template's own
   instruction plausibly produce output that clears every gate in the pipeline, not just the screens?
+- **Check the artifact store for an already-complete matching run before specifying fresh GPU spend (#105).** Key
+  the check on {adapters × recipe × metric}: if a run already in the store matches all three, validate it (the base
+  model it depends on is itself store-staged or revision-pinned per the convention below, and its recorded config
+  matches what this design would otherwise dispatch fresh) and reuse it by default — spend on redundant compute only
+  when validation fails or the researcher wants a fresh measurement anyway.
 - **Cost estimate** (GPU $/hr × runtime; API cascade) — one of the three currencies from the posture note above
   (the other two are wall-clock and researcher-attention; implementation effort is never a fourth): price each
   step's max-fan-out alternative alongside its serialized form. "Cheaper" only counts if the billing model
@@ -186,6 +206,22 @@ are not.** Pin:
   billing** (e.g. Tinker — N parallel runs cost the same as N serial ones) makes serializing to "save money" a
   false economy, unlike **per-wallclock billing** (a rented pod, where concurrency needs more units to get
   more wall-clock for the same $).
+  - **Never carry forward a cross-population LLM-judge/classification per-row rate as-is (#479).** Task-2-style
+    classification cost scales with the input/output token lengths of the SPECIFIC rollouts being judged, which vary
+    meaningfully across experiments/checkpoints/training regimes — a rate measured on a different rollout population
+    can undershoot badly (a real incident: ~75% low, pushing judge spend past the design's notify ceiling). Either
+    re-measure on a small sample (~50-100 rows) of the ACTUAL target population before pricing the full pass, or, if
+    reusing a cross-experiment rate anyway, apply an explicit safety margin (~1.5-2x, more for reasoning-heavy
+    prompts) and size the notify/hard-stop ceilings against the margined estimate, not the raw carried-forward one.
+  - **Judge/classifier throughput is a design-time capacity gate, not an execution-time surprise (#352).** Estimate
+    the wave's judge-call volume and the rows/min it needs against a deadline, then check that against the pinned
+    instrument's PROVISIONED capacity (call latency × concurrency, not the model's theoretical rate) — block dispatch
+    if capacity falls short rather than discovering it mid-run (a real incident needed a 2.6x multi-account workaround
+    discovered mid-run, after ~14h+ of a wave being judge-bound while ample budget sat unusable). A judge instrument is
+    pinned to model+transport for anchor continuity (a same-model different-transport judge is not a safe swap — a
+    real case measured 13% disagreement between them), so the fix is providing enough CAPACITY at that pin, not
+    substituting a different one: pre-provision it (e.g. multiple validated keys/accounts) before dispatch whenever
+    the capacity check would otherwise fail.
 
 ## Step 2 — The pre-launch gates (both MANDATORY for a new design, before any GPU/$ spend)
 
@@ -234,8 +270,38 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
      stage — the human's judgment at the design-validity moment is the highest-value, cheapest touch. What's wrong is
      *finishing the audit yourself and rubber-stamping.* Number the outputs (`DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, …) —
      the chain is the validity record.
-  - **EXCEPTION (flexible):** for simple parameter-reruns of an already-audited design, the researcher may tell you to
-    triage-and-run yourself. Default to surfacing for genuinely new designs; they'll say when to just go.
+  - **EXCEPTION:** a simple parameter-rerun of an already-audited design may skip this surfacing loop under the
+    **light design path** below — the researcher's authorization there IS the exception's trigger. Default to the
+    full loop for genuinely new designs.
+
+**The light design path — a declared mode for parameter-reruns, not just prose (#464).** Restating ~80% of a
+parent design's `DESIGN.md` for a same-shape rerun (new arms/manifests, nothing else) costs researcher-attention on
+every confirm wave and risks restatement-drift — a restated pin silently diverging from the parent's own committed
+one (real case: csp1-orig250-attribution-2, a 6-arm rerun of csp1-orig250-attribution-1 with only slot manifests
+changed, where ~80% of DESIGN/START/CHECKLIST was pure restatement and the facts gate re-verified facts the
+parent's own gate had already cleared). Declare it explicitly:
+- **Header + authorization.** `DESIGN.md` opens with `## Rerun of <parent-exp-dir>@<parent-DESIGN.md
+  commit-sha> (researcher-authorized <ISO date>)` — pin the parent's `DESIGN.md` at the exact commit it was in
+  when authorization was given, not just the directory name, so there is a fixed baseline to check citations
+  against later even if the parent doc is amended afterward. The researcher's go-ahead to use this mode at all
+  is the trigger, same standing as the Presentation lock's authorization line (Step 1 above).
+- **Inherit unchanged sections by citation, not restatement** — "purpose/comparability/metric as `<parent-exp>`,
+  re-locked `<date>`," generalizing the existing Presentation inherit-by-citation precedent (Step 1) to every
+  section that didn't change.
+- **Gates scope to the DELTA, plus one parent-drift check.** verify-claim and design-audit run against only what
+  changed (the new arms/manifests/parameters) — not a full re-verification of facts/comparability the parent's own
+  gates already cleared — plus one mechanical check that every inherited-by-citation section still matches the
+  parent's `DESIGN.md` AT THE PINNED COMMIT from the header, not whatever the parent file says now (`git show
+  <pinned-sha>:<parent-exp-dir>/DESIGN.md`, e.g. `git show <pinned-sha>:registry/csp1-author-sweep-1/DESIGN.md`)
+  — a citation checked against the parent's current HEAD instead of the pinned commit
+  would silently pass even if the parent doc was amended after this rerun was authorized, which is exactly the
+  drift this check exists to catch.
+- **No new record kind needed downstream.** The rerun's `DESIGN.md` still classifies as design-stage under
+  `log-experiment`'s existing rule (a `DESIGN.md` + audit present, no `RESULTS.md`) — the delta-scoped audit above
+  is simply what gets posted as its review record, same mechanism, smaller payload.
+
+Default to the full design + full surfacing loop for genuinely new designs; use this mode only on the researcher's
+explicit say-so, per experiment.
 
 ## Step 3 — Write `START.md` (the thin executor bridge) + the self-sufficiency pass
 

@@ -14,9 +14,22 @@ leakage, off-distribution, mislabeling, "does this match the design intent").
 Usage:
   python3 audit_data.py DATA.jsonl --out data_audit.json --sample data_audit_sample.jsonl \
       [--cot] [--require-finish-reason] [--source-field source] [--label-field arm] [--text-field assistant] \
-      [--cap-chars 24000] [--sample-k 6]
+      [--dup-field response] [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — eval-rollout-shaped data (rows carrying per-row keys like `id`+`sample` or a
+`gen_config.seed` that make the WHOLE ROW unique by construction, e.g. `{id, sample, response,
+gen_config: {seed, ...}}`): the default `exact_duplicate_rows` hashes the whole row, so it reads
+~0 almost regardless of how much the actual CONTENT repeats — a false "0% duplicate" reads as
+"checked, none found" when it actually means "this check was vacuous for this shape." Built
+2026-07-21 after automated-researcher#522 (run csp1-hot8-attribution-1): this check read
+`exact_duplicate_rows: 0` across all 26 rollout files while the run's own separately-computed
+response-text-only metric showed 60.22% duplicate content in one subject's pool, and that false
+"0% duplicate" got written into a closing RESULTS.md before the cross-family close audit caught
+the contradiction. Pass `--dup-field <content-field>` (e.g. `--dup-field response`) to check
+duplication of that field's value specifically. The script emits a runtime WARNING when it
+detects this shape and `--dup-field` was not passed — don't rely on catching that after the fact.
 
 IMPORTANT — auditing an added/edited subset within a larger unchanged base (ablations, add-back
 waves, targeted edits): ALWAYS pass --label-field pointing at whatever column distinguishes the
@@ -40,6 +53,32 @@ def load(path):
         except Exception as e:
             rows.append({"__parse_error__": str(e), "__raw__": line[:200], "__idx__": i})
     return rows
+
+
+def get_field(r, path):
+    """Dotted-path lookup (e.g. 'gen_config.seed') for --dup-field / the vacuous-dup-check heuristic."""
+    cur = r
+    for part in path.split("."):
+        if isinstance(cur, dict) and part in cur:
+            cur = cur[part]
+        else:
+            return None
+    return cur
+
+
+def looks_deterministically_unique(rows):
+    """Heuristic for eval-rollout-shaped data: per-row keys (id+sample, or a gen_config.seed-shaped
+    field) that make every row unique BY CONSTRUCTION, so a whole-row exact-duplicate check is
+    almost always ~0 regardless of actual content duplication. Checks every parseable row (not just
+    the first) since schema can drift row-to-row (see schema_variants above)."""
+    for r in rows:
+        if "__parse_error__" in r:
+            continue
+        has_id_sample = "id" in r and "sample" in r
+        has_seed = "seed" in r or get_field(r, "gen_config.seed") is not None
+        if has_id_sample or has_seed:
+            return True
+    return False
 
 
 def assistant_text(r, field):
@@ -69,6 +108,10 @@ def main():
                      "always pass this when auditing an added/edited subset within a larger unchanged base, "
                      "or the default sample can oversample the unchanged majority and miss the subset entirely")
     ap.add_argument("--text-field", default=None)
+    ap.add_argument("--dup-field", default=None, help="check exact-duplicates on this field's value only "
+                     "(dotted path, e.g. 'response' or 'gen_config.seed') instead of the whole row — the "
+                     "natural fit for eval-rollout data where id/sample/seed already make every whole row "
+                     "unique by construction, making the default whole-row check vacuous for content dupes")
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
     a = ap.parse_args()
@@ -92,7 +135,8 @@ def main():
     empties = [i for i, t in enumerate(texts) if not t.strip()]
     hashes = {}
     for i, r in enumerate(rows):
-        h = hashlib.sha1(json.dumps(r, sort_keys=True).encode()).hexdigest()
+        dup_val = get_field(r, a.dup_field) if a.dup_field else r
+        h = hashlib.sha1(json.dumps(dup_val, sort_keys=True).encode()).hexdigest()
         hashes.setdefault(h, []).append(i)
     dups = {h: idxs for h, idxs in hashes.items() if len(idxs) > 1}
     near_cap = [i for i, L in enumerate(lens) if L > 0.95 * a.cap_chars]
@@ -100,6 +144,7 @@ def main():
     rep["parse_errors"] = len(parse_errs)
     rep["schema_variants"] = {str(k): v for k, v in schema_variants.items()}
     rep["empty_text_rows"] = len(empties)
+    rep["dup_field"] = a.dup_field
     rep["exact_duplicate_groups"] = len(dups)
     rep["exact_duplicate_rows"] = sum(len(v) for v in dups.values())
     rep["char_len"] = {"min": min(lens), "median": int(statistics.median(lens)), "p95": int(sorted(lens)[int(0.95 * (n - 1))]), "max": max(lens)} if lens else {}
@@ -158,7 +203,15 @@ def main():
     if len(schema_variants) > 1:
         rep["warnings"].append(f"{len(schema_variants)} distinct key-schemas (drift?)")
     if dups:
-        rep["warnings"].append(f"{rep['exact_duplicate_rows']} exact-duplicate rows in {len(dups)} groups")
+        field_note = f" (--dup-field {a.dup_field})" if a.dup_field else " (whole row)"
+        rep["warnings"].append(f"{rep['exact_duplicate_rows']} exact-duplicate rows{field_note} in {len(dups)} groups")
+    if not a.dup_field and looks_deterministically_unique(rows):
+        rep["warnings"].append(
+            "row shape carries per-row unique keys (id+sample, or a gen_config.seed-shaped field) that "
+            "make every row unique BY CONSTRUCTION — the whole-row exact_duplicate_rows check above is "
+            "likely VACUOUS for actual content duplication on this data shape; pass --dup-field "
+            "<content-field> (e.g. --dup-field response) to check text-level duplication instead"
+        )
 
     # ---- stratified HIGH-RISK sample (not just random) ----
     order = sorted(range(n), key=lambda i: lens[i])
