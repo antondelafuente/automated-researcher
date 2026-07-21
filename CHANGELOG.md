@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.3.71 (2026-07-21): `log-experiment.sh` gains two first-class registry record kinds
+- experiment-lifecycle 0.3.75 (2026-07-21): `log-experiment.sh` gains two first-class registry record kinds
   (research-lab#136): **exploration** (`FINDINGS.md`, no `DESIGN.md`) and **dataset** (`MANIFEST.md`, no
   `DESIGN.md`). Both previously fell through to a plain `note` (safe — secret scan only, correct gate) with
   no structural check of their own; an explicit `KIND=exploration`/`KIND=dataset` override also died outright

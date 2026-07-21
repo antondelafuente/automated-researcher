@@ -644,5 +644,13 @@ if run_dry "$T/reg/design"; then fail "dataset record with a placeholder (non-he
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
+echo "[smoke] case 56: FINDINGS.md's own line is 'StatusEXPLORATORY' (no colon, no separator at all) -> BLOCK (round-4 review: a bare \`[^A-Za-z0-9]{0,4}\` quantifier accepted zero separator characters — the colon must now be required text, not optional decoration)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nStatusEXPLORATORY\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "a colon-less 'StatusEXPLORATORY' line was NOT blocked (zero-separator form accepted)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "colon-less marker blocked, literal ':' separator still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi
