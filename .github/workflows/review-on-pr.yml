@@ -274,6 +274,14 @@ jobs:
           delim="history_$(openssl rand -hex 20)"
           {
             echo "count=$capped_count"
+            # automated-researcher#607 round 2: "is this the first review" must depend ONLY on prior
+            # codex-engineer[bot] review rounds (reviews_total, uncapped so a trusted comment landing
+            # before this PR's first-ever review can never masquerade as review history), never on the
+            # combined reviews+comments count above -- that combined count also includes trusted PR
+            # comments (owner/implementor/senior-engineer), so a comment posted before any review has run
+            # (e.g. diagnosing a workflow failure) previously made HISTORY_COUNT > 0 and suppressed the
+            # round-1 risk-inventory instruction even on an actual first review.
+            echo "reviews_total=$reviews_total"
             echo "note=$note"
             echo "rendered<<$delim"
             printf '%s\n' "$rendered"
@@ -291,8 +299,18 @@ jobs:
           HISTORY_COUNT: ${{ steps.history.outputs.count }}
           HISTORY_NOTE: ${{ steps.history.outputs.note }}
           HISTORY_RENDERED: ${{ steps.history.outputs.rendered }}
+          REVIEWS_TOTAL: ${{ steps.history.outputs.reviews_total }}
         run: |
           set -euo pipefail
+
+          # automated-researcher#607 round 2: computed from REVIEWS_TOTAL (codex-engineer[bot] review
+          # rounds only) so a trusted comment predating this PR's first review can never make this say
+          # "not the first review" -- see the history step's reviews_total comment for the full incident.
+          if [ "$REVIEWS_TOTAL" -eq 0 ]; then
+            first_review_note="This is the first Codex review of this PR."
+          else
+            first_review_note="This is not the first Codex review of this PR ($REVIEWS_TOTAL prior codex-engineer[bot] review round(s))."
+          fi
 
           if [ "$HISTORY_COUNT" -gt 0 ]; then
             note_suffix=""
@@ -323,9 +341,10 @@ jobs:
 
           $history_section
 
-          If this is the first review of this PR (no prior review history above) and the diff touches a
-          risky surface -- shell/env-var/secrets handling, persistent state, or content parsed by more than
-          one parser -- set "risk_inventory" to a short design-level risk inventory: name which invariants
+          $first_review_note If it is the first review (per that statement -- not an inference from any
+          comment history shown above, since comments are not review rounds) and the diff touches a risky
+          surface -- shell/env-var/secrets handling, persistent state, or content parsed by more than one
+          parser -- set "risk_inventory" to a short design-level risk inventory: name which invariants
           govern that surface and which, if any, this diff violates. This is read BEFORE your line-level
           findings, so put the governing-invariant analysis there, not a restatement of the findings list.
           Leave "risk_inventory" null on routine diffs outside that surface class, and on any round after
