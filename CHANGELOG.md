@@ -1,3 +1,21 @@
+- verify-claims 0.7.27 (2026-07-21): `audit_experiment.sh` fixes from the 2026-07-10 csp1-scrub-ladder-1
+  close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery needed undocumented
+  moves), #373. (1) The built-in codex auditor now retries a usage-limit failure via an ephemeral,
+  apikey-authenticated `CODEX_HOME`: `codex login --with-api-key`, fed `OPENAI_API_KEY` over stdin so the
+  key never appears in the process argument list (`-c preferred_auth_method=apikey` alone does not switch
+  auth in codex 0.144, and `--api-key VALUE` is not a supported flag), announcing the switch to API billing
+  (~$2-5/audit) loudly in stderr/the run log rather than silently; with no `OPENAI_API_KEY` set it BLOCKs
+  naming the missing key instead of retrying blindly; the ephemeral `CODEX_HOME` is now removed via EXIT/
+  INT/TERM traps, so an interrupt mid-login/mid-exec can no longer strand API-key-authenticated credentials
+  on disk. (2) The script now unsets `BASH_ENV` for its own subshells/eval/external processes as soon as it
+  starts — defense-in-depth so an instance `~/.env` that re-injects `AUDIT_VERIFIER_CMD` via `BASH_ENV`
+  (#262) can't clobber a caller's override a second time inside a child bash the script spawns (#262's own
+  re-injection into the script's own top-level invocation is unchanged, still needing the documented
+  `BASH_ENV=` workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(i) covering the BASH_ENV
+  sanitize and the quota fallback (success, missing-key block, non-quota failure). #373's second fix —
+  family-sniffing the override's EXECUTABLE token instead of a whole-string substring match — was descoped
+  to #601 after three review rounds surfaced fail-open parser bypasses on that slice; this PR keeps main's
+  whole-string classifier unchanged.
 - verify-claims 0.7.22 (2026-07-21): `audit_data.py`'s `--sample` now defaults to `<out-stem>_sample.jsonl`,
   derived from `--out`, instead of the fixed literal `data_audit_sample.jsonl` (#521). Looping over N
   files (the common per-arm/per-wave case) with a unique `--out` per invocation but no explicit `--sample`
@@ -17,41 +35,6 @@
   unchanged), and the report gains a `dup_field` key plus the field name in its dup-count warning.
   Whole-row uniqueness remains the default and is still the right check for other data shapes (e.g.
   training-set dedup).
-- verify-claims 0.7.24 (2026-07-21): `audit_experiment.sh` gets three #373 fixes from the 2026-07-10
-  csp1-scrub-ladder-1 close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery
-  needed three undocumented moves). (1) The built-in codex auditor now retries a usage-limit failure via an
-  ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --with-api-key` against `OPENAI_API_KEY` — `-c
-  preferred_auth_method=apikey` alone does not switch auth in codex 0.144), announcing the switch to
-  API billing (~$2-5/audit) loudly in stderr/the run log rather than silently; with no `OPENAI_API_KEY` set
-  it BLOCKs naming the missing key instead of retrying blindly. (2) `AUDIT_VERIFIER_CMD`'s cross-family guard
-  now sniffs the override's family from its command's EXECUTABLE token(s) instead of a substring match over
-  the whole string, so a literal data/path substring (e.g. a scratch dir named `/tmp/claude-1000/...`) can no
-  longer false-positive the same-family guard and silently fall back to a quota-exhausted built-in auditor.
-  (3) The script now unsets `BASH_ENV` for its own subshells/eval/external processes as soon as it starts —
-  defense-in-depth so an instance `~/.env` that re-injects `AUDIT_VERIFIER_CMD` via `BASH_ENV` (#262) can't
-  clobber a caller's override a second time inside a child bash the script spawns (#262's own re-injection
-  into the script's own top-level invocation is unchanged, still needing the documented `BASH_ENV=`
-  workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(j) covering all three.
-- verify-claims 0.7.25 (2026-07-21): two #373 review-round-1 fixes on top of 0.7.24. (1) The quota-fallback
-  auditor login was `codex login --api-key VALUE`, a flag codex-cli 0.144 does not support (always failing,
-  masked only because the offline smoke's fake `codex` implemented the nonexistent flag) and which put
-  `OPENAI_API_KEY` on the process argument list (`ps`-visible); it now runs `codex login --with-api-key`
-  with the key piped over stdin, matching the real CLI's supported interface and never exposing the secret
-  via argv. (2) The executable-token family-sniffer only inspected each shell segment's first token, so an
-  `AUDIT_VERIFIER_CMD` wrapped in a passthrough command — `env claude -p ...` or `command claude -p ...` —
-  was classified `custom` instead of `claude`/`codex` and honored unchecked even when it matched the
-  runner's own family, regressing the cross-family guarantee for that shape. `override_exec_tokens` now
-  strips a leading `env`/`command` wrapper (looping to also strip any `VAR=value` prefixes it introduces)
-  before reading the executable token. `cross_family_verifier_smoke.sh` gains case (k) for the wrapper
-  regression; case (h)'s fake `codex` now requires `--with-api-key` and reads the key from stdin.
-- verify-claims 0.7.26 (2026-07-21): #373 review-round-2 fix on top of 0.7.25. Round 1's `env`/`command`
-  wrapper-stripping in `override_exec_tokens` only stripped the bare wrapper word, so `env -u FOO claude
-  -p ...` or `command -p codex ...` left the wrapper's OWN option flag (`-u`, `-p`) sitting in the
-  executable position — classified `custom` and honoring the same-family override underneath unchecked,
-  leaving the cross-family guarantee regressed for that shape. `override_exec_tokens` now also skips a
-  wrapper's dash-led option flags (and, for env's `-u`/`-C`/`-S` forms, the separate argument value that
-  follows) until the real executable token is reached. `cross_family_verifier_smoke.sh` gains case (l)
-  covering both examples.
 - verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
   explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
   next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after

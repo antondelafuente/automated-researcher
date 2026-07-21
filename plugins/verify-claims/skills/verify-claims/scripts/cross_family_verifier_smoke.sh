@@ -2,12 +2,11 @@
 # cross_family_verifier_smoke.sh — deterministic, offline guard for audit_experiment.sh's cross-family
 # auditor selection. Covers #262 (a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD must NOT run
 # same-family and must NOT dead-end), #239 (the claude built-in default must redirect to $OUT_TMP), and
-# #373 (executable-token family-sniffing including a bare or option-bearing env/command wrapper, BASH_ENV
-# sanitized for this script's own subshells, and the built-in codex auditor's apikey-CODEX_HOME quota
-# fallback).
+# #373 (BASH_ENV sanitized for this script's own subshells, and the built-in codex auditor's
+# apikey-CODEX_HOME quota fallback).
 # Uses the AUDIT_PRINT_VERIFIER seam: prints the chosen auditor + verifier command, invokes no model.
 # Each case scrubs env (env -u BASH_ENV/AUDIT_VERIFIER_CMD/AAR_SUBSTRATE) so the instance BASH_ENV that
-# re-injects AUDIT_VERIFIER_CMD cannot make the test non-hermetic. Cases (h)-(j) instead run the REAL
+# re-injects AUDIT_VERIFIER_CMD cannot make the test non-hermetic. Cases (g)-(i) instead run the REAL
 # run/retry path against a fake `codex` on PATH (never a real model call) to cover #373's quota fallback.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -89,28 +88,18 @@ else
 fi
 rm -f "$EXP/DESIGN.md" "$EXP/DESIGN_AUDIT.md" "$EXP/DESIGN_AUDIT2.md"
 
-# (f) #373 — the real incident: a codex override whose command line contains a literal claude-lookalike
-#     scratch path (e.g. a /tmp/claude-1000/... working dir) must be classified by its EXECUTABLE token
-#     ("codex"), not misclassified same-family by a substring match over the whole command string.
-if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='codex exec --sandbox read-only --cd "/tmp/claude-1000/wd" -o "$OUT_TMP"'); then
-  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$'   || err "(f) codex override with a claude-lookalike path was not classified codex: $out"
-  echo "$out" | grep -q -- '/tmp/claude-1000/wd'   || err "(f) opposite-family override not honored verbatim: $out"
-else
-  err "(f) codex override with a claude-lookalike path BLOCKED instead of being honored"
-fi
-
-# (g) #373 — defense-in-depth: this script must unset BASH_ENV for its own subshells/eval/external
+# (f) #373 — defense-in-depth: this script must unset BASH_ENV for its own subshells/eval/external
 #     processes, so an instance ~/.env that re-injects AUDIT_VERIFIER_CMD via BASH_ENV cannot clobber a
 #     caller override a second time inside any child bash this script spawns.
 BENV_FILE=$(mktemp "${TMPDIR:-/tmp}/cfvsmoke_bashenv.XXXXXX") || { echo "  SMOKE-FAIL: mktemp failed" >&2; exit 1; }
 if out=$(env -u AUDIT_VERIFIER_CMD BASH_ENV="$BENV_FILE" AUDIT_PRINT_VERIFIER=1 AAR_SUBSTRATE=claude bash "$AE" "$EXP" 2>/dev/null); then
-  echo "$out" | grep -q '^BASH_ENV=<unset>$' || err "(g) BASH_ENV not sanitized for this script's own subshells: $out"
+  echo "$out" | grep -q '^BASH_ENV=<unset>$' || err "(f) BASH_ENV not sanitized for this script's own subshells: $out"
 else
-  err "(g) BASH_ENV-set run failed unexpectedly"
+  err "(f) BASH_ENV-set run failed unexpectedly"
 fi
 rm -f "$BENV_FILE"
 
-# (h)-(j) #373 — the built-in codex auditor's apikey-CODEX_HOME quota fallback. A fake `codex` on PATH
+# (g)-(i) #373 — the built-in codex auditor's apikey-CODEX_HOME quota fallback. A fake `codex` on PATH
 #     drives the real run/retry path (never a real model call): "exec" fails with a usage-limit error
 #     unless CODEX_HOME/auth.json exists, and "login --with-api-key" (the actual fallback mechanism, since
 #     `-c preferred_auth_method=apikey` alone does not switch auth in codex 0.144, and `--api-key VALUE` is
@@ -142,73 +131,40 @@ esac
 FAKE_CODEX
 chmod +x "$FAKEBIN/codex"
 
-# (h) usage-limit failure + OPENAI_API_KEY set: retries via the apikey CODEX_HOME and succeeds, having
+# (g) usage-limit failure + OPENAI_API_KEY set: retries via the apikey CODEX_HOME and succeeds, having
 #     announced the billing switch loudly (never silently).
+G_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_g.XXXXXX")
+: > "$G_EXP/RESULTS.md"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key AAR_SUBSTRATE=claude bash "$AE" "$G_EXP" 2>&1); then
+  [ -s "$G_EXP/AUDIT.md" ]                        || err "(g) quota fallback did not produce $G_EXP/AUDIT.md: $out"
+  grep -q 'FINDING 1' "$G_EXP/AUDIT.md" 2>/dev/null || err "(g) AUDIT.md missing the fallback run's content"
+  echo "$out" | grep -qi 'API-BILLED'              || err "(g) fallback did not announce the billing switch loudly: $out"
+else
+  err "(g) quota fallback did not succeed: $out"
+fi
+rm -rf "$G_EXP"
+
+# (h) same usage-limit failure with NO OPENAI_API_KEY: BLOCKED with the specific no-key message, never
+#     silently retried and never left to a generic/confusing failure.
 H_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_h.XXXXXX")
 : > "$H_EXP/RESULTS.md"
-if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key AAR_SUBSTRATE=claude bash "$AE" "$H_EXP" 2>&1); then
-  [ -s "$H_EXP/AUDIT.md" ]                        || err "(h) quota fallback did not produce $H_EXP/AUDIT.md: $out"
-  grep -q 'FINDING 1' "$H_EXP/AUDIT.md" 2>/dev/null || err "(h) AUDIT.md missing the fallback run's content"
-  echo "$out" | grep -qi 'API-BILLED'              || err "(h) fallback did not announce the billing switch loudly: $out"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD -u OPENAI_API_KEY PATH="$FAKEBIN:$PATH" AAR_SUBSTRATE=claude bash "$AE" "$H_EXP" 2>&1); then
+  err "(h) usage-limit failure with no OPENAI_API_KEY did not block: $out"
 else
-  err "(h) quota fallback did not succeed: $out"
+  echo "$out" | grep -qi 'no OPENAI_API_KEY' || err "(h) block message did not name the missing OPENAI_API_KEY: $out"
 fi
 rm -rf "$H_EXP"
 
-# (i) same usage-limit failure with NO OPENAI_API_KEY: BLOCKED with the specific no-key message, never
-#     silently retried and never left to a generic/confusing failure.
+# (i) a NON-quota codex failure must NOT trigger the apikey fallback — never spend API billing on an
+#     unrelated failure.
 I_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_i.XXXXXX")
 : > "$I_EXP/RESULTS.md"
-if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD -u OPENAI_API_KEY PATH="$FAKEBIN:$PATH" AAR_SUBSTRATE=claude bash "$AE" "$I_EXP" 2>&1); then
-  err "(i) usage-limit failure with no OPENAI_API_KEY did not block: $out"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key FAKE_CODEX_FAILURE=generic AAR_SUBSTRATE=claude bash "$AE" "$I_EXP" 2>&1); then
+  err "(i) non-quota failure did not block: $out"
 else
-  echo "$out" | grep -qi 'no OPENAI_API_KEY' || err "(i) block message did not name the missing OPENAI_API_KEY: $out"
+  echo "$out" | grep -qi 'API-BILLED' && err "(i) non-quota failure incorrectly triggered the apikey fallback: $out"
 fi
-rm -rf "$I_EXP"
+rm -rf "$I_EXP" "$FAKEBIN"
 
-# (j) a NON-quota codex failure must NOT trigger the apikey fallback — never spend API billing on an
-#     unrelated failure.
-J_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_j.XXXXXX")
-: > "$J_EXP/RESULTS.md"
-if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key FAKE_CODEX_FAILURE=generic AAR_SUBSTRATE=claude bash "$AE" "$J_EXP" 2>&1); then
-  err "(j) non-quota failure did not block: $out"
-else
-  echo "$out" | grep -qi 'API-BILLED' && err "(j) non-quota failure incorrectly triggered the apikey fallback: $out"
-fi
-rm -rf "$J_EXP" "$FAKEBIN"
-
-# (k) #373 review round 1 — a same-family override wrapped in a passthrough command (`env`/`command`) must
-#     still be sniffed by its REAL executable, not stop at the wrapper and fall through to 'custom' (which
-#     would honor it unchecked, defeating the cross-family guarantee). Same self-correcting behavior as (a).
-if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='env claude -p > "$OUT_TMP"'); then
-  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$' || err "(k) env-wrapped same-family override was not self-corrected to codex auditor: $out"
-  echo "$out" | grep -q 'codex exec'            || err "(k) env-wrapped same-family override did not fall back to the codex default: $out"
-else
-  err "(k) env-wrapped same-family override BLOCKED instead of self-correcting"
-fi
-if out=$(seam AAR_SUBSTRATE=codex AUDIT_VERIFIER_CMD='command codex exec --sandbox read-only -o "$OUT_TMP"'); then
-  echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(k) command-wrapped same-family override was not self-corrected to claude auditor: $out"
-  echo "$out" | grep -q 'claude -p'              || err "(k) command-wrapped same-family override did not fall back to the claude default: $out"
-else
-  err "(k) command-wrapped same-family override BLOCKED instead of self-correcting"
-fi
-
-# (l) #373 review round 2 — a wrapper's OWN option flag (env's `-u NAME`, command's `-p`) must not be
-#     mistaken for the executable: round 1's fix stopped at a bare `env`/`command` token, so `env -u FOO
-#     claude ...` / `command -p codex ...` left the option flag in executable position, classified 'custom',
-#     and honored the same-family override underneath unchecked. Same self-correcting behavior as (a)/(k).
-if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='env -u FOO claude -p > "$OUT_TMP"'); then
-  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$' || err "(l) env -u FOO claude override was not self-corrected to codex auditor: $out"
-  echo "$out" | grep -q 'codex exec'            || err "(l) env -u FOO claude override did not fall back to the codex default: $out"
-else
-  err "(l) env -u FOO claude override BLOCKED instead of self-correcting"
-fi
-if out=$(seam AAR_SUBSTRATE=codex AUDIT_VERIFIER_CMD='command -p codex exec --sandbox read-only -o "$OUT_TMP"'); then
-  echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(l) command -p codex override was not self-corrected to claude auditor: $out"
-  echo "$out" | grep -q 'claude -p'              || err "(l) command -p codex override did not fall back to the claude default: $out"
-else
-  err "(l) command -p codex override BLOCKED instead of self-correcting"
-fi
-
-[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-l)" >&2
+[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-i)" >&2
 exit "$fail"

@@ -64,16 +64,14 @@
 #                                  wrong default can't make the audit same-family; auditor = opposite family)
 #      AUDIT_VERIFIER_CMD=...      (OVERRIDE the auditor; honored only if a DIFFERENT family than the runner,
 #                                  and it MUST write its final answer to "$OUT_TMP" — see the built-in defaults.
-#                                  A same-family value is ignored (warn) + the opposite-family default is used.
-#                                  Family is sniffed from the command's EXECUTABLE token(s), not the whole
-#                                  string — #373: a substring match over the full command previously let a
-#                                  literal data/path token like /tmp/claude-1000/... false-positive as claude.)
+#                                  A same-family value is ignored (warn) + the opposite-family default is used.)
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
 #      AUDIT_QUOTA_ERROR_PATTERN=  (case-insensitive grep pattern identifying a usage-limit failure from the
 #                                  built-in codex auditor's ChatGPT transport; default 'usage limit' — #373.)
 #      OPENAI_API_KEY=...          (used ONLY for the #373 apikey CODEX_HOME quota fallback below; unrelated
 #                                  to AAR_SUBSTRATE/AUDIT_VERIFIER_CMD selection.)
 set -euo pipefail
+APIKEY_CODEX_HOME=""
 # Defense-in-depth against #262 (an instance ~/.env exporting AUDIT_VERIFIER_CMD, re-injected into every
 # non-interactive shell via BASH_ENV): unset BASH_ENV as soon as THIS script starts so it is never inherited
 # by any subshell/eval/external process it spawns below, and a re-source of that ~/.env can't clobber a
@@ -119,71 +117,6 @@ case "$RUNNER_FAMILY" in
      echo "  default to a family and risk a silent same-family audit." >&2
      exit 1 ;;
 esac
-# override_exec_tokens: extract the EXECUTABLE-position token(s) of a shell command line — the leading
-# word of each simple command (segments split on the operators/groupers below), with leading VAR=value
-# env-assignment prefixes AND same-family-preserving wrapper commands (env/command — #373 review round 1:
-# `env claude -p ...` or `command claude -p ...` must still sniff as claude/codex, not stop at the wrapper
-# and fall through to 'custom') stripped, and any directory component removed (basename) — one per line.
-# #373: a literal data/path substring elsewhere in the line (e.g. a scratch dir named /tmp/claude-1000/...)
-# is a much longer whole token than "claude" and never equal-matches it, whereas the old whole-string glob
-# (*claude*) matched that substring anywhere and misclassified an otherwise-codex override as same-family.
-# #373 review round 2: round 1 only stripped a BARE `env`/`command` token — `env -u FOO claude ...` or
-# `command -p codex ...` left the wrapper's OWN option flag (`-u`, `-p`) sitting in the executable position,
-# so it was classified 'custom' and the same-family override underneath was honored unchecked. Once inside
-# a wrapper, also skip the wrapper's dash-led option flags (and, for env's -u/-C/-S forms, the separate
-# argument value that follows) until the real executable token is reached.
-override_exec_tokens(){
-  local rest=$1 seg rawtok tok wrapper
-  rest=${rest//&&/$'\n'}; rest=${rest//'||'/$'\n'}; rest=${rest//;/$'\n'}; rest=${rest//|/$'\n'}
-  rest=${rest//(/$'\n'};  rest=${rest//)/$'\n'};     rest=${rest//\{/$'\n'}; rest=${rest//\}/$'\n'}
-  while IFS= read -r seg; do
-    seg="${seg#"${seg%%[![:space:]]*}"}"
-    [ -n "$seg" ] || continue
-    wrapper=""
-    while :; do
-      while [[ $seg =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]* ]]; do
-        seg="${seg#"${BASH_REMATCH[0]}"}"
-        seg="${seg#"${seg%%[![:space:]]*}"}"
-        [ -n "$seg" ] || break
-      done
-      [ -n "$seg" ] || break
-      rawtok="${seg%%[[:space:]]*}"
-      tok="${rawtok%\"}"; tok="${tok#\"}"; tok="${tok%\'}"; tok="${tok#\'}"
-      tok="${tok##*/}"
-      case "$tok" in
-        env|command)
-          wrapper=$tok
-          seg="${seg#"$rawtok"}"
-          seg="${seg#"${seg%%[![:space:]]*}"}"
-          continue ;;
-        --)
-          if [ -n "$wrapper" ]; then
-            seg="${seg#"$rawtok"}"
-            seg="${seg#"${seg%%[![:space:]]*}"}"
-            continue
-          fi ;;
-        -*)
-          if [ -n "$wrapper" ]; then
-            seg="${seg#"$rawtok"}"
-            seg="${seg#"${seg%%[![:space:]]*}"}"
-            if [ "$wrapper" = env ]; then
-              case "$tok" in
-                -u|--unset|-C|--chdir|-S|--split-string)
-                  if [ -n "$seg" ]; then
-                    seg="${seg#"${seg%%[[:space:]]*}"}"
-                    seg="${seg#"${seg%%[![:space:]]*}"}"
-                  fi ;;
-              esac
-            fi
-            continue
-          fi ;;
-      esac
-      break
-    done
-    [ -n "$seg" ] || continue
-    printf '%s\n' "$tok"
-  done <<<"$rest"
-}
 # AUDIT_VERIFIER_CMD is an OVERRIDE, honored ONLY when a DIFFERENT family than the runner. A same-family
 # value — a misconfig, or an instance BASH_ENV re-injecting AUDIT_VERIFIER_CMD into every shell (#262) — is
 # IGNORED (warn) and the opposite-family built-in default is used, so the audit can never silently run
@@ -191,13 +124,9 @@ override_exec_tokens(){
 # trusted as a deliberate third-family escape hatch (it can never equal the runner family).
 VERIFIER_OVERRIDE=""
 if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
-  OVERRIDE_FAMILY=custom
-  while IFS= read -r tok; do
-    case "$tok" in
-      claude) OVERRIDE_FAMILY=claude; break ;;
-      codex)  OVERRIDE_FAMILY=codex ;;
-    esac
-  done < <(override_exec_tokens "$AUDIT_VERIFIER_CMD")
+  case "$AUDIT_VERIFIER_CMD" in
+    *claude*) OVERRIDE_FAMILY=claude ;; *codex*) OVERRIDE_FAMILY=codex ;; *) OVERRIDE_FAMILY=custom ;;
+  esac
   if [ "$OVERRIDE_FAMILY" = "$RUNNER_FAMILY" ]; then
     echo "[audit_experiment] WARN: ignoring same-family AUDIT_VERIFIER_CMD (family=$OVERRIDE_FAMILY == runner)" >&2
     echo "  — likely a misconfig or an instance BASH_ENV re-injection (#262); using the built-in $AUDITOR_FAMILY auditor." >&2
@@ -481,13 +410,16 @@ codex_apikey_fallback(){
   echo "[audit_experiment] WARN: built-in codex auditor hit a usage-limit error — retrying via an" >&2
   echo "  ephemeral apikey CODEX_HOME. This run is now API-BILLED (~\$2-5/audit, #373), NOT the free" >&2
   echo "  ChatGPT-subscription transport." >&2
-  local home; home=$(mktemp -d "${TMPDIR:-/tmp}/audit_codex_home.XXXXXX")
-  if CODEX_HOME="$home" codex login --with-api-key >>"$OUT.run.log" 2>&1 <<< "$OPENAI_API_KEY" \
-     && CODEX_HOME="$home" codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" <<< "$PROMPT" >>"$OUT.run.log" 2>&1
+  trap '[ -z "$APIKEY_CODEX_HOME" ] || rm -rf "$APIKEY_CODEX_HOME"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  APIKEY_CODEX_HOME=$(mktemp -d "${TMPDIR:-/tmp}/audit_codex_home.XXXXXX")
+  if CODEX_HOME="$APIKEY_CODEX_HOME" codex login --with-api-key >>"$OUT.run.log" 2>&1 <<< "$OPENAI_API_KEY" \
+     && CODEX_HOME="$APIKEY_CODEX_HOME" codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" <<< "$PROMPT" >>"$OUT.run.log" 2>&1
   then
-    rm -rf "$home"; return 0
+    rm -rf "$APIKEY_CODEX_HOME"; return 0
   fi
-  rm -rf "$home"
+  rm -rf "$APIKEY_CODEX_HOME"
   echo "BLOCKED: apikey CODEX_HOME fallback also failed (#373) — last lines of $OUT.run.log:" >&2
   tail -5 "$OUT.run.log" >&2
   return 1

@@ -100,9 +100,7 @@ runner audits with Claude (`( cd <exp> && claude -p ) > "$OUT_TMP"`). `AUDIT_VER
 override honored only when it is a DIFFERENT family than the runner, and it MUST run in the experiment dir
 and write its final answer to `"$OUT_TMP"`; a same-family value — e.g. an instance `BASH_ENV` that re-injects
 `AUDIT_VERIFIER_CMD` into every non-interactive shell (#262) — is ignored with a warning and the
-opposite-family default is used. The override's family is sniffed from its command's EXECUTABLE token(s),
-not the whole string (#373), so a literal data/path substring elsewhere in the line (e.g. a scratch dir
-named `/tmp/claude-1000/...`) can't false-positive the same-family guard. `audit_experiment.sh` also unsets
+opposite-family default is used. `audit_experiment.sh` also unsets
 `BASH_ENV` for its own subshells/eval/external processes as soon as it starts (#373, defense-in-depth): the
 same `~/.env` re-injection can't clobber a caller's override a second time inside a child bash the script
 spawns — this does not by itself fix #262's re-injection into the script's own top-level invocation, which
