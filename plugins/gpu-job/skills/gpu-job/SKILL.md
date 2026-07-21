@@ -32,7 +32,9 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    own env finds nothing): to `/etc/environment` on a root pod (inherited automatically, no
    per-script convention to forget) and to `/workspace/.env` as the fallback everywhere else — `source
    /workspace/.env` (or `job_lib.sh`'s `env_get`) at the top of any launch script that needs one of
-   these vars and can't rely on `/etc/environment`.
+   these vars and can't rely on `/etc/environment`. Values are single-quote-escaped on write (a value
+   containing shell metacharacters is a literal string when sourced, never executed) and
+   `/workspace/.env` is chmod 600 since it now carries secrets.
 3. **Run detached:** `scripts/run_remote.sh <port> root@<ip> <job.sh> /root/job.log [ENV=V…]`
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.

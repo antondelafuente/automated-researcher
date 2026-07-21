@@ -65,4 +65,29 @@ _persist_passed_env "$ENV5" "$WS5" "$ETC5" 1
 _persist_passed_env "$ENV5" "$WS5" "$ETC5" 1
 if [ "$(grep -c '^HF_TOKEN=' "$WS5")" = 1 ] && [ "$(grep -c '^HF_TOKEN=' "$ETC5")" = 1 ]; then ok idempotent-rerun; else no "idempotent-rerun (ws=$(cat "$WS5") etc=$(cat "$ETC5"))"; fi
 
+# --- 6. a value with shell metacharacters is single-quoted, not corrupted/executed on `source` --------
+ENV6="$TMP/environ6"
+fake_environ "$ENV6" "PASSED_ENV_NAMES=INJECT_VAR" 'INJECT_VAR=has $(touch '"$TMP"'/pwned) space'"'"'quote'
+WS6="$TMP/ws6/.env"; ETC6="$TMP/etc6/environment"
+_persist_passed_env "$ENV6" "$WS6" "$ETC6" 1
+( set +u; INJECT_VAR=""; source "$WS6" )
+if [ -e "$TMP/pwned" ]; then no "sourcing-workspace-env-must-not-execute-injected-command"; else ok sourcing-workspace-env-must-not-execute-injected-command; fi
+( set +u; INJECT_VAR=""; source "$WS6"; [ "$INJECT_VAR" = 'has $(touch '"$TMP"'/pwned) space'"'"'quote' ] ) \
+  && ok quoted-value-round-trips-through-source || no "quoted-value-round-trips-through-source"
+
+# --- 7. a value containing a newline is skipped (can't be a single KV line), other vars unaffected -----
+ENV7="$TMP/environ7"
+fake_environ "$ENV7" $'PASSED_ENV_NAMES=MULTILINE_VAR,HF_TOKEN' $'MULTILINE_VAR=line1\nline2' "HF_TOKEN=hf-xyz"
+WS7="$TMP/ws7/.env"; ETC7="$TMP/etc7/environment"
+_persist_passed_env "$ENV7" "$WS7" "$ETC7" 1
+if grep -q '^MULTILINE_VAR=' "$WS7" 2>/dev/null; then no "newline-value-must-be-skipped-not-written"; else ok newline-value-must-be-skipped-not-written; fi
+if grep -qx 'HF_TOKEN=hf-xyz' "$WS7"; then ok other-var-still-persisted-alongside-skipped-newline-var; else no other-var-still-persisted-alongside-skipped-newline-var; fi
+
+# --- 8. workspace/.env is chmod 600 (secrets now live there; default umask is not enough) -------------
+ENV8="$TMP/environ8"
+fake_environ "$ENV8" "PASSED_ENV_NAMES=HF_TOKEN" "HF_TOKEN=hf-xyz"
+WS8="$TMP/ws8/.env"; ETC8="$TMP/etc8/environment"
+_persist_passed_env "$ENV8" "$WS8" "$ETC8" 1
+if [ "$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null)" = "600" ]; then ok workspace-env-is-chmod-600; else no "workspace-env-is-chmod-600 (mode=$(stat -c '%a' "$WS8" 2>/dev/null || stat -f '%Lp' "$WS8" 2>/dev/null))"; fi
+
 [ "$fails" = 0 ] && { echo "PASS bootstrap_pod_env_smoke"; exit 0; } || { echo "FAIL bootstrap_pod_env_smoke"; exit 1; }

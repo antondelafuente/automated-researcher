@@ -15,6 +15,18 @@ _proc1_get(){ # _proc1_get <environ-file> <name> — <name>'s value from a NUL-s
   awk -v k="$2" 'BEGIN{RS="\0"} index($0, k"=")==1{print substr($0, length(k)+2); exit}' "$1" 2>/dev/null || true
 }
 
+_shell_quote(){ # _shell_quote <value> — bash-single-quote-safe iff VALUE contains a character that
+                # would otherwise change meaning when a later `source /workspace/.env` re-parses
+                # this line (space, `"`, `$`, backtick, `\`, ...); left bare for a plain
+                # alnum/`_.:/@+,=-`-only value so the common case (API keys, paths) round-trips
+                # byte-for-byte through job_lib.sh's env_get, which only strips ONE optional
+                # leading/trailing quote char rather than doing full shell-unescaping.
+  case "$1" in
+    *[!A-Za-z0-9_.:/@+=,-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/workspace/.env]
   # [etc-environment=/etc/environment] [is-root=auto] — generalizes the R2-only env persistence
   # below to ANY var deploy_pod.py injected via PASS_ENV (#341: TINKER_API_KEY/HF_TOKEN/etc were
@@ -22,15 +34,21 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
   # each). deploy_pod.py's pod_env() writes PASSED_ENV_NAMES alongside the real vars — bootstrap
   # has no other record of what was in PASS_ENV. Writes each to <workspace-env> (the
   # `source /workspace/.env`-per-launch-script fallback convention; job_lib.sh's env_get already
-  # reads this file) and, on a root pod, to <etc-environment> too — the PRIMARY mechanism, since
-  # PAM applies /etc/environment to every later non-interactive `ssh pod 'cmd'` with no per-script
-  # source to forget (same pattern the RCLONE_MULTI_THREAD_* write below already uses).
+  # reads this file), single-quoted via _shell_quote so a value containing shell metacharacters
+  # is a literal string when sourced rather than executed (code-review Finding: unescaped values
+  # corrupt/inject on `source`) — and, on a root pod, to <etc-environment> too — the PRIMARY
+  # mechanism, since PAM applies /etc/environment to every later non-interactive `ssh pod 'cmd'`
+  # with no per-script source to forget (same pattern the RCLONE_MULTI_THREAD_* write below
+  # already uses). <workspace-env> is chmod 600 immediately since (unlike the pre-existing
+  # RCLONE_MULTI_THREAD_*/etc.-environment convention it's modeled on) it now carries secrets.
   local environ_file=$1 workspace_env=${2:-/workspace/.env} etc_env=${3:-/etc/environment} is_root=${4:-}
   [ -n "$is_root" ] || { [ "$(id -u)" = 0 ] && is_root=1 || is_root=0; }
-  local names name val old_ifs
+  local names name val qval old_ifs
   names=$(_proc1_get "$environ_file" PASSED_ENV_NAMES)
   [ -n "$names" ] || return 0
   mkdir -p "$(dirname "$workspace_env")"
+  [ -e "$workspace_env" ] || : > "$workspace_env"
+  chmod 600 "$workspace_env" 2>/dev/null || true
   [ "$is_root" = 1 ] && mkdir -p "$(dirname "$etc_env")"
   old_ifs=$IFS; IFS=','
   for name in $names; do
@@ -38,9 +56,15 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
     [ -n "$name" ] || continue
     val=$(_proc1_get "$environ_file" "$name")
     [ -n "$val" ] || continue
-    grep -q "^${name}=" "$workspace_env" 2>/dev/null || printf '%s=%s\n' "$name" "$val" >> "$workspace_env"
+    case "$val" in
+      *$'\n'*)
+        echo "[bootstrap] skipping PASS_ENV var $name: value contains a newline, cannot persist as a single KV line" >&2
+        continue ;;
+    esac
+    qval=$(_shell_quote "$val")
+    grep -q "^${name}=" "$workspace_env" 2>/dev/null || printf '%s=%s\n' "$name" "$qval" >> "$workspace_env"
     if [ "$is_root" = 1 ]; then
-      grep -q "^${name}=" "$etc_env" 2>/dev/null || printf '%s=%s\n' "$name" "$val" >> "$etc_env"
+      grep -q "^${name}=" "$etc_env" 2>/dev/null || printf '%s=%s\n' "$name" "$qval" >> "$etc_env"
     fi
   done
   IFS=$old_ifs
