@@ -1,6 +1,8 @@
 #!/bin/bash
 # feedback-loop init - one-time setup. Writes ~/.config/feedback-loop/env from answers/env.
 # Non-interactive: pre-set FEEDBACK_PRODUCT_REPO and optional FEEDBACK_INSTANCE_GUIDANCE.
+# FEEDBACK_WF_CMD (automated-researcher#468): optional wf.sh resolution when aar-engineering is installed
+# but not on PATH - agents repeatedly concluded wf.sh didn't exist because nothing recorded where it lives.
 # Nothing is uploaded; config stays local, chmod 600.
 set -euo pipefail
 

@@ -100,7 +100,9 @@ order:
    this order before concluding it isn't on this box — a bare-name lookup finding nothing is not the same as
    `wf.sh` not existing:
 
-   1. `$FEEDBACK_WF_CMD`, when set (see Config above) — use it verbatim as the `wf.sh` invocation.
+   1. `$FEEDBACK_WF_CMD`, when set (see Config above) — invoke it quoted (`"$FEEDBACK_WF_CMD"`) as the
+      `wf.sh` command, since it's a single absolute path that may contain spaces; an unquoted substitution
+      would word-split it.
    2. `wf.sh` on `PATH`.
    3. A sibling plugin-source checkout next to this repo: the `aar-engineering` plugin ships `wf.sh` but
       lives in a separate repo checkout (e.g. `~/agentic-engineering/plugins/aar-engineering/skills/ship-change/scripts/wf.sh`),
@@ -116,8 +118,9 @@ order:
    wf.sh issue <claude|codex> comment <issue-number> -R "$FEEDBACK_PRODUCT_REPO" -b "<body>"
    ```
 
-   (`wf.sh` here means whichever of the three resolution steps above found it — substitute
-   `$FEEDBACK_WF_CMD` or the sibling-checkout path for the bare name if that's what resolved.)
+   (`wf.sh` here means whichever of the three resolution steps above found it — substitute the
+   sibling-checkout path for the bare name if that's what resolved, or `"$FEEDBACK_WF_CMD"` (quoted, per
+   step (1) above) if that's what resolved.)
 
 2. **`scripts/engineer_gh_issue.sh`, when `wf.sh` isn't installed but the box has the #149
    `WF_ENGINEER_TOKEN_CMD_<CLAUDE|CODEX>` seam configured.** This skill ships its own minimal, self-contained
