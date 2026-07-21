@@ -42,9 +42,11 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
      keeps the *local* basename at the destination, so N fan-out drivers (one per subject, one pod
      each) that all run `rclone copy out/${SUBJECT}/rollouts.jsonl <remote>/rollouts/` land every
      subject's file on the identical object name — whichever pod's upload finishes last silently
-     overwrites every subject before it, no error from rclone. It only bites once two pods finish
-     close together, so a driver written from a single-subject template and tested one subject at a
-     time looks correct. Give each subject an explicit destination filename with `copyto` instead:
+     overwrites every subject before it, no error from rclone, regardless of how far apart in time
+     the uploads land (the collision is the shared object name, not a timing race). It only shows
+     up once a real fan-out with two or more subjects runs, so a driver written and tested against
+     a single subject at a time looks correct. Give each subject an explicit destination filename
+     with `copyto` instead:
      ```bash
      rclone copyto "out/${SUBJECT}/rollouts.jsonl" "<remote>/rollouts/${SUBJECT}.jsonl"
      ```
