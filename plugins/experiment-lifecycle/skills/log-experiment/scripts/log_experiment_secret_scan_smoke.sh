@@ -613,7 +613,15 @@ if run_dry "$T/reg/design"; then fail "prose-only mention of Status: EXPLORATORY
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 52: MANIFEST.md sha256 table names the column but every row is a placeholder (no real 64-hex digest) -> BLOCK (P1: gate must verify an actual digest, not just the word 'sha256')"
+echo "[smoke] case 52: FINDINGS.md's own line BEGINS WITH 'Status: EXPLORATORY' but continues as prose (not a bare header) -> BLOCK (round-3 review: the end of the marker must be anchored too, not just the start — case 51 only covers a prefixed prose mention)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nStatus: EXPLORATORY header is missing from the upstream draft.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "prose continuing past the marker on its own line was NOT blocked (end of marker not anchored)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "prose trailing the marker on its own line blocked, bare header still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 53: MANIFEST.md sha256 table names the column but every row is a placeholder (no real 64-hex digest) -> BLOCK (P1: gate must verify an actual digest, not just the word 'sha256')"
 T=$(mktemp_d); make_design_stage_repo "$T"
 printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
 if run_dry "$T/reg/design"; then fail "dataset record with a placeholder (non-hex, non-64-char) hash was NOT blocked"; else
