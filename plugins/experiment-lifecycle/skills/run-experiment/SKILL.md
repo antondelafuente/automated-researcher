@@ -256,6 +256,25 @@ exactly the invented/coerced value the fallback must never produce. This only ev
 the judge already stated in a genuine bare-shorthand row — it never invents or coerces a value — and took one
 run's 234 cells from as low as 93.9% up to 100%.
 
+**A fanout wrapper's done-marker must key on the trainer's own success CONTENT, never on the trainer
+process's exit code alone (#569).** A `bash -c "<trainer invocation> && touch done_marker"` wrapper — the
+standard fanout-wrapper shape around a trainer script — relies on `&&` to decide whether an arm succeeded,
+but a shutdown-time SDK/HTTP-client crash AFTER a fully successful save can still exit the trainer non-zero,
+short-circuiting `&&` and leaving `done_marker` untouched — a false "not done" signal on a genuinely-completed,
+genuinely-valid arm (a real incident: 2 of 24 arms printed a clean `=== DONE ===` banner with valid checkpoint
++ sampler-weight paths, then the wrapping `bash -c` reported `Aborted (core dumped)` from the trainer's own
+SDK teardown, after both saves had already returned successfully). To the SUCCESS-aware done-check above
+(#357), an exit-code-gated marker is doubly wrong here: trusting a missing marker as "not done" risks a
+silent double-spend (re-running an arm that already completed) just as readily as trusting a stale-but-present
+marker risks the opposite failure #357 already covers. Treat the wrapper's own exit code as untrustworthy:
+grep the trainer's log for its success banner plus a parseable artifact path (e.g. `=== DONE ===` followed by
+the checkpoint/sampler-weight paths it printed) as the done signal instead of `&&`-chaining a `touch`,
+optionally confirming with a live sampler-attach check against the printed path as stronger validity
+confirmation before trusting an arm complete. Where a trainer script controls its own exit path, also prefer
+having it flush and `exit(0)` explicitly right after printing its success banner, before any SDK/client
+teardown that could crash — closing off the false-non-zero-exit case at the source rather than only working
+around it downstream.
+
 **Multi-wave eval fan-out over many checkpoints needs an explicit canonical checklist, not reactive batching
 (#337).** Batching eval waves reactively — queuing whichever checkpoints/arms/seeds are ready right now — has
 no built-in signal that something was skipped: it only ever adds to what's present, never checks against what's
