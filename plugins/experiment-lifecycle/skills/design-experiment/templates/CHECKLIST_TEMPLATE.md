@@ -94,7 +94,7 @@
       ledger recipe's terminal set) — not just that a launch event exists somewhere in its history. An
       explicit EXPERIMENT-LEVEL terminal event is REQUIRED: a ledger line whose `run` field equals the
       registry dir name EXACTLY (no suffix) — `ledger.py add --run <exp-dir-name> --status
-      <done|failed|stopped>`. Sub-run events (`…-smoke`, `…-seed1`, `…-seed2-gen`, …) may exist alongside
+      <done|failed|killed>`. Sub-run events (`…-smoke`, `…-seed1`, `…-seed2-gen`, …) may exist alongside
       it in whatever granularity the run wants; a folded/latest status inferred only from sub-run events
       does NOT satisfy this gate (research-lab#256: a stale sub-run event rendered a completed experiment
       FAILED on the dashboard — #473). Never backfill a `running`/`launched`/`deploying` event after a
