@@ -39,6 +39,10 @@
 # does not false-positive block either — and a claim about a file inside a WHOLLY-ignored directory (not just
 # an individually-ignored file) is still caught, since `ls-files` enumerates every file under an ignored
 # directory individually rather than collapsing it to one directory entry the way `git status` does.
+# #467: also covers check_excluded_claim's precision fix for the run-experiment scripts/ vs work/scripts/
+# dual-copy layout — a commit-claim match downgrades to a printed note (not a BLOCK) when a file sharing the
+# excluded file's basename IS staged elsewhere in the dir, while the original #331 scenario (no staged
+# counterpart at all) still BLOCKs exactly as before.
 #
 # #374: also covers the `--only <path>` allowlist — a co-tenant's file left OUT of the allowlist is never
 # staged and so never scanned/blocked by secret_scan or the #340 ignored-file guard, even when it sits right
@@ -449,18 +453,56 @@ if run_dry "$T/reg/note" --only mine.py; then fail "--only on a symlink to a co-
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 37: a staged TEMP.md -> BLOCK (#332 — run-experiment's transient successor-handoff scratch must not land in the merged PR)"
+# #467: check_excluded_claim's basename+commit-claim match false-positived when the SAME basename legitimately
+# exists TWICE by design — once committed outside work/, once as a gitignored working copy under work/ (the
+# run-experiment R2-mirrored dual-copy layout). Downgrade to a note ONLY when a same-basename file IS staged.
+
+echo "[smoke] case 37: RESULTS.md claims a gitignored file is committed, a SAME-BASENAME file IS staged elsewhere under the dir (the run-experiment scripts/ vs work/scripts/ dual-copy layout), WITH --skip-ignored -> PASS with a downgrade note, not a BLOCK (#467; --skip-ignored still needed to acknowledge the #340 exclusion itself — only the #331 commit-claim die is downgraded)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/work/'
+mkdir -p "$T/reg/note/scripts" "$T/reg/note/work/scripts"
+printf 'print("hi")\n' > "$T/reg/note/scripts/foo.py"        # committed copy — new, stages fine
+printf 'print("hi")\n' > "$T/reg/note/work/scripts/foo.py"   # gitignored working copy, same basename
+printf 'foo.py is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note" --skip-ignored; then
+  case "$LAST_ERR" in *"shares a basename with a file that IS staged"*"foo.py"*) pass "commit-claim downgraded to a note when a same-basename file is staged elsewhere";;
+    *) fail "passed but the expected downgrade note was not printed: $LAST_ERR";; esac
+else fail "dual-copy layout with a staged same-basename counterpart was BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 37b: same dual-copy layout as case 37, but WITHOUT --skip-ignored -> BLOCK on the #340 exclusion itself (the commit-claim die is downgraded, but the general gitignored-file guard still requires explicit acknowledgment)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/work/'
+mkdir -p "$T/reg/note/scripts" "$T/reg/note/work/scripts"
+printf 'print("hi")\n' > "$T/reg/note/scripts/foo.py"
+printf 'print("hi")\n' > "$T/reg/note/work/scripts/foo.py"
+printf 'foo.py is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "gitignored file(s) present with no --skip-ignored did NOT block (#340 guard should still require acknowledgment)"; else
+  case "$LAST_ERR" in
+    *"shares a basename with a file that IS staged"*"foo.py"*"gitignored file(s) excluded from the staged commit"*) pass "commit-claim downgraded to a note, but the #340 guard still blocks without --skip-ignored";;
+    *"claims it is committed"*) fail "REGRESSION: the commit-claim die still fired despite a staged same-basename counterpart: $LAST_ERR";;
+    *) fail "blocked but not on the expected #340 message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 38: RESULTS.md claims a gitignored file is committed, and NO same-basename file is staged anywhere -> still BLOCK (the original #331 scenario; fail-closed preserved)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "false 'committed' claim with no staged counterpart was NOT blocked (#467 must not weaken the #331 fail-closed path)"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "no staged counterpart -> still blocks exactly as before";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 39: a staged TEMP.md -> BLOCK (#332 — run-experiment's transient successor-handoff scratch must not land in the merged PR)"
 T=$(mktemp_d); make_repo "$T"
-printf 'a fresh clean note\n' > "$T/reg/note/note37.md"
+printf 'a fresh clean note\n' > "$T/reg/note/note39.md"
 printf 'pod: abc123\nnext: poll seed2\n' > "$T/reg/note/TEMP.md"
 if run_dry "$T/reg/note"; then fail "staged TEMP.md was NOT blocked"; else
   case "$LAST_ERR" in *"staged a TEMP.md"*|*"has a staged TEMP.md"*) pass "staged TEMP.md blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
-echo "[smoke] case 38: no TEMP.md anywhere in the staged set -> PASS (no false-positive from the new guard)"
+echo "[smoke] case 40: no TEMP.md anywhere in the staged set -> PASS (no false-positive from the new guard)"
 T=$(mktemp_d); make_repo "$T"
-printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note38.md"
+printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note40.md"
 if run_dry "$T/reg/note"; then pass "clean note with no TEMP.md logs fine"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 

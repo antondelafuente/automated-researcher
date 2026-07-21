@@ -21,7 +21,8 @@
 # The gate is chosen by the directory's own content (auditability via the registry convention):
 #   - experiment   (DESIGN.md + RESULTS.md):   verify the close-audit is present and clean.
 #   - design-stage (DESIGN.md, no RESULTS.md): verify the design-audit (DESIGN_AUDIT*.md) is present, the
-#                                               Presentation section carries the researcher's lock line, + secret scan.
+#                                               Presentation section carries the researcher's lock line, any
+#                                               staged CHECKLIST.md is UNSTARTED (#512), + secret scan.
 #   - note         (anything else):            deterministic secret scan only.
 # Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
 # staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
@@ -380,8 +381,28 @@ gate_design_stage() {
   [ -f "$DIR/START.md" ] || die "design-stage dir missing START.md — cannot verify its instance-profile snapshot (#469)"
   _snap_out="$("$SNAPSHOT_HELPER" check "$DIR/START.md" 2>&1)" || die "instance-profile snapshot check failed: $_snap_out"
   note "instance-profile snapshot: $_snap_out"
-  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, instance-profile snapshot in START.md verified (#469), and secret scan clean; pre-launch leg of the two-PR flow."
-  note "design-stage gate ok: design-audit present + Presentation lock found + instance-profile snapshot verified (secret scan runs on the staged set)"
+  # Require an UNSTARTED checklist (#512): a design-stage PR shipped a `CHECKLIST.md` that was already fully
+  # ticked — a verbatim copy of a closed sibling's COMPLETED close checklist, string-replaced but with stale
+  # fields. A less attentive executor could treat pre-ticked [BLOCK] gates as already satisfied, silently
+  # skipping the claim/data-audit/anchor gate. A design-stage record is a pre-registration: every gate must
+  # still read ☐ (unstarted) — ticks are the EXECUTOR's, written at run-experiment close, never at design
+  # time. Match ticked GATE LIST lines only (a line beginning `- ☑` / `- ☒`), never a bare occurrence of the
+  # ☑/☒ characters: the CHECKLIST template's own instruction header uses those characters in PROSE examples
+  # (e.g. "☑ PASS ev: <artifact path + numbers>"), and a correctly-seeded UNSTARTED gate line legitimately
+  # carries non-empty `ev:` hint text (e.g. `ev: rclone lsf`) — a bare character grep or an ev-payload check
+  # would fail-closed on every correctly seeded checklist. This gate adds no new file-presence requirement:
+  # N.A. (skipped) when no CHECKLIST.md is staged at all.
+  # An alternation `(☑|☒)`, NOT a bracket character class `[☑☒]`, on purpose: under a byte-oriented locale
+  # (e.g. LC_ALL=C), grep -E's character class matches on the INDIVIDUAL BYTES of its members, and ☑/☒/☐'s
+  # UTF-8 encodings share a byte prefix (e2 98 91 / e2 98 92 / e2 98 90) — so `[☑☒]` also matches an unstarted
+  # ☐ line under that locale, false-positive-blocking every correctly seeded checklist. An alternation matches
+  # each option as a whole multi-byte literal instead, so it stays correct regardless of locale.
+  if [ -f "$DIR/CHECKLIST.md" ]; then
+    _ticked="$(grep -nE '^[[:space:]]*-[[:space:]]*(☑|☒)' "$DIR/CHECKLIST.md" || true)"
+    [ -z "$_ticked" ] || die "design-stage dir's CHECKLIST.md has ticked gate marker(s) — a design-stage record is a pre-registration with an UNSTARTED checklist (every gate ☐); a ticked ☑/☒ line is executed/completed-record content (e.g. copied from a closed sibling's registry record instead of the design-experiment template) leaking into this seed — reset every gate to ☐ before logging, then retry: $(printf '%s' "$_ticked" | head -n5)"
+  fi
+  APPROVAL_BODY="Design-stage record — design-audit present (DESIGN_AUDIT.md / DESIGN_AUDIT<N>.md), Presentation section locked with the researcher, instance-profile snapshot in START.md verified (#469), CHECKLIST.md unstarted (#512), and secret scan clean; pre-launch leg of the two-PR flow."
+  note "design-stage gate ok: design-audit present + Presentation lock found + instance-profile snapshot verified + checklist unstarted (secret scan runs on the staged set)"
 }
 case "$KIND" in
   experiment)   gate_experiment ;;
@@ -423,16 +444,36 @@ is_trivial_ignore() {
 # that still claims the file landed is not, and that flag must never wave a committed-claim through. The real
 # escape on a false positive is per the die message below — fix the ignore rule or reword the offending prose
 # line, then retry.
+#
+# #467: a basename+commit-claim match alone false-positives when the SAME basename legitimately exists TWICE
+# under $REL by design — once committed outside work/, once as a gitignored working copy under work/ (the
+# run-experiment R2-mirrored dual-copy layout, close-audit F1 fix). The manifest's claim is then plausibly
+# about the STAGED committed copy, not this excluded one. Before dying, check whether a file with this same
+# basename IS present in THIS run's own staged set (`git diff --cached` under $REL, already computed by the
+# caller's stage_worktree) — if so, downgrade to a printed note instead of a die. Preserves the #331 fail-
+# closed behavior EXACTLY when no staged counterpart shares the basename (the original scenario: a doc claims
+# committed, the file is staged nowhere) — that path still has no --skip-ignored escape.
 check_excluded_claim() {
-  local claim_file bn hit f
+  local claim_file bn hit f staged_path is_staged
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   local -r NEGATION_RE=' not |n'"'"'t '
+  local -a staged_paths=()
+  while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
+    < <(git -C "$WT" diff --cached -z --name-only -- "$REL")
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
     for f in "$@"; do
       bn="$(basename "$f")"
       if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE")"; then
-        die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        is_staged=0
+        for staged_path in "${staged_paths[@]}"; do
+          [ "$(basename "$staged_path")" = "$bn" ] && { is_staged=1; break; }
+        done
+        if [ "$is_staged" = 1 ]; then
+          note "excluded file '$f' shares a basename with a file that IS staged under $REL — treating $(basename "$claim_file")'s commit-claim as referring to that staged counterpart, not this excluded copy: $hit"
+        else
+          die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        fi
       fi
     done
   done
