@@ -54,10 +54,24 @@
 - ☐ Read the consuming instance's feedback/gotcha guidance, or the `FEEDBACK_INSTANCE_GUIDANCE`
       target when using feedback-loop (a peer may have logged the wall you're about to hit).      ev:
 - ☐ [BLOCK] R2 upload verified — EVERY unique artifact (adapter, eval summaries, rollout/sample
-      logs, generated data, reproduce scripts), not just SUMMARY.md, BEFORE teardown.            ev: rclone lsf
+      logs, raw per-pod driver console logs — e.g. `train_seed*.log`/`gen_seed*.log`, a structured
+      summary alone is not enough (#419), generated data, reproduce scripts), not just SUMMARY.md.
+      Trigger is EITHER an imminent teardown (the per-pod case) OR a leg/artifact reaching "done, will
+      not be touched again" — whichever comes first: a Tinker-hosted/API-only leg never gets a
+      pod-teardown event, so it needs the SAME discipline via that second trigger, not a free ride
+      off having no pod (#460).                                                                  ev: rclone lsf
+- ☐ [BLOCK] Per-leg R2-vs-local consolidated check (`rclone check` or equivalent) run once at EACH
+      leg's completion, not saved for a single sweep at the very end of the whole run — the mechanical
+      trigger a GPU-pod leg already gets for free from its teardown, extended to Tinker-hosted/API-only
+      legs that never tear anything down (#460).                                                 ev:
 - ☐ [BLOCK] RESULTS.md written — describes the data (numbers / plot) per the DESIGN spec; any
       lightweight qualitative read stays separable from the numbers (no pre-registered verdict). If
-      RESULTS does assert a claim, conclusions are separated from postdictions.                  ev:
+      RESULTS does assert a claim, conclusions are separated from postdictions. Every driver script
+      whose output is reported (aggregation/rendering, not just its CSV/PNG output) is committed, AND
+      reproduced ONCE from a clean state before this gate is checked — `rm`/fresh-pull per the
+      documented recipe, re-run the committed scripts, diff the regenerated output against the
+      committed one. "It ran during the live run" is not evidence this passes; only a fresh-pull
+      reproduction is (#447).                                                       ev: diff of regenerated vs committed output
 - ☐ [BLOCK] presentation_manifest.json written next to RESULTS.md — unconditional, config-free.
       Required {title, labels}; figures/datasets all-optional, populated per the DESIGN.md
       Presentation subsection (no unconfigured-viewer exception — write it regardless).           ev:
@@ -77,13 +91,22 @@
           PASS end-state (the close proceeds), never recorded as (b).
           ev: "recipe incomplete: missing <items>; flagged <where>; manifest-only"
 - ☐ [BLOCK] Ledger's folded/latest status is TERMINAL (`done`/`failed`/`killed`, or the instance's
-      ledger recipe's terminal set) — not just that a launch event exists somewhere in its history. Never
-      backfill a `running`/`launched`/`deploying` event after a terminal one: a last-non-null-field-wins
-      fold reopens a finished run for every consumer (dashboards included) even though the run is actually
-      done (`automated-researcher#338`). Missing launch metadata at this point is a non-status note or a
-      fresh terminal-status event — never a non-terminal one. **The value reflects OPERATIONAL run health,
-      not a verdict** (run-experiment SKILL.md Step 4, #376) — a `FAIL` elsewhere on this checklist never by
-      itself justifies the recipe's technical-failure value.                                      ev:
+      ledger recipe's terminal set) — not just that a launch event exists somewhere in its history. An
+      explicit EXPERIMENT-LEVEL terminal event is REQUIRED: a ledger line whose `run` field equals the
+      registry dir name EXACTLY (no suffix) — `ledger.py add --run <exp-dir-name> --status
+      <done|failed|stopped>`. Sub-run events (`…-smoke`, `…-seed1`, `…-seed2-gen`, …) may exist alongside
+      it in whatever granularity the run wants; a folded/latest status inferred only from sub-run events
+      does NOT satisfy this gate (research-lab#256: a stale sub-run event rendered a completed experiment
+      FAILED on the dashboard — #473). Never backfill a `running`/`launched`/`deploying` event after a
+      terminal one: a last-non-null-field-wins fold reopens a finished run for every consumer (dashboards
+      included) even though the run is actually done (`automated-researcher#338`). Missing launch metadata
+      at this point is a non-status note or a fresh terminal-status event — never a non-terminal one.
+      **The value reflects OPERATIONAL run health, not a verdict** (run-experiment SKILL.md Step 4, #376) —
+      a `FAIL` elsewhere on this checklist never by itself justifies the recipe's technical-failure value.
+                                                    ev: ledger.py add --run <exp-dir-name> --status <...> + its output line
+- ☐ TEMP.md (the transient successor-handoff scratch) deleted before staging/landing — it is never part of
+      the record convention (DESIGN/RESULTS/AUDIT/manifests) and silently contradicts RESULTS.md at
+      whatever checkpoint it was last refreshed if it lands in the merged PR (#332).                ev:
 - ☐ [BLOCK] Cross-family close audit run + every finding responded (ACCEPT/DISPUTE/DEFER).       ev: AUDIT.md
 - ☐ [BLOCK] Teardown verified via the DEPLOYING account's control plane (REST 404 / GraphQL
       empty with the DEPLOY key — never SSH liveness); self-wake cleared.                         ev:
@@ -136,6 +159,17 @@
       same-ish name can hide an accidentally-named/bug-artifact condition, #487); where reuse claims
       byte-identical construction, rebuilt from PRIMARY sources and asserted byte-equal in the build
       script rather than trusted by filename match.                                                 ev:
+- ☐ [BLOCK] Every committed script's local-module resolution (`sys.path.insert`/`sys.path.append`) stays
+      WITHIN this experiment's own committed tree — `vendoring_check.sh <exp-dir>` (run-experiment's
+      `scripts/`) reports zero external resolutions. A "byte-identical vendored copy" claim in
+      CHECKLIST/RESULTS prose is not evidence: it can pass self-audit purely because a sibling
+      experiment's directory happened to be reachable in the same shared worktree at execution time
+      (#499). N.A. only if the experiment has no scripts/ dir.                                       ev:
+- ☐ [BLOCK] The AGGREGATION step producing the headline CSV/figures is a LOCAL, this-experiment-committed
+      script reading only this-experiment-local/committed inputs — whatever the reuse convention ("pull,
+      don't rewrite" a sibling's script; treating a sibling's frozen rollouts/judgments as an external
+      input needing no new generation): if it depends on external data, the RELEVANT SLICE was pulled
+      into a local durable artifact first, never left pointed at a live external path (#458).        ev:
 - ☐ [BLOCK] Any RESUME-from-checkpoint claim verified against the checkpoint's TYPE for the SPECIFIC
       resume API the run will call (exercise the resume call, or inspect a checkpoint-type field) — not
       just existence/matching metadata via a generic lookup, which doesn't distinguish checkpoint

@@ -12,7 +12,9 @@
 # Every kind, additionally, gets a deterministic symlink check: a registry record has no legitimate use for a
 # staged symlink (the intent is always to copy a reference file's real bytes), so ANY staged symlink is a
 # BLOCK regardless of KIND — a committed symlink's target is only ever meaningful on the machine, or worse the
-# specific session, that created it.
+# specific session, that created it. Every kind also gets a TEMP.md check (#332): run-experiment's transient
+# successor-handoff scratch is never part of the record convention, so a staged TEMP.md is a BLOCK regardless
+# of KIND — belt-and-braces behind run-experiment's own close-checklist deletion step.
 # A cross-family engineer-bot approval satisfies the research repo's branch protection
 # (the author cannot approve their own PR). Self-contained: this does NOT source wf.sh.
 #
@@ -252,6 +254,18 @@ symlink_scan() {
   [ -z "$hits" ] || { echo "staged symlink(s) found (a registry record must contain real file content, not a symlink):" >&2
     printf '%s\n' "$hits" | sed 's/^/  /' >&2; die "$KIND contains staged symlink(s)"; }
 }
+temp_handoff_scan() {
+  # Reject a staged TEMP.md (#332): run-experiment's transient successor-handoff scratch (progress
+  # timestamps, next-action notes) is never part of the record convention (DESIGN/RESULTS/AUDIT/manifests),
+  # and it silently contradicts the final RESULTS.md at whatever checkpoint it was last refreshed if it
+  # lands in the merged PR. Belt-and-braces backstop: run-experiment's own close checklist already deletes
+  # it before landing (SKILL.md); this catches a close that skipped that step. Runs for EVERY kind, same as
+  # symlink_scan, on the EXACT staged set in $WT (MUST be called AFTER stage_worktree).
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: temp_handoff_scan called before stage_worktree (no staged worktree)"
+  local hit
+  hit="$(git -C "$WT" diff --cached --name-only -z -- "$REL" | tr '\0' '\n' | grep -xF "$REL/TEMP.md" || true)"
+  [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
+}
 # Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved).
 scan_if_needed() { case "$KIND" in note|design-stage) secret_scan ;; esac; }
 gate_note() {
@@ -406,13 +420,14 @@ stage_worktree() {
 }
 
 if [ "$DRY_RUN" = 1 ]; then
-  # Stage off the LOCAL origin/$BASE_BRANCH (no fetch, no tokens) and run the SAME staged secret + symlink
-  # scans a real run would — so --dry-run validates the ACTUAL gate, not an approximation. Worktree is
-  # trap-cleaned on exit.
+  # Stage off the LOCAL origin/$BASE_BRANCH (no fetch, no tokens) and run the SAME staged secret + symlink +
+  # TEMP.md scans a real run would — so --dry-run validates the ACTUAL gate, not an approximation. Worktree
+  # is trap-cleaned on exit.
   stage_worktree
   symlink_scan
+  temp_handoff_scan
   scan_if_needed
-  note "--dry-run: classified=$KIND, gate PASSED (staged secret/symlink scan clean); stopping before any push."
+  note "--dry-run: classified=$KIND, gate PASSED (staged secret/symlink/TEMP.md scan clean); stopping before any push."
   exit 0
 fi
 
@@ -473,6 +488,7 @@ cd "$REPO_ROOT"
 git fetch origin --quiet
 stage_worktree
 symlink_scan
+temp_handoff_scan
 scan_if_needed
 # Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
 GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \

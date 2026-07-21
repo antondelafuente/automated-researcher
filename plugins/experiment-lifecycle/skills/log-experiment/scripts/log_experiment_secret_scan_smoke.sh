@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # log_experiment_secret_scan_smoke.sh — offline behavior smoke for log-experiment.sh's secret_scan (#306),
-# symlink_scan (#416), and its ignored-file guard (#340) + committed-claim check (#331).
+# symlink_scan (#416), its ignored-file guard (#340) + committed-claim check (#331), and temp_handoff_scan (#332).
 #
 # Drives the REAL script via `--dry-run` (which classifies, stages $REL in a worktree off origin/$BASE_BRANCH,
 # runs the secret + symlink scans on the STAGED set, then stops BEFORE any push/token/network), against
@@ -345,6 +345,21 @@ printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design"; then fail "malformed calendar date (2026-99-99) was NOT blocked"; else
   case "$LAST_ERR" in *"no locked Presentation section"*) pass "malformed calendar date blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 27: a staged TEMP.md -> BLOCK (#332 — run-experiment's transient successor-handoff scratch must not land in the merged PR)"
+T=$(mktemp_d); make_repo "$T"
+printf 'a fresh clean note\n' > "$T/reg/note/note27.md"
+printf 'pod: abc123\nnext: poll seed2\n' > "$T/reg/note/TEMP.md"
+if run_dry "$T/reg/note"; then fail "staged TEMP.md was NOT blocked"; else
+  case "$LAST_ERR" in *"staged a TEMP.md"*|*"has a staged TEMP.md"*) pass "staged TEMP.md blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 28: no TEMP.md anywhere in the staged set -> PASS (no false-positive from the new guard)"
+T=$(mktemp_d); make_repo "$T"
+printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note28.md"
+if run_dry "$T/reg/note"; then pass "clean note with no TEMP.md logs fine"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

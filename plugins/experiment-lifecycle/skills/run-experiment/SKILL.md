@@ -429,14 +429,21 @@ driver instead.
 ## Step 4 — Collect, log, verify
 
 - Confirm the upload to your artifact store (**every unique artifact** — adapter, eval summaries, **rollout/sample
-  logs**, generated data, reproduce scripts, `SUMMARY.md` — per the profile; full data to files, never truncated).
+  logs**, **raw per-pod driver console logs** — e.g. `train_seed*.log`/`gen_seed*.log`; a structured summary alone
+  drops warnings/stderr/timing detail a future reader can't get back once the pod is torn down (#419) — generated
+  data, reproduce scripts, `SUMMARY.md` — per the profile; full data to files, never truncated).
 - **Stamp the decoding config into the rollout artifacts (self-contained artifacts, #233).** Whenever you write
   eval rollouts, persist the exact generation settings — **temperature, top_p, max_new_tokens, seed, and the
   sampling mode (greedy/sample)** — into each rollout row *or* a companion summary, so cross-arm decoding
   comparability is verifiable from the artifacts alone, not only re-derivable from driver source. The data-audit
   gate checks the config is present and consistent across co-measured arms.
-- **Log the run in your ledger** (per the profile). Every GPU run goes in. **Ledger terminal status is
-  OPERATIONAL run health, never a scientific verdict (#376):** three product-owned abstract outcomes —
+- **Log the run in your ledger** (per the profile). Every GPU run goes in. **Close writes exactly ONE explicit
+  experiment-level terminal event — a ledger line whose `run` field equals the registry dir name exactly, no
+  suffix (#473).** Sub-runs may log whatever granularity they like (`…-smoke`, `…-seed1`, `…-seed2-gen`, …
+  events); readers treat the experiment-level event as the authoritative status for the experiment badge — a
+  folded/aggregated status inferred only from sub-run events is not a substitute (the exact incident this
+  closes: a stale sub-run event rendered a completed experiment `failed` on a downstream dashboard). **Ledger
+  terminal status is OPERATIONAL run health, never a scientific verdict (#376):** three product-owned abstract outcomes —
   **completed-as-designed** (the procedure reached its planned close, *whatever that shows* — including a
   correctly executed no-go / stop at an instrument/data/validity gate; preserve that limitation in
   `RESULTS.md` + the ledger note, and keep the `CHECKLIST.md` gate itself `FAIL`), **technical-failure** (a
@@ -465,10 +472,17 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
   for a concrete, named debugging reason.
 - **The completion boundary (the safety gate):** tear down only once the upload is **verified** — *every artifact unique
-  to this run*, not just the summary. Before that, teardown loses data — this gate is the whole ballgame. **Teardown
-  follows your profile's policy** (deploying-account key; delete-don't-stop for ephemeral/region-free units; the
-  mechanics are `gpu-job`'s). **Verify on the control plane of the deploying account** that the unit is actually gone
-  (never SSH liveness; a 404 from the wrong key masquerades as deleted while it bills).
+  to this run* (adapter, eval summaries, rollout/sample logs, **raw per-pod driver console logs**, not just their
+  structured summary — see Step 4, #419), not just the summary. Before that, teardown loses data — this gate is the
+  whole ballgame. **The verify trigger fires per artifact-completion, not only at an imminent teardown (#460):**
+  a GPU pod gets this for free (teardown IS the trigger), but a Tinker-hosted or API-only leg never has a
+  pod-teardown event to hang it on — trigger the verify EITHER on (a) an imminent teardown OR (b) a leg/artifact
+  reaching "done, will not be touched again," whichever comes first, independent of whether a pod exists at all;
+  run a consolidated R2-vs-local check (`rclone check` or equivalent) once at THAT leg's own completion, not only a
+  single sweep at the very end of the whole run. **Teardown follows your profile's policy** (deploying-account
+  key; delete-don't-stop for ephemeral/region-free units; the mechanics are `gpu-job`'s). **Verify on the control
+  plane of the deploying account** that the unit is actually gone (never SSH liveness; a 404 from the wrong key
+  masquerades as deleted while it bills).
 - **Stepping away?** Your unit is lease-covered — `gpu-job`'s lease reaper tears down **THIS unit's id** at lease
   expiry (set a short lease for faster idle teardown; the per-pod watchdog was retired, #266). Peers own theirs.
   This is for a deliberate idle stop — a run you're actively driving keeps its lease fresh via the self-wake
@@ -478,7 +492,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
   assert a claim, state it at the level the design varied — upgrading a bundle-level contrast into a component
   attribution is overclaim — and separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm
-  wave, not per-arm.
+  wave, not per-arm. **Before checking this gate, run ONE real fresh-pull reproduction of the aggregation/rendering
+  script(s) that produced the headline numbers/figures (#447):** commit every driver script whose output is
+  reported, not just its CSV/PNG output; then from a clean state — remove local scratch, re-run exactly the pull
+  commands the record documents (`ARTIFACT_MANIFEST.md` / `scripts/README.md`), re-run the committed scripts —
+  diff the regenerated output against the previously-committed one. "The script ran during the live run" is a
+  different, weaker claim than "the committed script reproduces the committed artifact from the documented
+  recipe against a fresh pull"; only the second is what a future reader/auditor needs, and only the second
+  passes this gate.
 - **Write `presentation_manifest.json` next to `RESULTS.md` — unconditional, config-free.** Every close writes this file,
   whether or not an instance viewer is configured (a no-op consumer is fine — the manifest still stands alone as
   plain-language arm documentation). Required: `{title, labels: [{match, label}]}` (`title` — one plain sentence
@@ -525,6 +546,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     no-verdict / mark-postdictions discipline is exactly what's easy to get wrong; produce a live first-pass
     page, never a finished story. The mechanical bar (figures per spec, source committed, page landed) is the
     checklist gate; prose quality is explicitly not.
+- **Delete the transient successor handoff (`TEMP.md`) before staging (#332).** It is working scratch (progress
+  timestamps, next-action notes) — never part of the record convention (DESIGN/RESULTS/AUDIT/manifests) — and it
+  silently contradicts the final `RESULTS.md` at whatever checkpoint it was last refreshed if it lands in the
+  merged registry PR. Delete it here, before staging below (`log-experiment.sh` also rejects a staged `TEMP.md`
+  as a belt-and-braces backstop, but don't rely on that — make deleting it your own close step).
 - **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
   adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The
@@ -544,6 +570,23 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   actually survives landing: rename the file to a non-ignored extension (e.g. `.jsonl` → `.json`, converting
   NDJSON content to a genuine JSON array under that name) so a plain `git add` stages it cleanly in ANY
   worktree, author's or fresh — don't reach for `git add -f` on a file meant to land.
+- **The AGGREGATION step is always LOCAL, whatever the reuse convention (#458).** "Pull, don't rewrite" a
+  sibling's script, and treat a sibling's frozen rollouts/judgments as an external input needing no new
+  generation — both are the right call for the underlying DATA reuse decision, and neither licenses leaving
+  the script that actually PRODUCES the headline CSV/figures pointed at a live external path. That aggregator
+  must always be a LOCAL, this-experiment-committed script reading only this-experiment-local/committed
+  inputs, same bar as the canonical self-sufficient record above: if it depends on external data (a pulled
+  script's original directory, a sibling's live judge-verdict file), pull the RELEVANT SLICE into a local
+  durable artifact first — don't duplicate a sibling's multi-GB rollouts wholesale, just the small slice this
+  aggregation actually reads — then write the aggregator against that local copy.
+- **Every committed script's local-module resolution stays inside this experiment's own tree (#499).** A
+  CHECKLIST/RESULTS claim that a script is a "byte-identical vendored copy" is prose, not evidence — it can
+  pass self-audit purely because a sibling experiment's directory happened to be reachable in the same shared
+  worktree at execution time, which a fresh clone of just this experiment's registry dir cannot rely on. Run
+  `scripts/vendoring_check.sh <exp-dir>` (this skill's `scripts/`) — a static scan that flags any
+  `sys.path.insert`/`sys.path.append` in a committed `*.py` under `scripts/` whose target resolves OUTSIDE the
+  experiment's own directory. Fix any hit (vendor the file byte-identical, or point the reference at a local
+  copy) before closing — don't accept the finding in prose.
 - **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
   own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
   (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
@@ -574,9 +617,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   load-bearing flags). Too many = the brief was under-pinned → feeds back to `design-experiment`. A clean run files
   little.
 - **Self-audit the close (the last verification — verify state, not your memory of doing it).** Re-CHECK by inspection:
-  artifacts listed in the store, **the ledger's folded/latest status is terminal** (`done`/`failed`/`killed`, or
-  whatever terminal set the instance's ledger recipe defines) — not merely that a launch event exists somewhere
-  in its history — compute gone per the control plane of the deploying account, `RESULTS.md` committed + pushed,
+  artifacts listed in the store, **an explicit experiment-level terminal ledger event exists** (its `run` field
+  equals the registry dir name exactly, no suffix — #473) **and** the ledger's folded/latest status is terminal
+  (`done`/`failed`/`killed`, or whatever terminal set the instance's ledger recipe defines) — not merely that a
+  launch event exists somewhere in its history, and not merely a folded status inferred only from sub-run
+  events — compute gone per the control plane of the deploying account, `RESULTS.md` committed + pushed,
   waker + marker cleared. "I ran the step" ≠ "the state is right." **Never backfill a `running`/`launched`/
   `deploying` event after a terminal one has already landed**: a last-non-null-field-wins ledger fold means that
   write silently reopens a finished run for every consumer, even though artifacts/teardown/`RESULTS.md`/close are
