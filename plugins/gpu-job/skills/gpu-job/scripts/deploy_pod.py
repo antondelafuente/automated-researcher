@@ -11,7 +11,8 @@ prepended to the pod name for shared-account dashboard visibility, e.g. "anton-"
 DATA_CENTERS (comma list, or "all" = every pod-creatable DC; overrides tiered retry), VOLUME_ID
 (network volume; requires DATA_CENTERS), RETRY_MINUTES (keep retrying ~3-min cycles until
 stock appears or the deadline passes — scarce multi-GPU stock can take an hour; default 0 =
-single pass), PASS_ENV (comma list of extra var names to inject into the pod's env).
+single pass), PASS_ENV (comma list of extra var names to inject into the pod's env — bootstrap_pod.sh
+persists these to /workspace/.env and /etc/environment so LATER ssh sessions see them too, #341).
 Neither GPU_TYPES nor GPU_TYPE set -> defaults to an ample, non-premium SKU list (L40S / A100 80GB
 PCIe / A40 / RTX 4090-class), never a single scarce premium card like H200 (#351); state the job's
 actual hardware need explicitly via GPU_TYPES/GPU_TYPE instead of relying on this fallback.
@@ -271,10 +272,17 @@ def pod_env():
         e["RCLONE_CONF_B64"] = env("RCLONE_CONF_B64")
     if env("RCLONE_REMOTE") and env("RCLONE_REMOTE") != "skip":
         e["RCLONE_REMOTE"] = env("RCLONE_REMOTE")
+    passed = []
     for var in (env("PASS_ENV", "") or "").split(","):
         var = var.strip()
         if var and env(var):
             e[var] = env(var)
+            passed.append(var)
+    # bootstrap_pod.sh runs pod-side (over ssh) and has no other record of which PASS_ENV names
+    # were injected — tell it explicitly so it can persist them for LATER ssh sessions too
+    # (automated-researcher #341: a fresh ssh session inherits none of this container's env).
+    if passed:
+        e["PASSED_ENV_NAMES"] = ",".join(passed)
     return e
 
 
@@ -424,6 +432,26 @@ def _selftest():
         assert False, "malformed GPU_TYPES (no usable entries) must raise, not send an empty gpuTypeIds batch"
     except SystemExit:
         pass
+    # #341: pod_env() records PASSED_ENV_NAMES (exactly the PASS_ENV vars actually injected) so
+    # bootstrap_pod.sh — which has no other record of what was in PASS_ENV — knows which pod-env
+    # vars to persist for later ssh sessions.
+    _saved = {k: os.environ.get(k) for k in ("PASS_ENV", "FOO_VAR", "BAR_VAR", "EMPTY_VAR")}
+    try:
+        os.environ["PASS_ENV"] = "FOO_VAR, BAR_VAR ,EMPTY_VAR"
+        os.environ["FOO_VAR"] = "foo"
+        os.environ["BAR_VAR"] = "bar"
+        os.environ.pop("EMPTY_VAR", None)
+        e = pod_env()
+        assert e.get("FOO_VAR") == "foo" and e.get("BAR_VAR") == "bar", e
+        assert "EMPTY_VAR" not in e, "an unset PASS_ENV var must not be injected"
+        assert e.get("PASSED_ENV_NAMES") == "FOO_VAR,BAR_VAR", \
+            f"PASSED_ENV_NAMES must list exactly the PASS_ENV vars actually injected, got {e.get('PASSED_ENV_NAMES')!r}"
+    finally:
+        for k, v in _saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
     print(f"deploy_pod selftest OK: {len(ids)} DCs -> {len(t)} tiers")
 
 

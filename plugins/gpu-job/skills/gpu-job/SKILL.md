@@ -26,7 +26,13 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    **pod lease** (see *The pod lease + the standing reaper* below) so an abandoned pod can be reaped
    without you; note the `LEASE_NONCE` and pass it to teardown.
 2. **Bootstrap:** scp + run `scripts/bootstrap_pod.sh` on the pod (configures rclone from
-   your injected config; restores the optional bundle).
+   your injected config; restores the optional bundle). It also persists every `PASS_ENV` var
+   for LATER ssh sessions (#341 — a fresh `ssh pod 'cmd'` inherits NONE of the container's
+   injected env, so a launch script that reads `$TINKER_API_KEY`/`$HF_TOKEN`/etc straight from its
+   own env finds nothing): to `/etc/environment` on a root pod (inherited automatically, no
+   per-script convention to forget) and to `/workspace/.env` as the fallback everywhere else — `source
+   /workspace/.env` (or `job_lib.sh`'s `env_get`) at the top of any launch script that needs one of
+   these vars and can't rely on `/etc/environment`.
 3. **Run detached:** `scripts/run_remote.sh <port> root@<ip> <job.sh> /root/job.log [ENV=V…]`
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.
