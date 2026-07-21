@@ -6,8 +6,10 @@
 # Fails CLOSED with a clear BLOCK message on stderr and a non-zero exit — never guesses a repo, host,
 # port, or worktree. On success, prints resolved fields as KEY=VALUE lines on stdout, each value
 # restricted to a conservative safe charset (see the validators below) — READ these lines (e.g. one
-# `grep '^KEY='` / `cut` at a time), never `eval` or `source` this output: a value's charset is
-# restricted to prevent shell-metacharacter injection, but this script does not shell-quote for you.
+# `grep '^KEY='` / `cut` at a time), never `eval` or `source` this output: the charset excludes most
+# shell metacharacters but deliberately still permits '&' (needed for multi-param query strings), so
+# it does NOT by itself make source/eval of this output safe (#585 P1) — the actual safeguard against
+# injection is this prohibition on sourcing/eval, not the charset; this script does not shell-quote for you.
 #
 # Default (preview) mode resolves ONLY [recipes.visualization_preview] — the local iteration recipe
 # (preview claim commands, stable local worktree/URL, page-style pattern). It never reads
@@ -107,14 +109,22 @@ _SCHEME_RE = re.compile(r"^(?:r2|s3|https)://")
 # finding 1). '&' is deliberately NOT excluded despite being a shell metacharacter (backgrounding/&&) —
 # it is how a query string joins more than one parameter, and excluding it would just reintroduce this
 # same finding for any URI with 2+ query params. Excluded here: backtick/$/;/|/</>/(){} and quote/
-# backslash characters, which are what would let a value break out of a KEY=VALUE line if some future
-# caller ever did source/eval it despite the header note; everything else (?, #, %, :, =, &, ,, +, ~, @,
-# !, ^, *, [, ]) is left in-band.
+# backslash characters — these reduce, but by keeping '&' in-band do NOT eliminate, shell-metacharacter
+# risk for a future caller who sources/evals this output despite the header note (a value ending
+# '&id' would still run 'id' as a new command under source/eval, #585 P1); the actual safeguard
+# against that is the header's prohibition on sourcing/eval, not this charset. Everything else (?, #,
+# %, :, =, &, ,, +, ~, @, !, ^, *, [, ]) is left in-band.
 _UNSAFE_CHARS = re.compile(r'[`$;|<>(){}\\\'"\s\x00-\x1f\x7f]')
 
-def _no_traversal(v):
-    # '..' is only a traversal segment in the path portion; strip any query/fragment first so a query
-    # value that happens to contain '..' (e.g. a version range) isn't mistaken for one.
+def _no_traversal_path(v):
+    # A repo-relative path has no query/fragment syntax of its own, so '..' is checked across the
+    # ENTIRE value, never stripped on '?'/'#' first — stripping here (as the URI check below does)
+    # would let a traversal segment hide after one, e.g. 'recipes/x?/../../secret' (#585 P0).
+    return ".." not in v.split("/")
+
+def _no_traversal_uri(v):
+    # '..' is only a traversal segment in the URI's path portion; strip any query/fragment first so a
+    # query value that happens to contain '..' (e.g. a version range) isn't mistaken for one.
     path_part = v.split("?", 1)[0].split("#", 1)[0]
     return ".." not in path_part.split("/")
 
@@ -123,7 +133,7 @@ def _valid_rel_path(v):
         return False
     if any(not seg for seg in v.split("/")):
         return False
-    return _no_traversal(v)
+    return _no_traversal_path(v)
 
 def _valid_uri(v):
     if not isinstance(v, str) or not v:
@@ -132,9 +142,11 @@ def _valid_uri(v):
     if not m:
         return False
     rest = v[m.end():]
-    if not rest or rest.startswith("/") or _UNSAFE_CHARS.search(rest):
+    # rest must not start with '/', '?', or '#' — otherwise the authority component is empty, i.e. the
+    # URI names no host/bucket at all (e.g. 'https://?query=yes' passed here before, #585 P0).
+    if not rest or rest.startswith(("/", "?", "#")) or _UNSAFE_CHARS.search(rest):
         return False
-    return _no_traversal(v)
+    return _no_traversal_uri(v)
 
 _REPO_ONLY_FIELDS = ("repo", "path", "git_ref")
 _URI_ONLY_FIELDS = ("uri", "sha256")

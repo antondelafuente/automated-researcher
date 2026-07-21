@@ -250,6 +250,38 @@ else
   ok "schema_version=1.0 is rejected, not accepted via Python's float/int equality"
 fi
 
+# 4j. A repo-relative path with a traversal segment hidden after a '?' is still rejected — the
+#     traversal check must not strip query/fragment text for repo paths, which have no such syntax
+#     of their own (#585 P0, review round 1).
+cat > "$T/path-traversal-after-query.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "repo"
+repo = "owner/preview-repo"
+path = "recipes/x?/../../secret"
+git_ref = "abc1234"
+EOF
+if AAR_PROFILE="$T/path-traversal-after-query.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4j"; then
+  err "resolver accepted a repo path with a traversal segment hidden after '?' (#585 P0)"
+else
+  ok "a repo path with a traversal segment hidden after '?' is rejected"
+fi
+
+# 4k. A kind=uri value with an empty authority (no host/bucket before the query string) is rejected
+#     (#585 P0, review round 1).
+cat > "$T/uri-no-authority.toml" <<'EOF'
+schema_version = 1
+[recipes.visualization_preview]
+kind = "uri"
+uri = "https://?query=yes"
+sha256 = "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+EOF
+if AAR_PROFILE="$T/uri-no-authority.toml" bash "$RESOLVE" >/dev/null 2>"$T/err4k"; then
+  err "resolver accepted a URI with no authority/host (#585 P0)"
+else
+  ok "a URI with an empty authority (no host/bucket) is rejected"
+fi
+
 # 5. Explicit publish boundary: --publish on the complete profile resolves [recipes.visualization_publish]
 #    — its OWN publish-destination recipe — and never [recipes.viewer].
 out5=$(AAR_PROFILE="$T/complete.toml" bash "$RESOLVE" --publish 2>"$T/err5")
