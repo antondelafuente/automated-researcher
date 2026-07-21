@@ -582,7 +582,10 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   the controller while it runs. A naive "launch all N at once" fan-out can hit the controller's own RAM ceiling well
   before any remote/provider concurrency cap — and a controller-box OOM silently kills the LOCAL driver process with
   ZERO output in its log (indistinguishable from "hasn't started yet"; same signature as a peer-session OOM, but here
-  self-inflicted by your own fan-out). Cap LOCAL launch concurrency independently of the remote/provider limit —
+  self-inflicted by your own fan-out). **Concrete trigger — default to `local_job_queue.sh` BEFORE launching, not
+  after eating the OOM:** any LOCAL fan-out of more than ~8-10 drivers that render/hold data pre-submission, or
+  whenever `N > (available_RAM_GB / 2) / per_process_GB` for the box you're on (check with `free -g` and a rough
+  per-driver RSS estimate). Cap LOCAL launch concurrency independently of the remote/provider limit —
   `local_job_queue.sh` in this skill's `scripts/` is a reusable throttled-launch queue (poll a running-process count
   against a cap, launch the next queued command as a slot frees) so this doesn't get re-derived from scratch per run.
 - **Kill-or-verify the original pod before treating a mid-run reassignment as clean (#334).** Rebalancing a
