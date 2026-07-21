@@ -9,6 +9,11 @@
 # make_design_repo's DESIGN.md carries a locked Presentation header (#470/#471) since gate_design_stage
 # checks that BEFORE the #469 snapshot check this smoke targets — without it every case here would BLOCK on
 # the lock check instead of reaching the snapshot behavior under test.
+#
+# Cases 6-8 additionally cover gate_design_stage's #512 addition (a design-stage PR shipped a CHECKLIST.md
+# copied verbatim, ticks included, from a closed sibling's completed close checklist): a staged CHECKLIST.md
+# with any ticked gate LIST line (☑/☒) BLOCKs, while the unstarted template itself — whose own instruction
+# header uses ☑/☒ in PROSE examples and whose gate lines carry non-empty `ev:` hints — must still PASS.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -127,6 +132,38 @@ git -C "$T5" add -A
 out5="$(XDG_CONFIG_HOME="$T/xdg-viewerless" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main bash "$SCRIPT" "$T5/reg/exp1" --dry-run 2>&1)"; rc5=$?
 if [ "$rc5" -eq 0 ]; then pass "a legitimate viewer-less (manifest-only) snapshot still passes the gate"; else
   fail "manifest-only snapshot was blocked (should be a legitimate instance choice): $out5"; fi
+
+echo "[smoke] case 6: staged CHECKLIST.md has a ticked [BLOCK] gate (☑) -> BLOCK (#512)"
+T6="$T/repo6"; make_design_repo "$T6"
+fresh_start_md "$T6/reg/exp1/START.md"
+XDG_CONFIG_HOME="$T/xdg" AAR_PROFILE="" bash "$SELF_DIR/aar_profile_snapshot.sh" snapshot "$T6/reg/exp1/START.md" >/dev/null
+printf '# CHECKLIST\n## UNIVERSAL\n- \xe2\x98\x91 [BLOCK] Experiment CLAIMED. ev: git log abc123\n' > "$T6/reg/exp1/CHECKLIST.md"
+git -C "$T6" add -A
+if run_dry "$T6/reg/exp1"; then fail "a pre-ticked CHECKLIST.md was NOT blocked"; else
+  case "$LAST_ERR" in *"ticked gate marker"*) pass "ticked ☑ gate blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac
+fi
+
+echo "[smoke] case 7: staged CHECKLIST.md has a ticked [BLOCK] gate (☒ FAIL) -> BLOCK (#512)"
+T7="$T/repo7"; make_design_repo "$T7"
+fresh_start_md "$T7/reg/exp1/START.md"
+XDG_CONFIG_HOME="$T/xdg" AAR_PROFILE="" bash "$SELF_DIR/aar_profile_snapshot.sh" snapshot "$T7/reg/exp1/START.md" >/dev/null
+printf '# CHECKLIST\n## UNIVERSAL\n- \xe2\x98\x92 [BLOCK] Anchor-gate. ev: FAILED, see GAPS\n' > "$T7/reg/exp1/CHECKLIST.md"
+git -C "$T7" add -A
+if run_dry "$T7/reg/exp1"; then fail "a pre-ticked (☒ FAIL) CHECKLIST.md was NOT blocked"; else
+  case "$LAST_ERR" in *"ticked gate marker"*) pass "ticked ☒ gate blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac
+fi
+
+echo "[smoke] case 8: staged CHECKLIST.md is UNSTARTED (☐ gates with non-empty ev: hints + the template's own"
+echo "         ☑/☒ prose examples in its instruction header) -> PASS (no false-positive, #512)"
+T8="$T/repo8"; make_design_repo "$T8"
+fresh_start_md "$T8/reg/exp1/START.md"
+XDG_CONFIG_HOME="$T/xdg" AAR_PROFILE="" bash "$SELF_DIR/aar_profile_snapshot.sh" snapshot "$T8/reg/exp1/START.md" >/dev/null
+cp "$SELF_DIR/../../design-experiment/templates/CHECKLIST_TEMPLATE.md" "$T8/reg/exp1/CHECKLIST.md"
+git -C "$T8" add -A
+if run_dry "$T8/reg/exp1"; then pass "an unstarted checklist (copied straight from the template) passes the gate"; else
+  fail "the unstarted CHECKLIST template was BLOCKED (false positive): $LAST_ERR"; fi
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment design-stage snapshot gate: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment design-stage snapshot gate: $FAILS FAILURE(S)" >&2; exit 1; fi
