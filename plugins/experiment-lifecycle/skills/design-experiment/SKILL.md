@@ -134,6 +134,24 @@ are not.** Pin:
   EVERY artifact matching the target's name AND public sources under the researcher's handles (HF, GitHub). (Real case:
   a brief asserted "no checkpoint survives" when the policy was in fact live on the customer's own HF — a wrong anchor
   silently corrupts every comparison built on it.) State unverified readings as "documented reading, unverified."
+- **Spot-check split/anchor claims against the literal source artifact before locking (#481).** A quantitative
+  split/anchor claim written from the designer's mental model of prior waves' structure — not the literal artifact — is
+  a distinct failure class from provenance above: two real incidents had a claimed subject/battery intersection count
+  and a cross-battery sanity anchor both wrong on the FIRST real computation at execute time. Before locking, directly
+  resolve 2-3 of the design's quantitative split/anchor claims against their cited source: actually compute one or two
+  subjects' prompt-ID intersection counts against the real manifest, and confirm any sanity anchor's cited number comes
+  from the SAME battery/topic being measured, not a different one. This is mechanical resolution against the source,
+  not adversarial reasoning — a bounded spot-check (N=2-3, explicitly non-exhaustive), distinct from `verify-claim`'s
+  adversarial fact-check and `design-audit`'s comparability dimension, neither of which resolves an ID intersection or
+  anchor number against the actual artifact.
+- **Pin exact committed identifiers when reusing prior-wave data, never a category word (#487).** A category word
+  ("filler") can silently anchor on the WRONG condition when a prior wave's own NOTE/RESULTS documents an
+  accidentally-named or bug-artifact condition sharing a similar name (real incident: `filler64` was an accidental
+  hot32-id-order variant, not the benign `fillertrue64` control — picking the wrong one cost ~400 wasted judge calls
+  before the naming trap was found). Name the EXACT committed identifier explicitly. When a reuse claim is
+  "byte-identical where DESIGN's rule matches," don't trust the filename — rebuild the file from PRIMARY sources and
+  assert byte-equality in the build script; this also catches the naming trap by failing loudly instead of silently
+  anchoring on the wrong condition.
 - **While sketching the schedule, ENUMERATE — don't justify (#322).** For each step, name its max sensible
   fan-out and price it, rather than defending whatever serialization is already on the page: justification
   recruits motivated reasoning in both author and auditor (real case, restriction-sweep-1: "single shared GPU
@@ -201,6 +219,15 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   2. **TRIAGE every finding as a PEER** — **ACCEPT** (real flaw → fix), **DISPUTE** (say why it's wrong/moot),
      **DEFER** (real but out of scope → reason). One line of domain judgment collapses an adversarial finding ("those
      biases are fictional, the base model can't know them" killed a HIGH the auditor couldn't see was moot).
+     An **ACCEPT that rests on an artifact being "committed"/present** must mechanically resolve it before the finding
+     is marked resolved — `git show <ref>:<path>` for a git-committed artifact, or the equivalent existence check under
+     the experiment's R2 prefix — a pinned `SHA256SUMS` hash is a claim, not proof of presence (real incident: a
+     `DESIGN_AUDIT_RESPONSE.md` certified an artifact "committed" from its SHA256SUMS line alone; it existed nowhere,
+     #356). **Any ACCEPT that amends `DESIGN.md`/`START.md`** must grep every already-drafted sibling doc
+     (`data_audit_manifest.md`, `CHECKLIST.md`, `gate_evidence/*`) for the amended clause and update it before the
+     design is cleared — `grep -l "<amended term>" <dir>/*.md <dir>/gate_evidence/*` (#375; recurred twice in 3 days
+     via both a design-audit ACCEPT and an executor-cleared mid-run correction, so the matching gate lives on the
+     CHECKLIST template both phases consult, below).
   3. **SURFACE the survivors to the researcher with your recommendation on each** — your judgments
      (ACCEPT/DISPUTE/DEFER + why), not raw auditor output. **The researcher is the convergence stop:** they arbitrate
      with domain knowledge and either call another pass or clear it to run. This is the last step of the "together"
