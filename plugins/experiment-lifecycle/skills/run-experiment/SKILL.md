@@ -130,8 +130,9 @@ arm the idle-cost teardown backstop.
 > **Claude Code implementation:** a non-durable recurring `CronCreate` (~every 12 min) whose prompt re-checks the pods
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
 > creating session; auto-expires ~7 days — re-arm for longer runs). A tool-spawned Agent subagent cannot use this
-> independent wake path, so it is not a valid autonomous detached executor. Other substrates: the equivalent recurring
-> wake.
+> independent wake path, so it is not a valid autonomous detached executor. A `run_in_background` Bash/Monitor
+> waiter is not a substitute for this either — see "Long-running process discipline" below. Other substrates: the
+> equivalent recurring wake.
 
 ## The resume contract — be resumable by a model-free supervisor (do this as you go)
 
@@ -197,10 +198,72 @@ contract.)
 
 - **Detached shell driver — THE DEFAULT.** scp a self-contained `*.sh`, run it detached (`setsid nohup`), poll a
   done-marker. Deterministic, robust, no auth risk. Use your profile's worked-example drivers as the shape.
+  Detach from the FIRST invocation, never only after a suspected failure — see "Long-running process discipline"
+  below for why.
 - **Delegate to an on-compute agent — RARE.** Brief a named agent on the compute and drive it, for a *messy sub-task*
   that genuinely needs on-box judgment. A second brain (it can lose auth; the controller can't) — use sparingly.
 - You (the executor) are the **controller-resident brain driving ephemeral, dumb compute** — there is no agent on the
   GPU box for the default path.
+
+## Long-running process discipline
+
+Five failure modes recur wherever this skill has you launch, watch, or poll a process that outlives a single turn
+— remote drivers, local pollers, and judge/API worker pools alike. Each is **silent** (no crash, no error, no
+signal at the moment it happens) and each has a proven, cheap fix; treat all five as standing discipline, not a
+situational judgment call.
+
+- **A local-tool timeout is never evidence the remote process died — detach from the first invocation, and
+  verify by PID before ever relaunching (#355).** A foreground (non-detached) SSH call that hits the local Bash
+  tool's timeout returns "failed/killed" locally, but the remote process is independent of that local timeout
+  and keeps running unless something on the remote side actually tore it down. A real incident: a foreground
+  judge call timed out locally, was believed dead, got relaunched detached — and the two processes wrote to the
+  same output file concurrently for several seconds before ~60 duplicate rows gave it away. The fix is upstream
+  of the relaunch decision, not a smarter relaunch check: launch every remote/long-running script detached from
+  the FIRST invocation (`setsid`/`nohup … & disown`, log + pidfile — see Topology, above), so "did this survive
+  a timeout" is never ambiguous. If you ever do suspect a job might still be running, confirm via its PID
+  (`pgrep -af <script>` read-only, as a check, never as a kill target) before relaunching — never relaunch on
+  the assumption that a timed-out local call means a dead remote one.
+- **Bracket a semaphore around the single attempt, never around a retry/backoff loop (#343).** A judge/API
+  worker pool sharing one rate-limited account can silently stall — not crash, not error, just stop advancing —
+  when a permit is held for a call's entire retry loop (`async with sem: for attempt in …: … await
+  asyncio.sleep(backoff)`, with the sleep INSIDE the `with`): under a real rate-limit spike, most permits get
+  stuck in backoff at once, and unjittered backoff synchronizes retries into a thundering herd that never
+  drains. One real run went through three successive "looks-fixed" concurrency attempts before finding this —
+  each looked correct, each still silently stalled. The fix: acquire the semaphore for the single HTTP attempt
+  only, release it before the backoff sleep so a stuck retry doesn't block the workers behind it, and jitter the
+  backoff (`base * (0.5 + random())`) so retries don't re-synchronize. If a work unit spans several dependent
+  API calls (e.g. a multi-step judge sequence), hold the permit for that whole unit's forward progress, not for
+  any single call's failure-recovery path.
+- **A `run_in_background` Bash/Monitor waiter is a convenience layer, never the thing you rely on for
+  re-invocation (#461).** These waiters are not guaranteed to survive across turns or context events — a real
+  run saw ALL currently-running background waiters, including unrelated ones from long-finished earlier phases,
+  killed in a single sweep with no explicit `TaskStop` and no visible trigger, twice in one session. The remote
+  job itself was unaffected both times — only the local poller died — so treat a killed waiter as a signal to
+  re-verify the remote job's liveness directly (SSH/PID), never as evidence the job itself failed. The
+  independent recurring self-wake you armed above is the one channel proven to survive this; a
+  `run_in_background` poller layered on top of it for faster-than-cron cadence is fine, but the self-wake tick's
+  own direct poll is what you fall back to the moment a waiter goes quiet — never widen the self-wake interval
+  or skip arming it because a background waiter is also running.
+- **Poll liveness by PID (`kill -0` against a recorded pidfile), never `pgrep -f <name>`, in ANY polling
+  context — an ssh one-liner, a Monitor `command:` loop, or a deploy poller alike (#462).** `pgrep -f`/
+  `pkill -f` matches the full command line of every process, including the poller's OWN wrapper — an ssh
+  one-liner or a Monitor `bash -c '...'` invocation whose text names the target script (as a poll condition's
+  text almost always does) matches itself, so a negative liveness check never goes true even after the real
+  target process has genuinely exited. A real incident: a Monitor completion loop reported "still running"
+  indefinitely after its target had already finished, because the loop's own `pgrep -f judge_pass.py` matched
+  its own `bash -c` wrapper. Capture the PID at launch (`… & echo $! > pidfile`) and poll `kill -0
+  "$(cat pidfile)"` instead — this is `gpu-job`'s liveness-helper pattern; use it rather than re-deriving a
+  pgrep-based check per driver.
+- **Past ~120s, the harness auto-backgrounds a Bash call regardless of any `timeout N` you pass it — don't fight
+  this, poll for the completion marker instead (#480).** "Run it in the foreground with a long Bash timeout" is
+  not a real mechanism once a call legitimately runs past ~120s — and the close audit / `log-experiment` calls
+  routinely do, at 400-500s+: the harness's own auto-background kicks in first, so the call is never actually
+  "foreground" beyond that point no matter what timeout you gave it. Worse, wrapping the call in your OWN
+  `timeout N` on top of this can kill it just short of finishing — a real incident lost a full audit attempt
+  this way, its `timeout 500` wrapper firing at the 500s mark seconds before the audit would have completed.
+  Let the harness auto-background the call, don't add your own timeout wrapper around it, and poll for the
+  call's own output-file marker (e.g. `AUDIT.md`/`DATA_AUDIT.md`) the same way you'd poll any other detached
+  driver's done-marker.
 
 ## Step 1 — Acquire the compute
 
@@ -235,7 +298,8 @@ entire experiment, caught only by comparing aggregate row counts at close). Befo
 strip any row lacking a valid success marker (a real label/score, not `null` / an `excluded_*`/error status) from the
 "done" set, so a failed read gets requeued on the next pass instead of sitting silently wrong until someone notices
 a downstream discrepancy. Run it detached (`setsid nohup`),
-then watch with a background until-loop SSH-checking the done-marker (plus the self-wake you already armed).
+then watch it with the self-wake tick you already armed above; a `run_in_background` until-loop layered on top
+for faster-than-cron cadence is fine but not load-bearing — see "Long-running process discipline" above.
 
 **A judge driver's strict-tag parser needs a bare-text fallback, or it feeds the done-check above a false
 API-failure signal (#542).** A parser that only matches the literal `<mode>X</mode><flavor>Y</flavor>` wrapper
@@ -299,10 +363,11 @@ files sharing the same directory and base pattern as the files you mean to glob.
 
 **Use the `gpu-job` helpers** — its driver library owns the foot-guns (GPU-stage handoffs that wait for the prior runner
 and poll until VRAM frees; port/serve waits; artifact-exists checks; liveness; safe process-tree kills; LoRA merges
-through a mandatory diff gate). Hand-rolling these is how validity bugs breed. **Two kill rules, three incidents each:**
-never raw `pkill -f` / `pgrep -f` in an ssh one-liner (it self-matches your own wrapper — kill by PID, use the liveness
-helper); never end a driver in a bare `wait` when `exec > >(tee …)` is in play (the tee child is a job; `wait` never
-returns and the done-marker never fires — wait on explicit PIDs, or touch the marker first).
+through a mandatory diff gate). Hand-rolling these is how validity bugs breed. (Never poll liveness with raw
+`pkill -f`/`pgrep -f` in an ssh one-liner — see "Long-running process discipline" above for why and the PID-based
+fix.) **One more kill rule, three incidents:** never end a driver in a bare `wait` when `exec > >(tee …)` is in
+play (the tee child is a job; `wait` never returns and the done-marker never fires — wait on explicit PIDs, or
+touch the marker first).
 
 **Sibling footgun, same failure class — `disown` and ANY `wait` on the SAME jobs are mutually exclusive, bare
 or by PID.** A sample-fanout driver that launches each job with `nohup ... & disown` and then closes with a bare
@@ -337,6 +402,15 @@ a known-reference subject with byte-identical decoding config on the stack you'r
 rollouts CI-overlap historical values before trusting it for the real run. A local adapter file is still genuinely
 needed for two remaining cases — vLLM serving of models too large for direct Tinker-side sampling, and offline
 artifact archival — see the archive-download guidance immediately below (#330) for those.
+
+**Tinker's sampling seed is NOT byte-exact replay — it gives row-identity/bookkeeping determinism only
+(#477).** A recorded `(prompt, seed, temperature)` triple does not reproduce byte-identical text across
+separate `sample()` calls on Tinker's direct-sampling stack: 3 back-to-back calls in the SAME process with an
+IDENTICAL seed/prompt/params produced 3 mutually different completions. A depth-independent `seed_for(...)`
+scheme still recomputes each row's recorded `gen_config.seed` exactly, so presence-based resume/dedup and
+"extend samples without re-rolling earlier ones" hold at the row-identity/bookkeeping level — but don't design
+a CHECKLIST/design gate around "row N regenerates byte-identically," and don't phrase a design/results doc as
+claiming byte-exact replay from the seed alone.
 
 **Tinker checkpoint-archive downloads, for the remaining cases above where a local adapter file is genuinely
 required (#330): timeout AND concurrency guidance differ by code path.** Archive creation server-side can take up
@@ -707,6 +781,26 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   (e.g. >$5). `judge_balance_check.sh` in this skill's `scripts/` does the threshold/comparison arithmetic so it
   doesn't get re-derived per run — it takes the balance and rate numbers you already have and tells you OK or
   BLOCKED; it has no opinion on the provider or how you fetched the balance.
+- **Smoke-test the EXACT provider-pinned request before writing a driver, not just the models/endpoints listing
+  (#453).** Pinning OpenRouter's `provider.only`/`provider.order` to a specific provider slug can 404 for reasons
+  invisible anywhere in the API: `provider={"only":["deepseek"]}` failed every call with `HTTP 404 "No endpoints
+  available matching your guardrail restrictions and data policy"`, even though `/api/v1/models/.../endpoints`
+  showed that same endpoint healthy at 99.9% uptime — caused by an account-level privacy/data-policy exclusion
+  that has no REST surface to read or set (`/api/v1/key`, `/api/v1/settings`, `/api/v1/user` all checked, none
+  expose it), while every third-party re-host of the same model routed fine. One curl of the exact
+  provider-restricted request body, before any driver code, catches this before a paid smoke run does — one
+  incident burned a full 100-call smoke cycle misdiagnosing it as a driver bug before isolating it via manual
+  curl probing outside the driver. Not fixable from the API side: fall back to default/unpinned routing (or a
+  different provider slug) rather than trying to change the account setting mid-run.
+- **Provider Batch APIs: error files nest under `response.body.error`, and `custom_id` has a hard length cap
+  (#363).** OpenAI Batch API error files (`error_file_id` content) put the actual per-row error object under
+  `response.body.error`, not a top-level `error` field — a naive `rec.get("error")` parse silently returns
+  `None` for genuine content-policy-blocked rows, corrupting the error audit trail with no exception raised.
+  Anthropic's Message Batches `custom_id` is capped at `^[a-zA-Z0-9_-]{1,64}$`: on a real pool keyed by natural
+  (non-index) ids, 10,755/19,996 rows exceeded 64 chars (max observed 111) and would be rejected outright at
+  batch-creation time. Fix: parse `response.body.error` as a fallback when reading OpenAI batch error files, and
+  use an index-based `custom_id` scheme (e.g. `r{idx:06d}`) with a persisted local `custom_id -> source_id` join
+  table — for BOTH providers, for join-logic consistency — rather than keying batches by natural ids.
 
 ## Gotchas
 

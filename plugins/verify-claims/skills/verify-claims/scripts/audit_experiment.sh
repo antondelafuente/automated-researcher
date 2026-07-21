@@ -215,7 +215,12 @@ finding count. For each prior finding: CONCEDE the ones the response adequately 
 re-raise them); ESCALATE only when the response is wrong or insufficient (quote it, say why it still
 fails); otherwise raise only GENUINELY NEW flaws. On a re-run, polish / wording / threshold-calibration
 are NOT findings unless they change a conclusion. Reporting 'no new material finding' is a GOOD,
-expected outcome once the big flaws are addressed — that is how the debate converges.
+expected outcome once the big flaws are addressed — that is how the debate converges. A response that
+ACCEPTs a finding by asserting an artifact is 'committed'/present is NOT adequately resolved merely
+because it cites a pinned hash (e.g. a SHA256SUMS line) — check whether the response also shows the
+artifact mechanically resolves ('git show <ref>:<path>', or an R2/store existence check); if it
+doesn't, ESCALATE rather than CONCEDE (a pinned hash is a claim, not proof of presence; real incident:
+an ACCEPT certified a manifest 'committed' from its SHA256SUMS line alone and it existed nowhere, #356).
 
 VERIFY DATA-BACKED ASSUMPTIONS: where the design leans on a property of the ACTUAL data (number of
 classes/biases/strata, available n, label balance) and that data is accessible (a file in the dir, or

@@ -132,6 +132,18 @@
 - ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout
       artifacts (each row or a companion summary) and CONSISTENT across co-measured arms — verifiable from
       the artifacts, not only from driver source.                                                  ev:
+- ☐ [BLOCK] Reused prior-wave data pinned to the EXACT committed identifier, never a category word (a
+      same-ish name can hide an accidentally-named/bug-artifact condition, #487); where reuse claims
+      byte-identical construction, rebuilt from PRIMARY sources and asserted byte-equal in the build
+      script rather than trusted by filename match.                                                 ev:
+- ☐ [BLOCK] Any RESUME-from-checkpoint claim verified against the checkpoint's TYPE for the SPECIFIC
+      resume API the run will call (exercise the resume call, or inspect a checkpoint-type field) — not
+      just existence/matching metadata via a generic lookup, which doesn't distinguish checkpoint
+      flavors (a platform may have incompatible ones, e.g. training-resumable vs. inference-only, #348). ev:
+- ☐ [BLOCK] Any accepted amendment to DESIGN.md/START.md (a design-audit ACCEPT, or an executor-cleared
+      mid-run correction) greps clean against every sibling doc (data_audit_manifest.md, CHECKLIST.md,
+      gate_evidence/*) for the amended clause before the run continues — `grep -l "<amended term>"
+      <dir>/*.md <dir>/gate_evidence/*` (#375). N.A. only if no amendment occurred.                  ev:
 
 ## EXPERIMENT-SPECIFIC  (designer writes these — the domain-knowledge part the executor can't invent)
 - ☐ ...

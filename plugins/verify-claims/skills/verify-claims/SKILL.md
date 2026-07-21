@@ -15,7 +15,11 @@ zero-context instance still gives you context independence either way.
 
 - Before spending money or drawing conclusions that depend on factual claims about artifacts:
   identity of a baseline, location of original results, existence/provenance of a checkpoint,
-  lineage of a derived model.
+  lineage of a derived model. **A claimed resume-from-checkpoint path is a distinct fact class:**
+  verify the checkpoint's TYPE for the SPECIFIC resume API the plan will call (e.g. Tinker's
+  resumable `weights` vs. inference-only `sampler_weights`), not just that a checkpoint with a
+  matching base_model/rank exists via a generic metadata lookup — that lookup doesn't distinguish
+  checkpoint flavors, and a wrong type surfaces only at launch, not at the claim-check (#348).
 - On design documents (`DESIGN.md`) and their amendments.
 - On your own draft writeups: do the methods-section claims survive contact with the records?
   (Every UNKNOWN = a detail your readers won't be able to verify either.)

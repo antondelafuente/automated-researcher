@@ -1,3 +1,16 @@
+- verify-claims 0.7.21 (2026-07-21): `audit_data.py` gains `--dup-field <field>` to check exact-
+  duplicates on a single field's value (dotted path, e.g. `--dup-field response`) instead of the whole
+  row, plus a runtime WARNING when it detects eval-rollout-shaped data (`id`+`sample`, or a
+  `gen_config.seed`-shaped field — keys that make every row unique BY CONSTRUCTION) and `--dup-field`
+  was not passed (#522). The default whole-row `exact_duplicate_rows` check hashes the entire row, so
+  on this data shape it reads ~0 almost regardless of how much the actual response TEXT repeats — a
+  real run trusted that "0% duplicate" into a closing `RESULTS.md` while its own separately-computed
+  response-text-only metric showed 60.22% duplicate content in one subject's pool; the cross-family
+  close audit caught the contradiction but it took 2 passes to purge every stale mention. Both fix
+  options are strictly additive/opt-in: `--dup-field` defaults to unset (current whole-row behavior
+  unchanged), and the report gains a `dup_field` key plus the field name in its dup-count warning.
+  Whole-row uniqueness remains the default and is still the right check for other data shapes (e.g.
+  training-set dedup).
 - verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
   explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
   next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after
