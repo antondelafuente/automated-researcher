@@ -9,7 +9,10 @@
 #   every existing staged-set gate (check_ignored_files/symlink_scan/secret_scan) automatically runs against
 #   this reduced set — none of them need their own --only awareness. Fail-closed: a named path that does not
 #   exist under <registry-dir>, or an allowlist that ends up staging nothing, dies — it never silently falls
-#   back to staging the whole dir.
+#   back to staging the whole dir. Restricted to a dir that classifies as KIND=note (the dashboard use case
+#   always does): the experiment/design-stage gates read their audit/design evidence straight from
+#   <registry-dir>, not the allowlisted staged set, so --only on those KINDs is refused rather than risk
+#   approving evidence that never actually gets committed.
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -190,6 +193,18 @@ if [ -z "$KIND" ]; then
   else                                                              KIND="note"; fi       # everything else: secret scan
 fi
 note "classified: $KIND  ($REL)"
+
+# --only is restricted to KIND=note (#374 review): gate_experiment/gate_design_stage validate close-audit /
+# design-audit / Presentation-lock evidence by reading RESULTS.md/AUDIT.md/AUDIT_RESPONSE.md/DESIGN.md/
+# DESIGN_AUDIT*.md/START.md straight from $DIR, NOT from STAGE_PATHS — so an --only allowlist that leaves
+# those files out of the staged set would let the gate verify evidence that never actually lands in the
+# commit/PR, while the approval body still claims it did. gate_note reads no evidentiary file at all (secret
+# scan runs on the staged set only), so it's the only KIND where narrowing the staged set can't create that
+# gap — and it's also the actual reported use case (a shared multi-tenant dashboard dir has no DESIGN.md/
+# RESULTS.md, so it always classifies as 'note').
+if [ "${#ONLY_REL[@]}" -gt 0 ] && [ "$KIND" != "note" ]; then
+  die "--only is only supported for KIND=note — this dir classified as '$KIND', whose gate reads audit/design evidence directly from $DIR rather than the staged set, so an --only allowlist could approve/merge a record whose cited evidence was never actually committed; log the whole dir (drop --only), or split the allowlisted content into its own single-owner registry dir"
+fi
 
 # A close-audit triage/response section, recognized in EITHER form (#263): a separate AUDIT_RESPONSE.md, OR a
 # response section appended INLINE in AUDIT.md (a markdown heading whose text mentions 'respons…'/'triage' —

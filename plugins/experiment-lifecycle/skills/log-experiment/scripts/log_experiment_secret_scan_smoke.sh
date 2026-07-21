@@ -46,7 +46,10 @@
 # `../`) --only path BLOCKs (fail-closed — never silently falls back to staging the whole dir); an allowlist
 # that stages nothing (the named file is unchanged vs base) BLOCKs on nothing-to-commit same as the
 # unscoped case; and a --only path that is itself gitignored is still caught by the #340 guard (the
-# allowlist narrows scope, it does not disable the existing gates).
+# allowlist narrows scope, it does not disable the existing gates). Also covers a review-round hardening:
+# --only is refused outright for a dir that classifies as KIND != note (e.g. design-stage/experiment),
+# since those gates read their audit/design evidence straight from $DIR rather than the allowlisted staged
+# set — narrowing there could approve/merge a record whose cited evidence never actually gets committed.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -420,6 +423,15 @@ T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
 printf '{"in": "battery"}\n' > "$T/reg/note/mine.jsonl"
 if run_dry "$T/reg/note" --only mine.jsonl; then fail "--only on a gitignored path was NOT blocked (#340 guard should still apply within the allowlist)"; else
   case "$LAST_ERR" in *"gitignored file"*"mine.jsonl"*) pass "gitignored --only path still caught by the ignored-file guard";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 35: --only against a design-stage dir (KIND != note) -> BLOCK (review finding: gate_design_stage/gate_experiment read their audit evidence from \$DIR, not the --only-narrowed staged set, so narrowing there could approve a record whose cited evidence never lands in the commit)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$T/reg/design/DESIGN.md"
+printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
+if run_dry "$T/reg/design" --only DESIGN.md; then fail "--only on a design-stage dir was NOT blocked"; else
+  case "$LAST_ERR" in *"--only is only supported for KIND=note"*) pass "--only on a design-stage dir refused";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
