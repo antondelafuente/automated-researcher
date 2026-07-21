@@ -36,7 +36,10 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    containing shell metacharacters is a literal string when sourced, never executed, and
    `env_get` decodes the same escaping back to the original value) and both `/workspace/.env` and
    `/etc/environment` are chmod 600 since they now carry secrets. Re-running bootstrap replaces a
-   changed value in place rather than keeping the first one persisted.
+   changed value in place rather than keeping the first one persisted. `/etc/environment` is parsed
+   by PAM, not a shell, and PAM's format has no escape syntax at all — a value with characters
+   outside the bare-safe class (`A-Za-z0-9_.:/@+=,-`) is persisted only to `/workspace/.env` (read
+   via `source` or `env_get`), never to `/etc/environment`.
 3. **Run detached:** `scripts/run_remote.sh <port> root@<ip> <job.sh> /root/job.log [ENV=V…]`
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.

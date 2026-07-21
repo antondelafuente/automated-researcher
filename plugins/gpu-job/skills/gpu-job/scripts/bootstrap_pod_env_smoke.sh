@@ -106,6 +106,8 @@ _persist_passed_env "$ENV10a" "$WS10" "$ETC10" 1
 _persist_passed_env "$ENV10b" "$WS10" "$ETC10" 1
 if [ "$(grep -c '^HF_TOKEN=' "$WS10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$WS10"; then ok rotated-value-replaces-stale-workspace-env; else no "rotated-value-replaces-stale-workspace-env ($(cat "$WS10"))"; fi
 if [ "$(grep -c '^HF_TOKEN=' "$ETC10")" = 1 ] && grep -qx 'HF_TOKEN=hf-new' "$ETC10"; then ok rotated-value-replaces-stale-etc-environment; else no "rotated-value-replaces-stale-etc-environment ($(cat "$ETC10"))"; fi
+if [ "$(stat -c '%a' "$WS10" 2>/dev/null || stat -f '%Lp' "$WS10" 2>/dev/null)" = "600" ]; then ok rotate-workspace-env-still-chmod-600; else no "rotate-workspace-env-still-chmod-600 (mode=$(stat -c '%a' "$WS10" 2>/dev/null || stat -f '%Lp' "$WS10" 2>/dev/null))"; fi
+if ls "$(dirname "$WS10")"/*.tmp.* >/dev/null 2>&1; then no "rotate-leaves-no-tmp-sibling ($(ls "$(dirname "$WS10")"))"; else ok rotate-leaves-no-tmp-sibling; fi
 
 # --- 11. a value that is ONLY trailing newline(s) is rejected, not silently truncated -------------------
 ENV11="$TMP/environ11"
@@ -125,5 +127,39 @@ _persist_passed_env "$ENV12" "$WS12" "$ETC12" 1
   got=$(env_get QUOTE_VAR "$WS12")
   [ "$got" = "it's a token" ]
 ) && ok quoted-value-round-trips-through-job_lib-env_get || no "quoted-value-round-trips-through-job_lib-env_get (got: $(( set +u -e; source "$HERE/job_lib.sh"; env_get QUOTE_VAR "$WS12" ) 2>&1))"
+
+
+# --- 13. a value needing quoting (apostrophe+space) round-trips via the workspace file (source and
+#     env_get) but is ABSENT from /etc/environment (PAM has no escape syntax); a plain bare-safe
+#     value alongside it still lands in /etc/environment BARE, unquoted ------------------------------
+ENV13="$TMP/environ13"
+fake_environ "$ENV13" "PASSED_ENV_NAMES=QUOTE_VAR,PLAIN_VAR" "QUOTE_VAR=it's a token" "PLAIN_VAR=tk-abc123"
+WS13="$TMP/ws13/.env"; ETC13="$TMP/etc13/environment"
+_persist_passed_env "$ENV13" "$WS13" "$ETC13" 1
+( set +u; QUOTE_VAR=""; source "$WS13"; [ "$QUOTE_VAR" = "it's a token" ] ) \
+  && ok quote-var-round-trips-via-source-on-workspace-env || no "quote-var-round-trips-via-source-on-workspace-env"
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get QUOTE_VAR "$WS13")
+  [ "$got" = "it's a token" ]
+) && ok quote-var-round-trips-via-env_get-on-workspace-env || no "quote-var-round-trips-via-env_get-on-workspace-env"
+if grep -q '^QUOTE_VAR=' "$ETC13" 2>/dev/null; then no "quote-var-must-be-absent-from-etc-environment ($(cat "$ETC13"))"; else ok quote-var-must-be-absent-from-etc-environment; fi
+if grep -qx 'PLAIN_VAR=tk-abc123' "$ETC13"; then ok plain-var-still-persisted-bare-to-etc-environment; else no "plain-var-still-persisted-bare-to-etc-environment ($(cat "$ETC13" 2>/dev/null))"; fi
+
+# --- 14. persisting into a workspace file that PRE-EXISTS with no trailing newline doesn't corrupt
+#     the old line or swallow the new one -------------------------------------------------------------
+ENV14="$TMP/environ14"
+fake_environ "$ENV14" "PASSED_ENV_NAMES=NEW_SECRET" "NEW_SECRET=value"
+WS14="$TMP/ws14/.env"; ETC14="$TMP/etc14/environment"
+mkdir -p "$(dirname "$WS14")"
+printf 'OLD=x' > "$WS14"
+_persist_passed_env "$ENV14" "$WS14" "$ETC14" 1
+if grep -qx 'OLD=x' "$WS14"; then ok preexisting-no-trailing-newline-line-preserved; else no "preexisting-no-trailing-newline-line-preserved ($(cat "$WS14"))"; fi
+if grep -qx 'NEW_SECRET=value' "$WS14"; then ok new-var-not-swallowed-by-missing-newline; else no "new-var-not-swallowed-by-missing-newline ($(cat "$WS14"))"; fi
+( set +u -e
+  source "$HERE/job_lib.sh"
+  got=$(env_get NEW_SECRET "$WS14")
+  [ "$got" = "value" ]
+) && ok new-var-readable-via-env_get-after-noeol-preexisting-file || no "new-var-readable-via-env_get-after-noeol-preexisting-file"
 
 [ "$fails" = 0 ] && { echo "PASS bootstrap_pod_env_smoke"; exit 0; } || { echo "FAIL bootstrap_pod_env_smoke"; exit 1; }

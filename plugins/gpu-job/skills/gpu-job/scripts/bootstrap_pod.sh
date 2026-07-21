@@ -39,16 +39,28 @@ _persist_kv(){ # _persist_kv <file> <name> <name=value line> — append <line> t
                # Finding: the old grep -q-guarded append only ever wrote a name's FIRST value —
                # a reused <file>, e.g. one that outlives pod teardown on a mounted persistent
                # volume, or a plain repeated bootstrap on the same pod, kept the OLD credential
-               # forever instead of picking up a rotated one). Rewrites <file>'s content via `>`
-               # (not `mv` from a fresh temp file) so its existing permission bits (e.g. the
-               # chmod 600 below) survive the update.
-  local file=$1 name=$2 line=$3 tmp
+               # forever instead of picking up a rotated one). The rewrite is an in-memory capture
+               # + truncate-in-place on <file> itself — never a `.tmp.$$` sibling — so no on-disk
+               # intermediate ever exists holding the OTHER surviving secrets at a world-readable
+               # mode, <file>'s own permission bits (e.g. the chmod 600 below) survive since nothing
+               # but <file> is ever written, and nothing is left orphaned if the script dies
+               # mid-rewrite (code-review Finding: a bare `> "${file}.tmp.$$"` redirect created that
+               # temp file at the process's default umask — 644 under the common 022 — exposing
+               # every other persisted secret during each replacement, and it stayed on disk on a
+               # crash). `|| rest=""` matters: `grep -v` exits 1 when every line matched, which
+               # would trip `set -e`; a plain variable is safe here since these are small KV files
+               # and a value containing a newline is already rejected upstream.
+  local file=$1 name=$2 line=$3 rest
   if [ -e "$file" ] && grep -q "^${name}=" "$file" 2>/dev/null; then
-    tmp="${file}.tmp.$$"
-    grep -v "^${name}=" "$file" > "$tmp" 2>/dev/null || : > "$tmp"
-    cat "$tmp" > "$file"
-    rm -f "$tmp"
+    rest=$(grep -v "^${name}=" "$file") || rest=""
+    if [ -n "$rest" ]; then printf '%s\n' "$rest" > "$file"; else : > "$file"; fi
   fi
+  # Ensure a separating newline before the append: appending directly onto a file whose last byte
+  # isn't a newline concatenates onto the previous line instead of starting a new one (code-review
+  # Finding: a file ending `OLD=x` with no trailing newline became `OLD=xNEW_SECRET=value` on
+  # append, so neither `source` nor `env_get NEW_SECRET` could see the new var). `$(tail -c1 file)`
+  # reads empty iff the last byte already is a newline, since command substitution strips it.
+  if [ -s "$file" ] && [ -n "$(tail -c 1 "$file")" ]; then printf '\n' >> "$file"; fi
   printf '%s\n' "$line" >> "$file"
 }
 
@@ -61,14 +73,22 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
   # `source /workspace/.env`-per-launch-script fallback convention; job_lib.sh's env_get already
   # reads this file), single-quoted via _shell_quote so a value containing shell metacharacters
   # is a literal string when sourced rather than executed (code-review Finding: unescaped values
-  # corrupt/inject on `source`) — and, on a root pod, to <etc-environment> too — the PRIMARY
-  # mechanism, since PAM applies /etc/environment to every later non-interactive `ssh pod 'cmd'`
-  # with no per-script source to forget (same pattern the RCLONE_MULTI_THREAD_* write below
-  # already uses). Both files are chmod 600 immediately, <etc-environment> included — the issue's
-  # own "persisting to a root-only file doesn't broaden exposure" non-goal only holds if that file
-  # actually IS root-only, and /etc/environment's normal mode is world-readable (code-review
-  # Finding: only <workspace-env> was locked down, leaving the PRIMARY mechanism's file readable
-  # by any user on the pod instead of just root).
+  # corrupt/inject on `source`) — and, on a root pod, to <etc-environment> too, but ONLY when the
+  # value is bare-safe (i.e. _shell_quote left it unquoted): /etc/environment is parsed by PAM, not
+  # a shell, and PAM's format has no escape syntax whatsoever, so a quoted value like
+  # `QUOTE_VAR='it'\''s a token'` is bash string-concatenation syntax PAM can't parse — it truncates
+  # the value or drops the line (code-review Finding). A value that needs quoting is skipped for
+  # <etc-environment> with a loud stderr note and still persisted to <workspace-env> only; the
+  # bare-safe class (`A-Za-z0-9_.:/@+=,-`) covers every PASS_ENV value seen in practice (API keys,
+  # paths) and contains no character PAM treats specially, so this is a deliberate narrowing of what
+  # the PAM path carries, not an encoding gap to close later. Since PAM applies /etc/environment to
+  # every later non-interactive `ssh pod 'cmd'` with no per-script source to forget (same pattern
+  # the RCLONE_MULTI_THREAD_* write below already uses), it stays the PRIMARY mechanism for the
+  # values it can carry. Both files are chmod 600 immediately, <etc-environment> included — the
+  # issue's own "persisting to a root-only file doesn't broaden exposure" non-goal only holds if
+  # that file actually IS root-only, and /etc/environment's normal mode is world-readable
+  # (code-review Finding: only <workspace-env> was locked down, leaving the PRIMARY mechanism's
+  # file readable by any user on the pod instead of just root).
   local environ_file=$1 workspace_env=${2:-/workspace/.env} etc_env=${3:-/etc/environment} is_root=${4:-}
   [ -n "$is_root" ] || { [ "$(id -u)" = 0 ] && is_root=1 || is_root=0; }
   local names name val qval old_ifs
@@ -102,7 +122,11 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
     qval=$(_shell_quote "$val")
     _persist_kv "$workspace_env" "$name" "${name}=${qval}"
     if [ "$is_root" = 1 ]; then
-      _persist_kv "$etc_env" "$name" "${name}=${qval}"
+      if [ "$qval" = "$val" ]; then
+        _persist_kv "$etc_env" "$name" "${name}=${val}"
+      else
+        echo "[bootstrap] $name: value contains characters /etc/environment (PAM, no escape syntax) cannot represent; persisted to /workspace/.env only" >&2
+      fi
     fi
   done
   IFS=$old_ifs
