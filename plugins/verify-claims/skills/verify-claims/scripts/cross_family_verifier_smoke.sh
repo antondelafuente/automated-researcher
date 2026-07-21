@@ -53,23 +53,28 @@ seam                     >/dev/null 2>&1 && err "(d) unset AAR_SUBSTRATE did not
 seam AAR_SUBSTRATE=frog  >/dev/null 2>&1 && err "(d) unknown AAR_SUBSTRATE did not fail closed"
 
 # (e) #465 — a --design re-audit with no explicit out-file must never clobber a prior DESIGN_AUDIT.md:
-#     it auto-numbers to the next free DESIGN_AUDIT<n>.md instead.
+#     it auto-numbers to the next free DESIGN_AUDIT<n>.md instead. Also, preserving DESIGN_AUDIT*.md across
+#     passes must never make a later pass's default DESIGN_FILE auto-detect pick a prior audit's OWN output
+#     (newer mtime than DESIGN.md) instead of the actual proposal — the auto-detect glob must exclude them.
 : > "$EXP/DESIGN.md"
 design_seam(){ env -u BASH_ENV -u AUDIT_VERIFIER_CMD AUDIT_PRINT_VERIFIER=1 AAR_SUBSTRATE=claude bash "$AE" --design "$EXP" 2>/dev/null; }
 if out=$(design_seam); then
   echo "$out" | grep -q '^OUT=.*/DESIGN_AUDIT\.md$' || err "(e) first design pass did not default to DESIGN_AUDIT.md: $out"
+  echo "$out" | grep -q '^DESIGN_FILE=.*/DESIGN\.md$' || err "(e) first design pass did not select DESIGN.md as DESIGN_FILE: $out"
 else
   err "(e) first design pass failed unexpectedly"
 fi
 : > "$EXP/DESIGN_AUDIT.md"
 if out=$(design_seam); then
   echo "$out" | grep -q '^OUT=.*/DESIGN_AUDIT2\.md$' || err "(e) re-audit with DESIGN_AUDIT.md present did not auto-number to DESIGN_AUDIT2.md: $out"
+  echo "$out" | grep -q '^DESIGN_FILE=.*/DESIGN\.md$' || err "(e) re-audit with a newer DESIGN_AUDIT.md present picked it as DESIGN_FILE instead of DESIGN.md: $out"
 else
   err "(e) second design pass failed unexpectedly"
 fi
 : > "$EXP/DESIGN_AUDIT2.md"
 if out=$(design_seam); then
   echo "$out" | grep -q '^OUT=.*/DESIGN_AUDIT3\.md$' || err "(e) third design pass did not auto-number to DESIGN_AUDIT3.md: $out"
+  echo "$out" | grep -q '^DESIGN_FILE=.*/DESIGN\.md$' || err "(e) third design pass picked a preserved DESIGN_AUDIT*.md as DESIGN_FILE instead of DESIGN.md: $out"
 else
   err "(e) third design pass failed unexpectedly"
 fi
