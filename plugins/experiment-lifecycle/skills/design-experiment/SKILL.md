@@ -292,7 +292,8 @@ parent's own gate had already cleared). Declare it explicitly:
   changed (the new arms/manifests/parameters) — not a full re-verification of facts/comparability the parent's own
   gates already cleared — plus one mechanical check that every inherited-by-citation section still matches the
   parent's `DESIGN.md` AT THE PINNED COMMIT from the header, not whatever the parent file says now (`git show
-  <pinned-sha>:DESIGN.md`) — a citation checked against the parent's current HEAD instead of the pinned commit
+  <pinned-sha>:<parent-exp-dir>/DESIGN.md`, e.g. `git show <pinned-sha>:registry/csp1-author-sweep-1/DESIGN.md`)
+  — a citation checked against the parent's current HEAD instead of the pinned commit
   would silently pass even if the parent doc was amended after this rerun was authorized, which is exactly the
   drift this check exists to catch.
 - **No new record kind needed downstream.** The rerun's `DESIGN.md` still classifies as design-stage under
