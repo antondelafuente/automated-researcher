@@ -1,3 +1,9 @@
+- verify-claims 0.7.22 (2026-07-21): `audit_data.py`'s `--sample` now defaults to `<out-stem>_sample.jsonl`,
+  derived from `--out`, instead of the fixed literal `data_audit_sample.jsonl` (#521). Looping over N
+  files (the common per-arm/per-wave case) with a unique `--out` per invocation but no explicit `--sample`
+  previously made every invocation silently overwrite the same sample file, so only the last file's
+  stratified sample survived on disk. `--sample` remains a full override when explicitly passed (e.g. for
+  a shared sample path); the single-file default (`--out data_audit.json` with no `--sample`) is unchanged.
 - verify-claims 0.7.21 (2026-07-21): `audit_data.py` gains `--dup-field <field>` to check exact-
   duplicates on a single field's value (dotted path, e.g. `--dup-field response`) instead of the whole
   row, plus a runtime WARNING when it detects eval-rollout-shaped data (`id`+`sample`, or a
