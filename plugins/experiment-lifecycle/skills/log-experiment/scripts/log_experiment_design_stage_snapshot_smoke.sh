@@ -14,6 +14,10 @@
 # copied verbatim, ticks included, from a closed sibling's completed close checklist): a staged CHECKLIST.md
 # with any ticked gate LIST line (☑/☒) BLOCKs, while the unstarted template itself — whose own instruction
 # header uses ☑/☒ in PROSE examples and whose gate lines carry non-empty `ev:` hints — must still PASS.
+# Case 9 re-runs case 8 under LC_ALL=C: a byte-oriented locale makes grep -E's `[☑☒]` character-class match
+# on individual UTF-8 bytes, and ☑/☒/☐ share a byte prefix, so a bracket class (unlike the `(☑|☒)` alternation
+# the gate actually uses) would false-positive-block an unstarted checklist under that locale (codex review,
+# PR #599).
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -164,6 +168,16 @@ cp "$SELF_DIR/../../design-experiment/templates/CHECKLIST_TEMPLATE.md" "$T8/reg/
 git -C "$T8" add -A
 if run_dry "$T8/reg/exp1"; then pass "an unstarted checklist (copied straight from the template) passes the gate"; else
   fail "the unstarted CHECKLIST template was BLOCKED (false positive): $LAST_ERR"; fi
+
+echo "[smoke] case 9: case 8's unstarted template, re-run under LC_ALL=C -> still PASS (byte-locale regression, #599)"
+T9="$T/repo9"; make_design_repo "$T9"
+fresh_start_md "$T9/reg/exp1/START.md"
+XDG_CONFIG_HOME="$T/xdg" AAR_PROFILE="" bash "$SELF_DIR/aar_profile_snapshot.sh" snapshot "$T9/reg/exp1/START.md" >/dev/null
+cp "$SELF_DIR/../../design-experiment/templates/CHECKLIST_TEMPLATE.md" "$T9/reg/exp1/CHECKLIST.md"
+git -C "$T9" add -A
+out9="$(LC_ALL=C XDG_CONFIG_HOME="$T/xdg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main bash "$SCRIPT" "$T9/reg/exp1" --dry-run 2>&1)"; rc9=$?
+if [ "$rc9" -eq 0 ]; then pass "an unstarted checklist still passes the gate under LC_ALL=C"; else
+  fail "the unstarted CHECKLIST template was BLOCKED under LC_ALL=C (byte-locale false positive): $out9"; fi
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment design-stage snapshot gate: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment design-stage snapshot gate: $FAILS FAILURE(S)" >&2; exit 1; fi
