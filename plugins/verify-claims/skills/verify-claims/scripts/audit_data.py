@@ -170,6 +170,13 @@ def main():
             g.setdefault(str(r.get(field)), []).append(i)
         return g
 
+    def fair_share_budget(n_groups, remaining):
+        """Cap a coverage pass's budget at half the remaining cap, EXCEPT never below `n_groups` —
+        that floor is what preserves the "every distinct value represented whenever value-count <=
+        cap" guarantee. Only the proportional leftover-fill portion (beyond one-per-group) is what
+        gets capped; the one-per-group claim always gets however much budget it needs, up to `cap`."""
+        return min(remaining, max(n_groups, cap // 2))
+
     def allocate_coverage(groups, budget, picks, kind):
         """Spend at most `budget` new picks covering every group: minimum 1 per group (deterministic
         group order), then proportional fill of any leftover budget favoring larger groups. Never adds
@@ -211,21 +218,44 @@ def main():
                     added.append(row); remaining -= 1; progress = True
         return added
 
-    # Every stage below only spends whatever budget (cap - len(picks)) remains, so the sample never
-    # exceeds `cap` regardless of source/label cardinality. Per-label coverage goes FIRST, with the
-    # full cap as its budget — that's the guarantee --label-field exists to make (every distinct label
-    # represented whenever label-count <= cap), so it gets first claim rather than being squeezed out
-    # by the other (lower-stakes) risk strata.
+    # Every stage below only spends whatever budget remains, so the sample never exceeds `cap`
+    # regardless of source/label cardinality. Per-label coverage goes FIRST — that's the guarantee
+    # --label-field exists to make (every distinct label represented whenever label-count <= cap), so
+    # its one-per-group claim always gets first call on the budget. But its PROPORTIONAL LEFTOVER FILL
+    # (beyond that one-per-group minimum) is capped via fair_share_budget so a single majority-class
+    # group can't silently absorb the whole cap and starve the risk strata below (the incident this
+    # fixes: a large unsplit group kept the label pass's round-robin fill going until `remaining` hit
+    # 0, so `picks` was already at `cap` before the risk-strata loop ran a single iteration).
     picks = set()
     if a.label_field:
-        picks.update(allocate_coverage(group_by(a.label_field), cap - len(picks), picks, "label"))
-    for stratum in (order[: a.sample_k], order[-a.sample_k:], near_cap[: a.sample_k],
-                    open_think[: a.sample_k], parse_errs[: a.sample_k], empties[: a.sample_k]):
+        label_groups = group_by(a.label_field)
+        label_budget = fair_share_budget(len(label_groups), cap - len(picks))
+        picks.update(allocate_coverage(label_groups, label_budget, picks, "label"))
+    risk_strata = [
+        ("shortest", order[: a.sample_k]), ("longest", order[-a.sample_k:]),
+        ("near_cap", near_cap[: a.sample_k]), ("open_think", open_think[: a.sample_k]),
+        ("parse_err", parse_errs[: a.sample_k]), ("empty", empties[: a.sample_k]),
+    ]
+    for name, stratum in risk_strata:
         for i in stratum:
             if len(picks) >= cap:
                 break
             picks.add(i)
-    picks.update(allocate_coverage(group_by(a.source_field), cap - len(picks), picks, "source"))
+        if stratum and not any(i in picks for i in stratum):
+            rep["warnings"].append(
+                f"{len(stratum)} candidate {name} rows exist but 0 made it into the sample "
+                f"(cap={cap} already spent by earlier strata): {name} risk-stratum coverage is PARTIAL"
+            )
+    # Unlike the label pass above, this one is NOT gated behind `if a.label_field` — `--source-field`
+    # defaults to "source" and this pass runs on every invocation. So capping its leftover fill via
+    # fair_share_budget changes sampling composition (occasionally count too, when the spread pass's
+    # fixed-step candidate list can't backfill the gap) even when --label-field is never passed. That's
+    # deliberate — issue #570 asked for the same cap here "if cheap", independent of --label-field — not
+    # a violation of the "no behavior change without --label-field" guarantee, which only ever covered
+    # the separately-gated label pass.
+    source_groups = group_by(a.source_field)
+    source_budget = fair_share_budget(len(source_groups), cap - len(picks))
+    picks.update(allocate_coverage(source_groups, source_budget, picks, "source"))
     step = max(1, n // a.sample_k)
     spread = [i for i in range(0, n, step) if i not in picks]
     picks.update(spread[: max(0, cap - len(picks))])
