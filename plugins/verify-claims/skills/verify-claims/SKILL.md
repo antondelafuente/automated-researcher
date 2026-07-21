@@ -100,7 +100,22 @@ runner audits with Claude (`( cd <exp> && claude -p ) > "$OUT_TMP"`). `AUDIT_VER
 override honored only when it is a DIFFERENT family than the runner, and it MUST run in the experiment dir
 and write its final answer to `"$OUT_TMP"`; a same-family value — e.g. an instance `BASH_ENV` that re-injects
 `AUDIT_VERIFIER_CMD` into every non-interactive shell (#262) — is ignored with a warning and the
-opposite-family default is used.
+opposite-family default is used. `audit_experiment.sh` also unsets
+`BASH_ENV` for its own subshells/eval/external processes as soon as it starts (#373, defense-in-depth): the
+same `~/.env` re-injection can't clobber a caller's override a second time inside a child bash the script
+spawns — this does not by itself fix #262's re-injection into the script's own top-level invocation, which
+still needs the documented `BASH_ENV=` workaround.
+
+**Built-in codex auditor quota fallback (#373).** If the built-in codex auditor's ChatGPT-subscription
+transport fails with a usage-limit error (matched via `AUDIT_QUOTA_ERROR_PATTERN`, default `usage limit`),
+`audit_experiment.sh` retries via an ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --with-api-key`,
+fed `OPENAI_API_KEY` over stdin so it never appears in the process argument list — `-c
+preferred_auth_method=apikey` alone does not switch auth in codex 0.144, and `--api-key VALUE` is not a
+supported flag).
+This moves the audit onto API billing (~$2-5/audit) instead of the free ChatGPT transport, so it always
+announces the switch loudly in stderr/the run log — never silently — and only fires for the built-in codex
+default, never for an `AUDIT_VERIFIER_CMD` override (the caller owns that command's own retry policy). With
+no `OPENAI_API_KEY` set, the run BLOCKs with a message naming the missing key rather than retrying blindly.
 
 **Wired into the experiment lifecycle:** `--design` at the design stage (the `design-experiment`
 skill), `--data` + close at execution (the `run-experiment` skill) — each via the experiment
