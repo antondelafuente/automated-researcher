@@ -26,7 +26,22 @@ Optional: stage an identity bundle at `<remote>/gpu-job/bundle.tar` (e.g. agent 
    **pod lease** (see *The pod lease + the standing reaper* below) so an abandoned pod can be reaped
    without you; note the `LEASE_NONCE` and pass it to teardown.
 2. **Bootstrap:** scp + run `scripts/bootstrap_pod.sh` on the pod (configures rclone from
-   your injected config; restores the optional bundle).
+   your injected config; restores the optional bundle). It also persists every `PASS_ENV` var
+   for LATER ssh sessions (#341 — a fresh `ssh pod 'cmd'` inherits NONE of the container's
+   injected env, so a launch script that reads `$TINKER_API_KEY`/`$HF_TOKEN`/etc straight from its
+   own env finds nothing): to `/etc/environment` on a root pod (inherited automatically, no
+   per-script convention to forget) and to `/workspace/.env` as the fallback everywhere else — `source
+   /workspace/.env` (or `job_lib.sh`'s `env_get`) at the top of any launch script that needs one of
+   these vars and can't rely on `/etc/environment`. Values are single-quote-escaped on write (a value
+   containing shell metacharacters is a literal string when sourced, never executed, and
+   `env_get` decodes the same escaping back to the original value) and both `/workspace/.env` and
+   `/etc/environment` are chmod 600 since they now carry secrets. Re-running bootstrap replaces a
+   changed value in place rather than keeping the first one persisted. `/etc/environment` is parsed
+   by PAM, not a shell, and PAM's format has no escape syntax at all — a value with characters
+   outside the bare-safe class (`A-Za-z0-9_.:/@+=,-`) is persisted only to `/workspace/.env` (read
+   via `source` or `env_get`), never to `/etc/environment`. If root-only permissions (`chmod 600`)
+   can't be established on a destination file, persistence to that destination is skipped loudly
+   rather than writing secrets to a possibly-readable file.
 3. **Run detached:** `scripts/run_remote.sh <port> root@<ip> <job.sh> /root/job.log [ENV=V…]`
    — survives SSH close, verifies the job actually started (a "launched" echo proves the
    wrapper ran, not the job). Write the job script to be idempotent and to print progress.
