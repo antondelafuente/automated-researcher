@@ -246,6 +246,13 @@ def main():
                 f"{len(stratum)} candidate {name} rows exist but 0 made it into the sample "
                 f"(cap={cap} already spent by earlier strata): {name} risk-stratum coverage is PARTIAL"
             )
+    # Unlike the label pass above, this one is NOT gated behind `if a.label_field` — `--source-field`
+    # defaults to "source" and this pass runs on every invocation. So capping its leftover fill via
+    # fair_share_budget changes sampling composition (occasionally count too, when the spread pass's
+    # fixed-step candidate list can't backfill the gap) even when --label-field is never passed. That's
+    # deliberate — issue #570 asked for the same cap here "if cheap", independent of --label-field — not
+    # a violation of the "no behavior change without --label-field" guarantee, which only ever covered
+    # the separately-gated label pass.
     source_groups = group_by(a.source_field)
     source_budget = fair_share_budget(len(source_groups), cap - len(picks))
     picks.update(allocate_coverage(source_groups, source_budget, picks, "source"))
