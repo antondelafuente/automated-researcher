@@ -1,10 +1,13 @@
 #!/bin/bash
 # cross_family_verifier_smoke.sh — deterministic, offline guard for audit_experiment.sh's cross-family
 # auditor selection. Covers #262 (a same-family / BASH_ENV-injected AUDIT_VERIFIER_CMD must NOT run
-# same-family and must NOT dead-end) and #239 (the claude built-in default must redirect to $OUT_TMP).
+# same-family and must NOT dead-end), #239 (the claude built-in default must redirect to $OUT_TMP), and
+# #373 (executable-token family-sniffing, BASH_ENV sanitized for this script's own subshells, and the
+# built-in codex auditor's apikey-CODEX_HOME quota fallback).
 # Uses the AUDIT_PRINT_VERIFIER seam: prints the chosen auditor + verifier command, invokes no model.
 # Each case scrubs env (env -u BASH_ENV/AUDIT_VERIFIER_CMD/AAR_SUBSTRATE) so the instance BASH_ENV that
-# re-injects AUDIT_VERIFIER_CMD cannot make the test non-hermetic.
+# re-injects AUDIT_VERIFIER_CMD cannot make the test non-hermetic. Cases (h)-(j) instead run the REAL
+# run/retry path against a fake `codex` on PATH (never a real model call) to cover #373's quota fallback.
 set -uo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 AE="$HERE/audit_experiment.sh"
@@ -85,5 +88,90 @@ else
 fi
 rm -f "$EXP/DESIGN.md" "$EXP/DESIGN_AUDIT.md" "$EXP/DESIGN_AUDIT2.md"
 
-[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-e)" >&2
+# (f) #373 — the real incident: a codex override whose command line contains a literal claude-lookalike
+#     scratch path (e.g. a /tmp/claude-1000/... working dir) must be classified by its EXECUTABLE token
+#     ("codex"), not misclassified same-family by a substring match over the whole command string.
+if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='codex exec --sandbox read-only --cd "/tmp/claude-1000/wd" -o "$OUT_TMP"'); then
+  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$'   || err "(f) codex override with a claude-lookalike path was not classified codex: $out"
+  echo "$out" | grep -q -- '/tmp/claude-1000/wd'   || err "(f) opposite-family override not honored verbatim: $out"
+else
+  err "(f) codex override with a claude-lookalike path BLOCKED instead of being honored"
+fi
+
+# (g) #373 — defense-in-depth: this script must unset BASH_ENV for its own subshells/eval/external
+#     processes, so an instance ~/.env that re-injects AUDIT_VERIFIER_CMD via BASH_ENV cannot clobber a
+#     caller override a second time inside any child bash this script spawns.
+BENV_FILE=$(mktemp "${TMPDIR:-/tmp}/cfvsmoke_bashenv.XXXXXX") || { echo "  SMOKE-FAIL: mktemp failed" >&2; exit 1; }
+if out=$(env -u AUDIT_VERIFIER_CMD BASH_ENV="$BENV_FILE" AUDIT_PRINT_VERIFIER=1 AAR_SUBSTRATE=claude bash "$AE" "$EXP" 2>/dev/null); then
+  echo "$out" | grep -q '^BASH_ENV=<unset>$' || err "(g) BASH_ENV not sanitized for this script's own subshells: $out"
+else
+  err "(g) BASH_ENV-set run failed unexpectedly"
+fi
+rm -f "$BENV_FILE"
+
+# (h)-(j) #373 — the built-in codex auditor's apikey-CODEX_HOME quota fallback. A fake `codex` on PATH
+#     drives the real run/retry path (never a real model call): "exec" fails with a usage-limit error
+#     unless CODEX_HOME/auth.json exists, and "login --api-key" (the actual fallback mechanism, since
+#     `-c preferred_auth_method=apikey` alone does not switch auth in codex 0.144) writes it.
+FAKEBIN=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_fakebin.XXXXXX") || { echo "  SMOKE-FAIL: mktemp failed" >&2; exit 1; }
+cat > "$FAKEBIN/codex" <<'FAKE_CODEX'
+#!/bin/bash
+case "${1:-}" in
+  login)
+    mkdir -p "${CODEX_HOME:?}"
+    printf '{"OPENAI_API_KEY":"%s"}\n' "${3:-fake}" > "$CODEX_HOME/auth.json"
+    exit 0 ;;
+  exec)
+    shift; out=""
+    while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2 ;; *) shift ;; esac; done
+    if [ -n "${CODEX_HOME:-}" ] && [ -s "$CODEX_HOME/auth.json" ]; then
+      printf 'FINDING 1: LOW [test]\n  issue: fake\n  evidence: fake: "x"\n  recommendation: fake\nSUMMARY: high=0 med=0 low=1\n' > "$out"
+      exit 0
+    fi
+    case "${FAKE_CODEX_FAILURE:-quota}" in
+      quota)   echo "Error: You've hit your usage limit. Try again later." >&2 ;;
+      generic) echo "Error: boom, something unrelated broke." >&2 ;;
+    esac
+    exit 1 ;;
+  *) exit 1 ;;
+esac
+FAKE_CODEX
+chmod +x "$FAKEBIN/codex"
+
+# (h) usage-limit failure + OPENAI_API_KEY set: retries via the apikey CODEX_HOME and succeeds, having
+#     announced the billing switch loudly (never silently).
+H_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_h.XXXXXX")
+: > "$H_EXP/RESULTS.md"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key AAR_SUBSTRATE=claude bash "$AE" "$H_EXP" 2>&1); then
+  [ -s "$H_EXP/AUDIT.md" ]                        || err "(h) quota fallback did not produce $H_EXP/AUDIT.md: $out"
+  grep -q 'FINDING 1' "$H_EXP/AUDIT.md" 2>/dev/null || err "(h) AUDIT.md missing the fallback run's content"
+  echo "$out" | grep -qi 'API-BILLED'              || err "(h) fallback did not announce the billing switch loudly: $out"
+else
+  err "(h) quota fallback did not succeed: $out"
+fi
+rm -rf "$H_EXP"
+
+# (i) same usage-limit failure with NO OPENAI_API_KEY: BLOCKED with the specific no-key message, never
+#     silently retried and never left to a generic/confusing failure.
+I_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_i.XXXXXX")
+: > "$I_EXP/RESULTS.md"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD -u OPENAI_API_KEY PATH="$FAKEBIN:$PATH" AAR_SUBSTRATE=claude bash "$AE" "$I_EXP" 2>&1); then
+  err "(i) usage-limit failure with no OPENAI_API_KEY did not block: $out"
+else
+  echo "$out" | grep -qi 'no OPENAI_API_KEY' || err "(i) block message did not name the missing OPENAI_API_KEY: $out"
+fi
+rm -rf "$I_EXP"
+
+# (j) a NON-quota codex failure must NOT trigger the apikey fallback — never spend API billing on an
+#     unrelated failure.
+J_EXP=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_j.XXXXXX")
+: > "$J_EXP/RESULTS.md"
+if out=$(env -u BASH_ENV -u AUDIT_VERIFIER_CMD PATH="$FAKEBIN:$PATH" OPENAI_API_KEY=fake-key FAKE_CODEX_FAILURE=generic AAR_SUBSTRATE=claude bash "$AE" "$J_EXP" 2>&1); then
+  err "(j) non-quota failure did not block: $out"
+else
+  echo "$out" | grep -qi 'API-BILLED' && err "(j) non-quota failure incorrectly triggered the apikey fallback: $out"
+fi
+rm -rf "$J_EXP" "$FAKEBIN"
+
+[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-j)" >&2
 exit "$fail"

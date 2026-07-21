@@ -64,9 +64,22 @@
 #                                  wrong default can't make the audit same-family; auditor = opposite family)
 #      AUDIT_VERIFIER_CMD=...      (OVERRIDE the auditor; honored only if a DIFFERENT family than the runner,
 #                                  and it MUST write its final answer to "$OUT_TMP" — see the built-in defaults.
-#                                  A same-family value is ignored (warn) + the opposite-family default is used.)
+#                                  A same-family value is ignored (warn) + the opposite-family default is used.
+#                                  Family is sniffed from the command's EXECUTABLE token(s), not the whole
+#                                  string — #373: a substring match over the full command previously let a
+#                                  literal data/path token like /tmp/claude-1000/... false-positive as claude.)
 #      AUDIT_CONSTITUTION=path     (the standards file; default ~/AGENTS.md)
+#      AUDIT_QUOTA_ERROR_PATTERN=  (case-insensitive grep pattern identifying a usage-limit failure from the
+#                                  built-in codex auditor's ChatGPT transport; default 'usage limit' — #373.)
+#      OPENAI_API_KEY=...          (used ONLY for the #373 apikey CODEX_HOME quota fallback below; unrelated
+#                                  to AAR_SUBSTRATE/AUDIT_VERIFIER_CMD selection.)
 set -euo pipefail
+# Defense-in-depth against #262 (an instance ~/.env exporting AUDIT_VERIFIER_CMD, re-injected into every
+# non-interactive shell via BASH_ENV): unset BASH_ENV as soon as THIS script starts so it is never inherited
+# by any subshell/eval/external process it spawns below, and a re-source of that ~/.env can't clobber a
+# caller-supplied override a second time mid-run. This does not fix #262's re-injection into this script's
+# OWN top-level invocation (out of scope here — that still needs the documented `BASH_ENV=` workaround).
+unset BASH_ENV
 MODE=close
 if [ "${1:-}" = "--design" ]; then MODE=design; shift;
 elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
@@ -106,6 +119,30 @@ case "$RUNNER_FAMILY" in
      echo "  default to a family and risk a silent same-family audit." >&2
      exit 1 ;;
 esac
+# override_exec_tokens: extract the EXECUTABLE-position token(s) of a shell command line — the leading
+# word of each simple command (segments split on the operators/groupers below), with leading VAR=value
+# env-assignment prefixes stripped and any directory component removed (basename) — one per line. #373: a
+# literal data/path substring elsewhere in the line (e.g. a scratch dir named /tmp/claude-1000/...) is a
+# much longer whole token than "claude" and never equal-matches it, whereas the old whole-string glob
+# (*claude*) matched that substring anywhere and misclassified an otherwise-codex override as same-family.
+override_exec_tokens(){
+  local rest=$1 seg tok
+  rest=${rest//&&/$'\n'}; rest=${rest//'||'/$'\n'}; rest=${rest//;/$'\n'}; rest=${rest//|/$'\n'}
+  rest=${rest//(/$'\n'};  rest=${rest//)/$'\n'};     rest=${rest//\{/$'\n'}; rest=${rest//\}/$'\n'}
+  while IFS= read -r seg; do
+    seg="${seg#"${seg%%[![:space:]]*}"}"
+    [ -n "$seg" ] || continue
+    while [[ $seg =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]* ]]; do
+      seg="${seg#"${BASH_REMATCH[0]}"}"
+      seg="${seg#"${seg%%[![:space:]]*}"}"
+      [ -n "$seg" ] || break
+    done
+    [ -n "$seg" ] || continue
+    tok="${seg%%[[:space:]]*}"
+    tok="${tok%\"}"; tok="${tok#\"}"; tok="${tok%\'}"; tok="${tok#\'}"
+    printf '%s\n' "${tok##*/}"
+  done <<<"$rest"
+}
 # AUDIT_VERIFIER_CMD is an OVERRIDE, honored ONLY when a DIFFERENT family than the runner. A same-family
 # value — a misconfig, or an instance BASH_ENV re-injecting AUDIT_VERIFIER_CMD into every shell (#262) — is
 # IGNORED (warn) and the opposite-family built-in default is used, so the audit can never silently run
@@ -113,9 +150,13 @@ esac
 # trusted as a deliberate third-family escape hatch (it can never equal the runner family).
 VERIFIER_OVERRIDE=""
 if [ -n "${AUDIT_VERIFIER_CMD:-}" ]; then
-  case "$AUDIT_VERIFIER_CMD" in
-    *claude*) OVERRIDE_FAMILY=claude ;; *codex*) OVERRIDE_FAMILY=codex ;; *) OVERRIDE_FAMILY=custom ;;
-  esac
+  OVERRIDE_FAMILY=custom
+  while IFS= read -r tok; do
+    case "$tok" in
+      claude) OVERRIDE_FAMILY=claude; break ;;
+      codex)  OVERRIDE_FAMILY=codex ;;
+    esac
+  done < <(override_exec_tokens "$AUDIT_VERIFIER_CMD")
   if [ "$OVERRIDE_FAMILY" = "$RUNNER_FAMILY" ]; then
     echo "[audit_experiment] WARN: ignoring same-family AUDIT_VERIFIER_CMD (family=$OVERRIDE_FAMILY == runner)" >&2
     echo "  — likely a misconfig or an instance BASH_ENV re-injection (#262); using the built-in $AUDITOR_FAMILY auditor." >&2
@@ -380,17 +421,51 @@ run_verifier(){
     override) eval "$VERIFIER_OVERRIDE" ;;
   esac
 }
+# codex_apikey_fallback: retries the built-in codex auditor via an ephemeral, apikey-authenticated
+# CODEX_HOME after the ChatGPT-transport run hit a usage-limit error (2026-07-10 incident, #373: the
+# built-in codex auditor hit its ChatGPT usage limit mid-close with no billing fallback). `codex login
+# --api-key` (not `-c preferred_auth_method=apikey` alone — that does NOT switch auth in codex 0.144)
+# writes real credentials into the ephemeral CODEX_HOME so the retry authenticates via OPENAI_API_KEY
+# instead of the ChatGPT subscription. Loud by construction (never a silent switch): this moves the audit
+# onto API billing (~$2-5/audit in the incident) before anything is retried, and again if it fails.
+codex_apikey_fallback(){
+  if [ -z "${OPENAI_API_KEY:-}" ]; then
+    echo "BLOCKED: built-in codex auditor hit a usage-limit error and no OPENAI_API_KEY is set for the" >&2
+    echo "  apikey CODEX_HOME fallback (#373) — last lines of $OUT.run.log:" >&2
+    tail -5 "$OUT.run.log" >&2
+    return 1
+  fi
+  echo "[audit_experiment] WARN: built-in codex auditor hit a usage-limit error — retrying via an" >&2
+  echo "  ephemeral apikey CODEX_HOME. This run is now API-BILLED (~\$2-5/audit, #373), NOT the free" >&2
+  echo "  ChatGPT-subscription transport." >&2
+  local home; home=$(mktemp -d "${TMPDIR:-/tmp}/audit_codex_home.XXXXXX")
+  if CODEX_HOME="$home" codex login --api-key "$OPENAI_API_KEY" >>"$OUT.run.log" 2>&1 \
+     && CODEX_HOME="$home" codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" <<< "$PROMPT" >>"$OUT.run.log" 2>&1
+  then
+    rm -rf "$home"; return 0
+  fi
+  rm -rf "$home"
+  echo "BLOCKED: apikey CODEX_HOME fallback also failed (#373) — last lines of $OUT.run.log:" >&2
+  tail -5 "$OUT.run.log" >&2
+  return 1
+}
 # Testability seam: print the resolved cross-family selection without invoking a model (mirrors
-# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Cleans up.
+# AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Also prints
+# BASH_ENV so the smoke can assert #373's sanitize-for-own-subshells fix. Cleans up.
 if [ -n "${AUDIT_PRINT_VERIFIER:-}" ]; then
-  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\nDESIGN_FILE=%s\n' \
-    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT" "$OUT_TMP" "$VERIFIER_CMD" "${DESIGN_FILE:-}"
+  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\nDESIGN_FILE=%s\nBASH_ENV=%s\n' \
+    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT" "$OUT_TMP" "$VERIFIER_CMD" "${DESIGN_FILE:-}" "${BASH_ENV:-<unset>}"
   rm -f "$OUT_TMP"; exit 0
 fi
 echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2
 if ! run_verifier <<< "$PROMPT" >"$OUT.run.log" 2>&1; then
-  echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
-  rm -f "$OUT_TMP"; exit 1; fi
+  if [ "$VERIFIER_KIND" = codex ] && grep -qiE "${AUDIT_QUOTA_ERROR_PATTERN:-usage limit}" "$OUT.run.log"; then
+    codex_apikey_fallback || { rm -f "$OUT_TMP"; exit 1; }
+  else
+    echo "BLOCKED: auditor run failed — last lines of $OUT.run.log:" >&2; tail -5 "$OUT.run.log" >&2
+    rm -f "$OUT_TMP"; exit 1
+  fi
+fi
 [ -s "$OUT_TMP" ] || { echo "BLOCKED: auditor produced no findings file (stale $OUT NOT reused)" >&2; rm -f "$OUT_TMP"; exit 1; }
 mv "$OUT_TMP" "$OUT"
 echo "[audit_experiment] findings -> $OUT" >&2

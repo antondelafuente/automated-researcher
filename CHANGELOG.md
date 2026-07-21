@@ -11,6 +11,21 @@
   unchanged), and the report gains a `dup_field` key plus the field name in its dup-count warning.
   Whole-row uniqueness remains the default and is still the right check for other data shapes (e.g.
   training-set dedup).
+- verify-claims 0.7.22 (2026-07-21): `audit_experiment.sh` gets three #373 fixes from the 2026-07-10
+  csp1-scrub-ladder-1 close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery
+  needed three undocumented moves). (1) The built-in codex auditor now retries a usage-limit failure via an
+  ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --api-key` against `OPENAI_API_KEY` — `-c
+  preferred_auth_method=apikey` alone does not switch auth in codex 0.144), announcing the switch to
+  API billing (~$2-5/audit) loudly in stderr/the run log rather than silently; with no `OPENAI_API_KEY` set
+  it BLOCKs naming the missing key instead of retrying blindly. (2) `AUDIT_VERIFIER_CMD`'s cross-family guard
+  now sniffs the override's family from its command's EXECUTABLE token(s) instead of a substring match over
+  the whole string, so a literal data/path substring (e.g. a scratch dir named `/tmp/claude-1000/...`) can no
+  longer false-positive the same-family guard and silently fall back to a quota-exhausted built-in auditor.
+  (3) The script now unsets `BASH_ENV` for its own subshells/eval/external processes as soon as it starts —
+  defense-in-depth so an instance `~/.env` that re-injects `AUDIT_VERIFIER_CMD` via `BASH_ENV` (#262) can't
+  clobber a caller's override a second time inside a child bash the script spawns (#262's own re-injection
+  into the script's own top-level invocation is unchanged, still needing the documented `BASH_ENV=`
+  workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(j) covering all three.
 - verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
   explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
   next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after
