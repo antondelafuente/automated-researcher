@@ -33,28 +33,39 @@ _shell_quote(){ # _shell_quote <value> — bash-single-quote-safe iff VALUE cont
   esac
 }
 
-_persist_kv(){ # _persist_kv <file> <name> <name=value line> — append <line> to <file>, first
-               # dropping any existing `^name=` line so a stale value from an earlier
-               # bootstrap/experiment can't shadow the CURRENT PASS_ENV value (code-review
-               # Finding: the old grep -q-guarded append only ever wrote a name's FIRST value —
-               # a reused <file>, e.g. one that outlives pod teardown on a mounted persistent
-               # volume, or a plain repeated bootstrap on the same pod, kept the OLD credential
-               # forever instead of picking up a rotated one). The rewrite is an in-memory capture
-               # + truncate-in-place on <file> itself — never a `.tmp.$$` sibling — so no on-disk
-               # intermediate ever exists holding the OTHER surviving secrets at a world-readable
-               # mode, <file>'s own permission bits (e.g. the chmod 600 below) survive since nothing
-               # but <file> is ever written, and nothing is left orphaned if the script dies
-               # mid-rewrite (code-review Finding: a bare `> "${file}.tmp.$$"` redirect created that
-               # temp file at the process's default umask — 644 under the common 022 — exposing
-               # every other persisted secret during each replacement, and it stayed on disk on a
-               # crash). `|| rest=""` matters: `grep -v` exits 1 when every line matched, which
-               # would trip `set -e`; a plain variable is safe here since these are small KV files
-               # and a value containing a newline is already rejected upstream.
-  local file=$1 name=$2 line=$3 rest
+_drop_kv(){ # _drop_kv <file> <name> — remove any existing `^name=` line from <file>, in-memory
+            # capture + truncate-in-place (never a `.tmp.$$` sibling — see _persist_kv's header for
+            # why), so <file>'s own permission bits survive since nothing but <file> is ever
+            # written. Used both by _persist_kv (to drop a stale value before writing the current
+            # one) and directly by every skip path below: the invariant this establishes is that a
+            # file never serves a value for a name that is no longer that name's CURRENT PASS_ENV
+            # value — a skip is a skip everywhere, not a silent fallback to a stale credential
+            # (code-review Finding, round 4: rotating a bare-safe value to a PAM-unsafe one left the
+            # OLD value active in /etc/environment forever, since only the workspace file's entry
+            # was ever replaced on that path). `|| rest=""` matters: `grep -v` exits 1 when every
+            # line matched, which would trip `set -e`; a plain variable is safe here since these are
+            # small KV files and a value containing a newline is already rejected upstream.
+  local file=$1 name=$2 rest
   if [ -e "$file" ] && grep -q "^${name}=" "$file" 2>/dev/null; then
     rest=$(grep -v "^${name}=" "$file") || rest=""
     if [ -n "$rest" ]; then printf '%s\n' "$rest" > "$file"; else : > "$file"; fi
   fi
+}
+
+_persist_kv(){ # _persist_kv <file> <name> <name=value line> — replace any existing `^name=` line in
+               # <file> with <line> (via _drop_kv, so a stale value from an earlier
+               # bootstrap/experiment can't shadow the CURRENT PASS_ENV value — code-review Finding:
+               # the old grep -q-guarded append only ever wrote a name's FIRST value, so a reused
+               # <file>, e.g. one that outlives pod teardown on a mounted persistent volume, or a
+               # plain repeated bootstrap on the same pod, kept the OLD credential forever instead of
+               # picking up a rotated one). _drop_kv's in-memory rewrite means no on-disk
+               # intermediate ever exists holding the OTHER surviving secrets at a world-readable
+               # mode, and nothing is left orphaned if the script dies mid-rewrite (code-review
+               # Finding: a bare `> "${file}.tmp.$$"` redirect created that temp file at the
+               # process's default umask — 644 under the common 022 — exposing every other persisted
+               # secret during each replacement, and it stayed on disk on a crash).
+  local file=$1 name=$2 line=$3
+  _drop_kv "$file" "$name"
   # Ensure a separating newline before the append: appending directly onto a file whose last byte
   # isn't a newline concatenates onto the previous line instead of starting a new one (code-review
   # Finding: a file ending `OLD=x` with no trailing newline became `OLD=xNEW_SECRET=value` on
@@ -96,11 +107,26 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
   [ -n "$names" ] || return 0
   mkdir -p "$(dirname "$workspace_env")"
   [ -e "$workspace_env" ] || : > "$workspace_env"
-  chmod 600 "$workspace_env" 2>/dev/null || true
+  # Fail closed (AGENTS.md's scale principle: "trust gates stay fail-closed") rather than silently
+  # persisting secrets into a file whose mode we couldn't lock down (code-review Finding: a
+  # pre-existing root-owned, caller-writable-but-not-chmod-able file let `chmod 600 ... || true`
+  # swallow the failure and a secret land in a world-readable file). On RunPod's stock images both
+  # chmods succeed, so this costs nothing in the case #341 was filed for.
+  if ! chmod 600 "$workspace_env" 2>/dev/null; then
+    echo "[bootstrap] cannot chmod 600 $workspace_env; refusing to persist PASS_ENV values there" >&2
+    workspace_env=""
+  fi
   if [ "$is_root" = 1 ]; then
     mkdir -p "$(dirname "$etc_env")"
     [ -e "$etc_env" ] || : > "$etc_env"
-    chmod 600 "$etc_env" 2>/dev/null || true
+    if ! chmod 600 "$etc_env" 2>/dev/null; then
+      echo "[bootstrap] cannot chmod 600 $etc_env; skipping /etc/environment persistence" >&2
+      is_root=0
+    fi
+  fi
+  if [ -z "$workspace_env" ] && [ "$is_root" != 1 ]; then
+    echo "[bootstrap] no destination with enforceable root-only permissions; PASS_ENV vars not persisted" >&2
+    return 0
   fi
   old_ifs=$IFS; IFS=','
   for name in $names; do
@@ -117,15 +143,23 @@ _persist_passed_env(){ # _persist_passed_env <environ-file> [workspace-env=/work
     case "$val" in
       *$'\n'*)
         echo "[bootstrap] skipping PASS_ENV var $name: value contains a newline, cannot persist as a single KV line" >&2
+        # A skip is a skip everywhere: drop any STALE entry from an earlier bootstrap rather than
+        # leaving it looking current (code-review Finding, round 4 — same family as the PAM-unsafe
+        # skip below).
+        if [ -n "$workspace_env" ]; then _drop_kv "$workspace_env" "$name"; fi
+        if [ "$is_root" = 1 ]; then _drop_kv "$etc_env" "$name"; fi
         continue ;;
     esac
     qval=$(_shell_quote "$val")
-    _persist_kv "$workspace_env" "$name" "${name}=${qval}"
+    if [ -n "$workspace_env" ]; then _persist_kv "$workspace_env" "$name" "${name}=${qval}"; fi
     if [ "$is_root" = 1 ]; then
       if [ "$qval" = "$val" ]; then
         _persist_kv "$etc_env" "$name" "${name}=${val}"
       else
         echo "[bootstrap] $name: value contains characters /etc/environment (PAM, no escape syntax) cannot represent; persisted to /workspace/.env only" >&2
+        # Drop any STALE bare-safe entry a prior run left here — /etc/environment must never keep
+        # serving an old value once the CURRENT value can no longer be represented there.
+        _drop_kv "$etc_env" "$name"
       fi
     fi
   done

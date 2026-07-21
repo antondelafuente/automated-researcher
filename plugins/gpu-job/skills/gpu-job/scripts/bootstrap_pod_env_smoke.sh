@@ -162,4 +162,38 @@ if grep -qx 'NEW_SECRET=value' "$WS14"; then ok new-var-not-swallowed-by-missing
   [ "$got" = "value" ]
 ) && ok new-var-readable-via-env_get-after-noeol-preexisting-file || no "new-var-readable-via-env_get-after-noeol-preexisting-file"
 
+
+# --- 15. rotating a bare-safe value to a PAM-unsafe one drops the STALE /etc/environment entry
+#     entirely, instead of leaving the old credential active there ------------------------------------
+ENV15a="$TMP/environ15a"; ENV15b="$TMP/environ15b"
+fake_environ "$ENV15a" "PASSED_ENV_NAMES=TOKEN" "TOKEN=old"
+fake_environ "$ENV15b" "PASSED_ENV_NAMES=TOKEN" "TOKEN=new value"
+WS15="$TMP/ws15/.env"; ETC15="$TMP/etc15/environment"
+_persist_passed_env "$ENV15a" "$WS15" "$ETC15" 1
+_persist_passed_env "$ENV15b" "$WS15" "$ETC15" 1
+if grep -q '^TOKEN=' "$ETC15" 2>/dev/null; then no "rotate-bare-to-unsafe-must-drop-stale-etc-entry ($(cat "$ETC15"))"; else ok rotate-bare-to-unsafe-must-drop-stale-etc-entry; fi
+if grep -qx "TOKEN='new value'" "$WS15"; then ok rotate-bare-to-unsafe-workspace-has-new-value; else no "rotate-bare-to-unsafe-workspace-has-new-value ($(cat "$WS15"))"; fi
+
+# --- 16. rotating a persisted value to one containing a newline drops the STALE entry in BOTH files,
+#     rather than leaving the old credential active while the new one is (correctly) skipped ----------
+ENV16a="$TMP/environ16a"; ENV16b="$TMP/environ16b"
+fake_environ "$ENV16a" "PASSED_ENV_NAMES=TOKEN" "TOKEN=old"
+fake_environ "$ENV16b" $'PASSED_ENV_NAMES=TOKEN' $'TOKEN=new\nline'
+WS16="$TMP/ws16/.env"; ETC16="$TMP/etc16/environment"
+_persist_passed_env "$ENV16a" "$WS16" "$ETC16" 1
+_persist_passed_env "$ENV16b" "$WS16" "$ETC16" 1
+if grep -q '^TOKEN=' "$WS16" 2>/dev/null; then no "rotate-to-newline-must-drop-stale-workspace-entry ($(cat "$WS16"))"; else ok rotate-to-newline-must-drop-stale-workspace-entry; fi
+if grep -q '^TOKEN=' "$ETC16" 2>/dev/null; then no "rotate-to-newline-must-drop-stale-etc-entry ($(cat "$ETC16"))"; else ok rotate-to-newline-must-drop-stale-etc-entry; fi
+
+# --- 17. persistence fails closed when chmod 600 cannot be established: the secret must not land in
+#     either file, and root-only permissions must not be silently assumed ------------------------------
+ENV17="$TMP/environ17"
+fake_environ "$ENV17" "PASSED_ENV_NAMES=SECRET" "SECRET=tk-supersecret"
+WS17="$TMP/ws17/.env"; ETC17="$TMP/etc17/environment"
+chmod(){ return 1; }
+_persist_passed_env "$ENV17" "$WS17" "$ETC17" 1
+unset -f chmod
+if grep -q 'tk-supersecret' "$WS17" 2>/dev/null; then no "chmod-fail-must-not-persist-to-workspace-env ($(cat "$WS17"))"; else ok chmod-fail-must-not-persist-to-workspace-env; fi
+if grep -q 'tk-supersecret' "$ETC17" 2>/dev/null; then no "chmod-fail-must-not-persist-to-etc-environment ($(cat "$ETC17"))"; else ok chmod-fail-must-not-persist-to-etc-environment; fi
+
 [ "$fails" = 0 ] && { echo "PASS bootstrap_pod_env_smoke"; exit 0; } || { echo "FAIL bootstrap_pod_env_smoke"; exit 1; }
