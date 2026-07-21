@@ -14,7 +14,7 @@
 - verify-claims 0.7.22 (2026-07-21): `audit_experiment.sh` gets three #373 fixes from the 2026-07-10
   csp1-scrub-ladder-1 close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery
   needed three undocumented moves). (1) The built-in codex auditor now retries a usage-limit failure via an
-  ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --api-key` against `OPENAI_API_KEY` — `-c
+  ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --with-api-key` against `OPENAI_API_KEY` — `-c
   preferred_auth_method=apikey` alone does not switch auth in codex 0.144), announcing the switch to
   API billing (~$2-5/audit) loudly in stderr/the run log rather than silently; with no `OPENAI_API_KEY` set
   it BLOCKs naming the missing key instead of retrying blindly. (2) `AUDIT_VERIFIER_CMD`'s cross-family guard
@@ -26,6 +26,18 @@
   clobber a caller's override a second time inside a child bash the script spawns (#262's own re-injection
   into the script's own top-level invocation is unchanged, still needing the documented `BASH_ENV=`
   workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(j) covering all three.
+- verify-claims 0.7.23 (2026-07-21): two #373 review-round-1 fixes on top of 0.7.22. (1) The quota-fallback
+  auditor login was `codex login --api-key VALUE`, a flag codex-cli 0.144 does not support (always failing,
+  masked only because the offline smoke's fake `codex` implemented the nonexistent flag) and which put
+  `OPENAI_API_KEY` on the process argument list (`ps`-visible); it now runs `codex login --with-api-key`
+  with the key piped over stdin, matching the real CLI's supported interface and never exposing the secret
+  via argv. (2) The executable-token family-sniffer only inspected each shell segment's first token, so an
+  `AUDIT_VERIFIER_CMD` wrapped in a passthrough command — `env claude -p ...` or `command claude -p ...` —
+  was classified `custom` instead of `claude`/`codex` and honored unchecked even when it matched the
+  runner's own family, regressing the cross-family guarantee for that shape. `override_exec_tokens` now
+  strips a leading `env`/`command` wrapper (looping to also strip any `VAR=value` prefixes it introduces)
+  before reading the executable token. `cross_family_verifier_smoke.sh` gains case (k) for the wrapper
+  regression; case (h)'s fake `codex` now requires `--with-api-key` and reads the key from stdin.
 - verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
   explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
   next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after

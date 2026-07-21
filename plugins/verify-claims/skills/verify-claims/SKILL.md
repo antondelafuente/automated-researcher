@@ -110,8 +110,10 @@ still needs the documented `BASH_ENV=` workaround.
 
 **Built-in codex auditor quota fallback (#373).** If the built-in codex auditor's ChatGPT-subscription
 transport fails with a usage-limit error (matched via `AUDIT_QUOTA_ERROR_PATTERN`, default `usage limit`),
-`audit_experiment.sh` retries via an ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --api-key`
-against `OPENAI_API_KEY` — `-c preferred_auth_method=apikey` alone does not switch auth in codex 0.144).
+`audit_experiment.sh` retries via an ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --with-api-key`,
+fed `OPENAI_API_KEY` over stdin so it never appears in the process argument list — `-c
+preferred_auth_method=apikey` alone does not switch auth in codex 0.144, and `--api-key VALUE` is not a
+supported flag).
 This moves the audit onto API billing (~$2-5/audit) instead of the free ChatGPT transport, so it always
 announces the switch loudly in stderr/the run log — never silently — and only fires for the built-in codex
 default, never for an `AUDIT_VERIFIER_CMD` override (the caller owns that command's own retry policy). With

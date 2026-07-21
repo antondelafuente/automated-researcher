@@ -111,15 +111,18 @@ rm -f "$BENV_FILE"
 
 # (h)-(j) #373 — the built-in codex auditor's apikey-CODEX_HOME quota fallback. A fake `codex` on PATH
 #     drives the real run/retry path (never a real model call): "exec" fails with a usage-limit error
-#     unless CODEX_HOME/auth.json exists, and "login --api-key" (the actual fallback mechanism, since
-#     `-c preferred_auth_method=apikey` alone does not switch auth in codex 0.144) writes it.
+#     unless CODEX_HOME/auth.json exists, and "login --with-api-key" (the actual fallback mechanism, since
+#     `-c preferred_auth_method=apikey` alone does not switch auth in codex 0.144, and `--api-key VALUE` is
+#     not a supported flag) reads the key over STDIN — never argv, so it can't leak via `ps` — and writes it.
 FAKEBIN=$(mktemp -d "${TMPDIR:-/tmp}/cfvsmoke_fakebin.XXXXXX") || { echo "  SMOKE-FAIL: mktemp failed" >&2; exit 1; }
 cat > "$FAKEBIN/codex" <<'FAKE_CODEX'
 #!/bin/bash
 case "${1:-}" in
   login)
+    [ "${2:-}" = --with-api-key ] || exit 1
     mkdir -p "${CODEX_HOME:?}"
-    printf '{"OPENAI_API_KEY":"%s"}\n' "${3:-fake}" > "$CODEX_HOME/auth.json"
+    key=$(cat)
+    printf '{"OPENAI_API_KEY":"%s"}\n' "${key:-fake}" > "$CODEX_HOME/auth.json"
     exit 0 ;;
   exec)
     shift; out=""
@@ -173,5 +176,21 @@ else
 fi
 rm -rf "$J_EXP" "$FAKEBIN"
 
-[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-j)" >&2
+# (k) #373 review round 1 — a same-family override wrapped in a passthrough command (`env`/`command`) must
+#     still be sniffed by its REAL executable, not stop at the wrapper and fall through to 'custom' (which
+#     would honor it unchecked, defeating the cross-family guarantee). Same self-correcting behavior as (a).
+if out=$(seam AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD='env claude -p > "$OUT_TMP"'); then
+  echo "$out" | grep -q '^AUDITOR_FAMILY=codex$' || err "(k) env-wrapped same-family override was not self-corrected to codex auditor: $out"
+  echo "$out" | grep -q 'codex exec'            || err "(k) env-wrapped same-family override did not fall back to the codex default: $out"
+else
+  err "(k) env-wrapped same-family override BLOCKED instead of self-correcting"
+fi
+if out=$(seam AAR_SUBSTRATE=codex AUDIT_VERIFIER_CMD='command codex exec --sandbox read-only -o "$OUT_TMP"'); then
+  echo "$out" | grep -q '^AUDITOR_FAMILY=claude$' || err "(k) command-wrapped same-family override was not self-corrected to claude auditor: $out"
+  echo "$out" | grep -q 'claude -p'              || err "(k) command-wrapped same-family override did not fall back to the claude default: $out"
+else
+  err "(k) command-wrapped same-family override BLOCKED instead of self-correcting"
+fi
+
+[ "$fail" = 0 ] && echo "  ok: cross_family_verifier smoke (a-k)" >&2
 exit "$fail"

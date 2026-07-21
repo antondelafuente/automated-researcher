@@ -121,26 +121,39 @@ case "$RUNNER_FAMILY" in
 esac
 # override_exec_tokens: extract the EXECUTABLE-position token(s) of a shell command line — the leading
 # word of each simple command (segments split on the operators/groupers below), with leading VAR=value
-# env-assignment prefixes stripped and any directory component removed (basename) — one per line. #373: a
-# literal data/path substring elsewhere in the line (e.g. a scratch dir named /tmp/claude-1000/...) is a
-# much longer whole token than "claude" and never equal-matches it, whereas the old whole-string glob
+# env-assignment prefixes AND same-family-preserving wrapper commands (env/command — #373 review round 1:
+# `env claude -p ...` or `command claude -p ...` must still sniff as claude/codex, not stop at the wrapper
+# and fall through to 'custom') stripped, and any directory component removed (basename) — one per line.
+# #373: a literal data/path substring elsewhere in the line (e.g. a scratch dir named /tmp/claude-1000/...)
+# is a much longer whole token than "claude" and never equal-matches it, whereas the old whole-string glob
 # (*claude*) matched that substring anywhere and misclassified an otherwise-codex override as same-family.
 override_exec_tokens(){
-  local rest=$1 seg tok
+  local rest=$1 seg rawtok tok
   rest=${rest//&&/$'\n'}; rest=${rest//'||'/$'\n'}; rest=${rest//;/$'\n'}; rest=${rest//|/$'\n'}
   rest=${rest//(/$'\n'};  rest=${rest//)/$'\n'};     rest=${rest//\{/$'\n'}; rest=${rest//\}/$'\n'}
   while IFS= read -r seg; do
     seg="${seg#"${seg%%[![:space:]]*}"}"
     [ -n "$seg" ] || continue
-    while [[ $seg =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]* ]]; do
-      seg="${seg#"${BASH_REMATCH[0]}"}"
-      seg="${seg#"${seg%%[![:space:]]*}"}"
+    while :; do
+      while [[ $seg =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]* ]]; do
+        seg="${seg#"${BASH_REMATCH[0]}"}"
+        seg="${seg#"${seg%%[![:space:]]*}"}"
+        [ -n "$seg" ] || break
+      done
       [ -n "$seg" ] || break
+      rawtok="${seg%%[[:space:]]*}"
+      tok="${rawtok%\"}"; tok="${tok#\"}"; tok="${tok%\'}"; tok="${tok#\'}"
+      tok="${tok##*/}"
+      case "$tok" in
+        env|command)
+          seg="${seg#"$rawtok"}"
+          seg="${seg#"${seg%%[![:space:]]*}"}"
+          continue ;;
+      esac
+      break
     done
     [ -n "$seg" ] || continue
-    tok="${seg%%[[:space:]]*}"
-    tok="${tok%\"}"; tok="${tok#\"}"; tok="${tok%\'}"; tok="${tok#\'}"
-    printf '%s\n' "${tok##*/}"
+    printf '%s\n' "$tok"
   done <<<"$rest"
 }
 # AUDIT_VERIFIER_CMD is an OVERRIDE, honored ONLY when a DIFFERENT family than the runner. A same-family
@@ -424,10 +437,12 @@ run_verifier(){
 # codex_apikey_fallback: retries the built-in codex auditor via an ephemeral, apikey-authenticated
 # CODEX_HOME after the ChatGPT-transport run hit a usage-limit error (2026-07-10 incident, #373: the
 # built-in codex auditor hit its ChatGPT usage limit mid-close with no billing fallback). `codex login
-# --api-key` (not `-c preferred_auth_method=apikey` alone — that does NOT switch auth in codex 0.144)
-# writes real credentials into the ephemeral CODEX_HOME so the retry authenticates via OPENAI_API_KEY
-# instead of the ChatGPT subscription. Loud by construction (never a silent switch): this moves the audit
-# onto API billing (~$2-5/audit in the incident) before anything is retried, and again if it fails.
+# --with-api-key` (not `-c preferred_auth_method=apikey` alone — that does NOT switch auth in codex 0.144;
+# and not `--api-key VALUE`, which codex-cli 0.144 does not support) writes real credentials into the
+# ephemeral CODEX_HOME so the retry authenticates via OPENAI_API_KEY instead of the ChatGPT subscription.
+# The key is piped via stdin, never as a CLI argument, so it never appears in the process argument list
+# (`ps`) — #373 review round 1. Loud by construction (never a silent switch): this moves the audit onto
+# API billing (~$2-5/audit in the incident) before anything is retried, and again if it fails.
 codex_apikey_fallback(){
   if [ -z "${OPENAI_API_KEY:-}" ]; then
     echo "BLOCKED: built-in codex auditor hit a usage-limit error and no OPENAI_API_KEY is set for the" >&2
@@ -439,7 +454,7 @@ codex_apikey_fallback(){
   echo "  ephemeral apikey CODEX_HOME. This run is now API-BILLED (~\$2-5/audit, #373), NOT the free" >&2
   echo "  ChatGPT-subscription transport." >&2
   local home; home=$(mktemp -d "${TMPDIR:-/tmp}/audit_codex_home.XXXXXX")
-  if CODEX_HOME="$home" codex login --api-key "$OPENAI_API_KEY" >>"$OUT.run.log" 2>&1 \
+  if CODEX_HOME="$home" codex login --with-api-key >>"$OUT.run.log" 2>&1 <<< "$OPENAI_API_KEY" \
      && CODEX_HOME="$home" codex exec --sandbox read-only --skip-git-repo-check --cd "$EXP" -o "$OUT_TMP" <<< "$PROMPT" >>"$OUT.run.log" 2>&1
   then
     rm -rf "$home"; return 0
