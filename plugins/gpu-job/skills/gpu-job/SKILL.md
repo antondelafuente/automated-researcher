@@ -78,6 +78,10 @@ in the store **once** and pull from there:
 - **Pod-side, in the job:** `source job_lib.sh; pull_model <remote-path> <local-dir>` waits
   for the manifest, pulls, and **verifies count + bytes against it** — a pod that starts
   before staging finished, or gets a partial pull, dies on a loud gate, never a short read.
+- **Gotcha:** a silent, zero-progress stall pulling from HF on a fresh pod is not a flaky
+  network — check `hf-xet` first (#442). `bootstrap_pod.sh` and `stage_model.sh` already
+  default `HF_HUB_DISABLE_XET=1`; for any other direct `huggingface_hub`/`hf`/`huggingface-cli`
+  call, set it yourself.
 
 ## Scoring several LoRA adapters on one pod (use the helper — do NOT hand-roll)
 
