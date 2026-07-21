@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
-# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
+# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]...
 #   --skip-ignored proceeds WITHOUT the flagged gitignored files (acknowledge-and-exclude) — it never
 #   force-includes them into the commit.
+#   --only <path> (repeatable) restricts the staged set to exactly the named path(s), each given relative to
+#   <registry-dir>. Use this when <registry-dir> is a SHARED, multi-tenant tree (e.g. a viewer dashboard dir
+#   several sessions write into) so a co-tenant session's untracked files never sweep into YOUR PR (#374) —
+#   without --only, staging is dir-scoped (the whole tree). Applied at staging time (stage_worktree), so
+#   every existing staged-set gate (check_ignored_files/symlink_scan/secret_scan) automatically runs against
+#   this reduced set — none of them need their own --only awareness. Fail-closed: a named path that does not
+#   exist under <registry-dir>, or an allowlist that ends up staging nothing, dies — it never silently falls
+#   back to staging the whole dir. A named path is never symlink-resolved (#586 review): the allowlist stages
+#   exactly the path you name, even if it is itself a symlink — a staged symlink then wholesale-BLOCKs via
+#   symlink_scan same as any other, rather than silently substituting a co-tenant's file at the symlink's
+#   target. Restricted to a dir that classifies as KIND=note (the dashboard use case always does): the
+#   experiment/design-stage gates read their audit/design evidence straight from <registry-dir>, not the
+#   allowlisted staged set, so --only on those KINDs is refused rather than risk approving evidence that
+#   never actually gets committed.
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -125,16 +139,20 @@ fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
-DRY_RUN=0; SKIP_IGNORED=0; DIR=""
-for a in "$@"; do
-  case "$a" in
-    --dry-run) DRY_RUN=1 ;;
-    --skip-ignored) SKIP_IGNORED=1 ;;
-    -*) die "unknown flag: $a" ;;
-    *) DIR="$a" ;;
+DRY_RUN=0; SKIP_IGNORED=0; DIR=""; declare -a ONLY_PATHS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --skip-ignored) SKIP_IGNORED=1; shift ;;
+    --only)
+      [ "$#" -ge 2 ] || die "--only requires a <path> argument"
+      ONLY_PATHS+=("$2")
+      shift 2 ;;
+    -*) die "unknown flag: $1" ;;
+    *) DIR="$1"; shift ;;
   esac
 done
-[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]"
+[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]..."
 [ -d "$DIR" ] || die "not a directory: $DIR"
 DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
@@ -142,6 +160,39 @@ REPO_ROOT="$(cd "$DIR" && git rev-parse --show-toplevel 2>/dev/null)" || die "no
 REL="$(cd "$REPO_ROOT" && realpath --relative-to="$REPO_ROOT" "$DIR")"
 [ "${REL#..}" = "$REL" ] || die "dir is outside the repo root"
 SLUG="$(basename "$REL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
+
+# ---- --only allowlist (#374): resolve + validate each named path against $DIR, then build STAGE_PATHS —
+# the exact set later staged (stage_worktree) and gitignore-checked (check_ignored_files) against. Doing
+# this once, up front, means both of those (and, transitively, symlink_scan/secret_scan, which scan
+# whatever ends up staged) automatically operate on the reduced set with no --only-awareness of their own.
+# Validated INLINE, not via a helper called through command substitution: `die` calls `exit`, and `exit`
+# inside a function invoked as `$(fn ...)` only terminates that subshell, not the script — a die swallowed
+# that way would silently fall through to an empty ONLY_REL entry instead of failing closed.
+declare -a ONLY_REL=() STAGE_PATHS=()
+for _op in "${ONLY_PATHS[@]}"; do
+  case "$_op" in
+    /*) die "--only path must be relative to the registry dir, not absolute: $_op" ;;
+  esac
+  [ -e "$DIR/$_op" ] || die "--only path does not exist under $DIR: $_op"
+  # realpath resolution runs INSIDE the `cd`'d subshell (no die there — see comment above); only its exit
+  # status, checked here outside the subshell, decides pass/fail. `-s`/`--no-symlinks` is DELIBERATE (#586
+  # review): plain `realpath --relative-to` resolves symlinks to their CANONICAL target, so `--only mine.py`
+  # where `mine.py` is a symlink to a co-tenant's `cotenant.py` would silently rewrite the allowlist entry to
+  # `cotenant.py` — staging and scanning the co-tenant's file under a name the caller never asked for, exactly
+  # the sweep-in this flag exists to prevent. `-s` still lexically normalizes `.`/`..`/repeated `/` (so the
+  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone; if `_op` (or a
+  # path component) is a symlink, it stages as a symlink verbatim, and symlink_scan (which runs on every KIND
+  # right after stage_worktree) then wholesale-BLOCKs it same as any other staged symlink.
+  _rel="$(cd "$DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
+  [ "${_rel#..}" = "$_rel" ] || die "--only path escapes the registry dir: $_op"
+  ONLY_REL+=("$_rel")
+done
+if [ "${#ONLY_REL[@]}" -gt 0 ]; then
+  for _r in "${ONLY_REL[@]}"; do STAGE_PATHS+=("$REL/$_r"); done
+  note "--only: staging restricted to ${#ONLY_REL[@]} path(s) under $REL: ${ONLY_REL[*]}"
+else
+  STAGE_PATHS=("$REL")
+fi
 
 # ---- classify (registry convention; KIND file is an explicit override) ----
 KIND=""
@@ -152,6 +203,18 @@ if [ -z "$KIND" ]; then
   else                                                              KIND="note"; fi       # everything else: secret scan
 fi
 note "classified: $KIND  ($REL)"
+
+# --only is restricted to KIND=note (#374 review): gate_experiment/gate_design_stage validate close-audit /
+# design-audit / Presentation-lock evidence by reading RESULTS.md/AUDIT.md/AUDIT_RESPONSE.md/DESIGN.md/
+# DESIGN_AUDIT*.md/START.md straight from $DIR, NOT from STAGE_PATHS — so an --only allowlist that leaves
+# those files out of the staged set would let the gate verify evidence that never actually lands in the
+# commit/PR, while the approval body still claims it did. gate_note reads no evidentiary file at all (secret
+# scan runs on the staged set only), so it's the only KIND where narrowing the staged set can't create that
+# gap — and it's also the actual reported use case (a shared multi-tenant dashboard dir has no DESIGN.md/
+# RESULTS.md, so it always classifies as 'note').
+if [ "${#ONLY_REL[@]}" -gt 0 ] && [ "$KIND" != "note" ]; then
+  die "--only is only supported for KIND=note — this dir classified as '$KIND', whose gate reads audit/design evidence directly from $DIR rather than the staged set, so an --only allowlist could approve/merge a record whose cited evidence was never actually committed; log the whole dir (drop --only), or split the allowlisted content into its own single-owner registry dir"
+fi
 
 # A close-audit triage/response section, recognized in EITHER form (#263): a separate AUDIT_RESPONSE.md, OR a
 # response section appended INLINE in AUDIT.md (a markdown heading whose text mentions 'respons…'/'triage' —
@@ -346,16 +409,36 @@ is_trivial_ignore() {
 # that still claims the file landed is not, and that flag must never wave a committed-claim through. The real
 # escape on a false positive is per the die message below — fix the ignore rule or reword the offending prose
 # line, then retry.
+#
+# #467: a basename+commit-claim match alone false-positives when the SAME basename legitimately exists TWICE
+# under $REL by design — once committed outside work/, once as a gitignored working copy under work/ (the
+# run-experiment R2-mirrored dual-copy layout, close-audit F1 fix). The manifest's claim is then plausibly
+# about the STAGED committed copy, not this excluded one. Before dying, check whether a file with this same
+# basename IS present in THIS run's own staged set (`git diff --cached` under $REL, already computed by the
+# caller's stage_worktree) — if so, downgrade to a printed note instead of a die. Preserves the #331 fail-
+# closed behavior EXACTLY when no staged counterpart shares the basename (the original scenario: a doc claims
+# committed, the file is staged nowhere) — that path still has no --skip-ignored escape.
 check_excluded_claim() {
-  local claim_file bn hit f
+  local claim_file bn hit f staged_path is_staged
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   local -r NEGATION_RE=' not |n'"'"'t '
+  local -a staged_paths=()
+  while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
+    < <(git -C "$WT" diff --cached -z --name-only -- "$REL")
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
     for f in "$@"; do
       bn="$(basename "$f")"
       if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE")"; then
-        die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        is_staged=0
+        for staged_path in "${staged_paths[@]}"; do
+          [ "$(basename "$staged_path")" = "$bn" ] && { is_staged=1; break; }
+        done
+        if [ "$is_staged" = 1 ]; then
+          note "excluded file '$f' shares a basename with a file that IS staged under $REL — treating $(basename "$claim_file")'s commit-claim as referring to that staged counterpart, not this excluded copy: $hit"
+        else
+          die "excluded file '$f' is not staged (an ignore rule matched) but $(basename "$claim_file") claims it is committed — fix the ignore rule or the prose before logging: $hit"
+        fi
       fi
     done
   done
@@ -378,7 +461,7 @@ check_ignored_files() {
   while IFS= read -r -d '' path; do
     is_trivial_ignore "$path" && continue
     hits+=("$path")
-  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "$REL")
+  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "${STAGE_PATHS[@]}")
   [ "${#hits[@]}" -eq 0 ] && return 0
   note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
   printf '  %s\n' "${hits[@]}" >&2
@@ -398,11 +481,25 @@ stage_worktree() {
   CREATED_BRANCH=1
   mkdir -p "$WT/$(dirname "$REL")"
   cp -r "$DIR" "$WT/$(dirname "$REL")/"
-  git -C "$WT" add -- "$REL"                          # respects the BASE tree's .gitignore (large artifacts stay on R2)
+  # STAGE_PATHS is "$REL" (the whole dir) unless --only narrowed it (#374) — either way this `git add` also
+  # respects the BASE tree's .gitignore (large artifacts stay on R2). Anything under $DIR NOT named by
+  # STAGE_PATHS was copied into $WT above (for a possible sibling reference) but is never `git add`-ed, so it
+  # can never be staged/committed/pushed — it is discarded with the rest of $WT on cleanup.
+  # `|| true`: unlike adding a whole directory (which silently SKIPS any ignored entry inside it, exit 0),
+  # `git add` given an EXPLICITLY-named ignored pathspec (only reachable via --only) still adds every OTHER
+  # named path but exits 1 for the ignored one — under `set -e` that would kill the script here, before
+  # check_ignored_files (next line) gets to run its own, better-messaged detection of exactly this drop.
+  git -C "$WT" add -- "${STAGE_PATHS[@]}" || true
   check_ignored_files                                 # #340: BLOCK on a non-trivial file the .gitignore silently dropped
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
-  if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
+  if git -C "$WT" diff --cached --quiet; then
+    if [ "${#ONLY_REL[@]}" -gt 0 ]; then
+      die "nothing to commit for $REL --only ${ONLY_REL[*]} (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"
+    else
+      die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"
+    fi
+  fi
 }
 
 if [ "$DRY_RUN" = 1 ]; then

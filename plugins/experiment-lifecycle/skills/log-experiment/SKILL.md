@@ -35,12 +35,26 @@ does **not** source `wf.sh`. (Why here: logging/auditing experiments is a resear
 ## How
 
 ```bash
-scripts/log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
+scripts/log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]...
 ```
 
 That one command does everything: classify → gate → branch (in a dedicated worktree) → PR → cross-family
 bot approval → squash-merge → sync local `main`. `--dry-run` classifies and gates, then stops before any push.
 `--skip-ignored` acknowledges the ignored-file guard below and proceeds past it.
+
+`--only <path>` (repeatable, each path relative to `<registry-dir>`) restricts the staged set to exactly the
+named path(s) — use this when `<registry-dir>` is a SHARED, multi-tenant tree (e.g. a viewer `dashboard/` dir
+several sessions write into) so a co-tenant session's untracked files never sweep into YOUR PR (#374); without
+it, staging is dir-scoped (the whole tree). It's applied at staging time, so every existing staged-set gate
+(the ignored-file guard, the symlink check, the secret scan, all below) automatically runs against the
+narrowed set with no `--only`-awareness of their own. Fail-closed: a named path that doesn't exist under
+`<registry-dir>`, is absolute, escapes the dir via `../`, or ends up staging nothing (e.g. unchanged vs base),
+dies — it never silently falls back to staging the whole dir; a named path that is itself a symlink is never
+resolved to its target, so it stages (and then symlink-scan-BLOCKs) as the symlink you named, not a co-tenant
+file it happens to point at. Only supported when `<registry-dir>` classifies as **note** — the
+experiment/design-stage gates read their audit/design evidence straight from the dir itself, not the
+allowlisted staged set, so narrowing there is refused rather than risk approving evidence that never actually
+lands in the commit.
 
 The driver **classifies by the registry convention** (no label needed):
 

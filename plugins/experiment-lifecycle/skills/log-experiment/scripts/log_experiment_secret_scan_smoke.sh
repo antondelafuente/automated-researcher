@@ -39,6 +39,24 @@
 # does not false-positive block either — and a claim about a file inside a WHOLLY-ignored directory (not just
 # an individually-ignored file) is still caught, since `ls-files` enumerates every file under an ignored
 # directory individually rather than collapsing it to one directory entry the way `git status` does.
+# #467: also covers check_excluded_claim's precision fix for the run-experiment scripts/ vs work/scripts/
+# dual-copy layout — a commit-claim match downgrades to a printed note (not a BLOCK) when a file sharing the
+# excluded file's basename IS staged elsewhere in the dir, while the original #331 scenario (no staged
+# counterpart at all) still BLOCKs exactly as before.
+#
+# #374: also covers the `--only <path>` allowlist — a co-tenant's file left OUT of the allowlist is never
+# staged and so never scanned/blocked by secret_scan or the #340 ignored-file guard, even when it sits right
+# alongside the allowlisted file(s) in the same shared registry dir; a nonexistent or escaping (`/abs`,
+# `../`) --only path BLOCKs (fail-closed — never silently falls back to staging the whole dir); an allowlist
+# that stages nothing (the named file is unchanged vs base) BLOCKs on nothing-to-commit same as the
+# unscoped case; and a --only path that is itself gitignored is still caught by the #340 guard (the
+# allowlist narrows scope, it does not disable the existing gates). Also covers a review-round hardening:
+# --only is refused outright for a dir that classifies as KIND != note (e.g. design-stage/experiment),
+# since those gates read their audit/design evidence straight from $DIR rather than the allowlisted staged
+# set — narrowing there could approve/merge a record whose cited evidence never actually gets committed.
+# Also covers a further review-round hardening: a --only path that is itself a symlink is staged (and then
+# symlink-scan-BLOCKed) as the named symlink, never resolved to its canonical target — the target-resolving
+# behavior would otherwise silently stage/scan a co-tenant's file under a name the caller never asked for.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -344,6 +362,132 @@ printf '# Design\n\n## Presentation (locked with the researcher 2026-99-99)\nDet
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design"; then fail "malformed calendar date (2026-99-99) was NOT blocked"; else
   case "$LAST_ERR" in *"no locked Presentation section"*) pass "malformed calendar date blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+# #374: --only allowlist — restricts the staged set (and, transitively, check_ignored_files/secret_scan/
+# symlink_scan, which all scan whatever ends up staged) to exactly the named path(s), so a co-tenant
+# session's untracked files under a SHARED multi-tenant registry dir never sweep into this PR.
+
+echo "[smoke] case 27: --only names one clean new file; a co-tenant's file with a real secret sits alongside it -> PASS (the co-tenant file is never staged, so it is never scanned)"
+T=$(mktemp_d); make_repo "$T"
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+if run_dry "$T/reg/note" --only mine.md; then pass "--only stages just the named file; the co-tenant's secret file alongside it is never scanned"; else
+  fail "--only mine.md was BLOCKED despite the co-tenant secret file being outside the allowlist: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 28: repeated --only flags name two files; a co-tenant's secret file is left out -> PASS"
+T=$(mktemp_d); make_repo "$T"
+printf 'file a\n' > "$T/reg/note/a.md"
+printf 'file b\n' > "$T/reg/note/b.md"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+if run_dry "$T/reg/note" --only a.md --only b.md; then pass "repeated --only flags stage exactly the two named files"; else
+  fail "--only a.md --only b.md was BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 29: --only names a path that does not exist under the registry dir -> BLOCK (fail closed, never falls back to the whole dir)"
+T=$(mktemp_d); make_repo "$T"
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+if run_dry "$T/reg/note" --only missing.md; then fail "--only missing.md was NOT blocked"; else
+  case "$LAST_ERR" in *"--only path does not exist under"*) pass "nonexistent --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 30: --only given an absolute path -> BLOCK"
+T=$(mktemp_d); make_repo "$T"
+if run_dry "$T/reg/note" --only /etc/passwd; then fail "--only with an absolute path was NOT blocked"; else
+  case "$LAST_ERR" in *"must be relative to the registry dir, not absolute"*) pass "absolute --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 31: --only escapes the registry dir via '../' to a real file OUTSIDE it -> BLOCK (existence alone is not enough; containment is also checked)"
+T=$(mktemp_d); make_repo "$T"
+mkdir -p "$T/reg/sibling"
+printf 'not mine\n' > "$T/reg/sibling/file.txt"
+if run_dry "$T/reg/note" --only ../sibling/file.txt; then fail "--only escaping via '../' to a real file was NOT blocked"; else
+  case "$LAST_ERR" in *"escapes the registry dir"*) pass "'../'-escaping --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 32: --only names the one file changed, but it is UNCHANGED vs base -> BLOCK on nothing-to-commit (never silently stages the whole dir instead)"
+T=$(mktemp_d); make_repo "$T"   # page.html is already committed on origin/main, unchanged
+if run_dry "$T/reg/note" --only page.html; then fail "--only on an unchanged file did NOT refuse (should be nothing to commit)"; else
+  case "$LAST_ERR" in *"nothing to commit"*"--only"*) pass "--only on an unchanged file refuses on nothing-to-commit";;
+    *) fail "failed but not on the expected nothing-to-commit message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 33: --only names a clean file; a co-tenant's GITIGNORED file sits alongside it -> PASS (the ignored-file guard is scoped to the allowlist too, not just the secret scan)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+printf '{"not": "mine"}\n' > "$T/reg/note/cotenant.jsonl"
+if run_dry "$T/reg/note" --only mine.md; then pass "--only scopes the gitignored-file guard too — a co-tenant's ignored file elsewhere in the dir does not block"; else
+  fail "--only mine.md was BLOCKED by a co-tenant's unrelated gitignored file: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 34: --only names a file that is itself GITIGNORED -> still BLOCK (the guard still catches an allowlisted path that silently failed to stage)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
+printf '{"in": "battery"}\n' > "$T/reg/note/mine.jsonl"
+if run_dry "$T/reg/note" --only mine.jsonl; then fail "--only on a gitignored path was NOT blocked (#340 guard should still apply within the allowlist)"; else
+  case "$LAST_ERR" in *"gitignored file"*"mine.jsonl"*) pass "gitignored --only path still caught by the ignored-file guard";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 35: --only against a design-stage dir (KIND != note) -> BLOCK (review finding: gate_design_stage/gate_experiment read their audit evidence from \$DIR, not the --only-narrowed staged set, so narrowing there could approve a record whose cited evidence never lands in the commit)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$T/reg/design/DESIGN.md"
+printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
+if run_dry "$T/reg/design" --only DESIGN.md; then fail "--only on a design-stage dir was NOT blocked"; else
+  case "$LAST_ERR" in *"--only is only supported for KIND=note"*) pass "--only on a design-stage dir refused";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 36: --only names a path that is itself a SYMLINK to a co-tenant's secret file -> BLOCK on the staged symlink itself, NOT on the co-tenant's secret content (#586 review: --only must not resolve a named symlink to its canonical target, which would silently stage/scan the co-tenant's file under a name the caller never asked for)"
+T=$(mktemp_d); make_repo "$T"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+ln -s cotenant_secret.md "$T/reg/note/mine.py"
+if run_dry "$T/reg/note" --only mine.py; then fail "--only on a symlink to a co-tenant's file was NOT blocked"; else
+  case "$LAST_ERR" in
+    *"staged symlink"*) pass "--only stages the named symlink as-is; symlink_scan blocks it (co-tenant target never substituted in)";;
+    *"secret-value pattern"*) fail "REGRESSION: --only resolved the symlink to its target and staged/scanned the co-tenant's file instead of the named symlink: $LAST_ERR";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+# #467: check_excluded_claim's basename+commit-claim match false-positived when the SAME basename legitimately
+# exists TWICE by design — once committed outside work/, once as a gitignored working copy under work/ (the
+# run-experiment R2-mirrored dual-copy layout). Downgrade to a note ONLY when a same-basename file IS staged.
+
+echo "[smoke] case 37: RESULTS.md claims a gitignored file is committed, a SAME-BASENAME file IS staged elsewhere under the dir (the run-experiment scripts/ vs work/scripts/ dual-copy layout), WITH --skip-ignored -> PASS with a downgrade note, not a BLOCK (#467; --skip-ignored still needed to acknowledge the #340 exclusion itself — only the #331 commit-claim die is downgraded)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/work/'
+mkdir -p "$T/reg/note/scripts" "$T/reg/note/work/scripts"
+printf 'print("hi")\n' > "$T/reg/note/scripts/foo.py"        # committed copy — new, stages fine
+printf 'print("hi")\n' > "$T/reg/note/work/scripts/foo.py"   # gitignored working copy, same basename
+printf 'foo.py is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note" --skip-ignored; then
+  case "$LAST_ERR" in *"shares a basename with a file that IS staged"*"foo.py"*) pass "commit-claim downgraded to a note when a same-basename file is staged elsewhere";;
+    *) fail "passed but the expected downgrade note was not printed: $LAST_ERR";; esac
+else fail "dual-copy layout with a staged same-basename counterpart was BLOCKED (regression): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 37b: same dual-copy layout as case 37, but WITHOUT --skip-ignored -> BLOCK on the #340 exclusion itself (the commit-claim die is downgraded, but the general gitignored-file guard still requires explicit acknowledgment)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/work/'
+mkdir -p "$T/reg/note/scripts" "$T/reg/note/work/scripts"
+printf 'print("hi")\n' > "$T/reg/note/scripts/foo.py"
+printf 'print("hi")\n' > "$T/reg/note/work/scripts/foo.py"
+printf 'foo.py is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "gitignored file(s) present with no --skip-ignored did NOT block (#340 guard should still require acknowledgment)"; else
+  case "$LAST_ERR" in
+    *"shares a basename with a file that IS staged"*"foo.py"*"gitignored file(s) excluded from the staged commit"*) pass "commit-claim downgraded to a note, but the #340 guard still blocks without --skip-ignored";;
+    *"claims it is committed"*) fail "REGRESSION: the commit-claim die still fired despite a staged same-basename counterpart: $LAST_ERR";;
+    *) fail "blocked but not on the expected #340 message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 38: RESULTS.md claims a gitignored file is committed, and NO same-basename file is staged anywhere -> still BLOCK (the original #331 scenario; fail-closed preserved)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
+printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
+if run_dry "$T/reg/note"; then fail "false 'committed' claim with no staged counterpart was NOT blocked (#467 must not weaken the #331 fail-closed path)"; else
+  case "$LAST_ERR" in *"excluded file"*"rollout_samples.jsonl"*"claims it is committed"*) pass "no staged counterpart -> still blocks exactly as before";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 

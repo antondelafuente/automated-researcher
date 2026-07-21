@@ -1,3 +1,9 @@
+- verify-claims 0.7.22 (2026-07-21): `audit_data.py`'s `--sample` now defaults to `<out-stem>_sample.jsonl`,
+  derived from `--out`, instead of the fixed literal `data_audit_sample.jsonl` (#521). Looping over N
+  files (the common per-arm/per-wave case) with a unique `--out` per invocation but no explicit `--sample`
+  previously made every invocation silently overwrite the same sample file, so only the last file's
+  stratified sample survived on disk. `--sample` remains a full override when explicitly passed (e.g. for
+  a shared sample path); the single-file default (`--out data_audit.json` with no `--sample`) is unchanged.
 - verify-claims 0.7.21 (2026-07-21): `audit_data.py` gains `--dup-field <field>` to check exact-
   duplicates on a single field's value (dotted path, e.g. `--dup-field response`) instead of the whole
   row, plus a runtime WARNING when it detects eval-rollout-shaped data (`id`+`sample`, or a
@@ -11,7 +17,7 @@
   unchanged), and the report gains a `dup_field` key plus the field name in its dup-count warning.
   Whole-row uniqueness remains the default and is still the right check for other data shapes (e.g.
   training-set dedup).
-- verify-claims 0.7.22 (2026-07-21): `audit_experiment.sh` gets three #373 fixes from the 2026-07-10
+- verify-claims 0.7.24 (2026-07-21): `audit_experiment.sh` gets three #373 fixes from the 2026-07-10
   csp1-scrub-ladder-1 close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery
   needed three undocumented moves). (1) The built-in codex auditor now retries a usage-limit failure via an
   ephemeral, apikey-authenticated `CODEX_HOME` (`codex login --with-api-key` against `OPENAI_API_KEY` — `-c
@@ -26,7 +32,7 @@
   clobber a caller's override a second time inside a child bash the script spawns (#262's own re-injection
   into the script's own top-level invocation is unchanged, still needing the documented `BASH_ENV=`
   workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(j) covering all three.
-- verify-claims 0.7.23 (2026-07-21): two #373 review-round-1 fixes on top of 0.7.22. (1) The quota-fallback
+- verify-claims 0.7.25 (2026-07-21): two #373 review-round-1 fixes on top of 0.7.24. (1) The quota-fallback
   auditor login was `codex login --api-key VALUE`, a flag codex-cli 0.144 does not support (always failing,
   masked only because the offline smoke's fake `codex` implemented the nonexistent flag) and which put
   `OPENAI_API_KEY` on the process argument list (`ps`-visible); it now runs `codex login --with-api-key`
