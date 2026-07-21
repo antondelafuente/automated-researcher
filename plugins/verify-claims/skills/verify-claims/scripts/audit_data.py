@@ -12,11 +12,18 @@ label/arm balance. The LLM (layer 2) reads the SAMPLE for semantics a script can
 leakage, off-distribution, mislabeling, "does this match the design intent").
 
 Usage:
-  python3 audit_data.py DATA.jsonl --out data_audit.json [--sample data_audit_sample.jsonl] \
+  python3 audit_data.py DATA.jsonl [--out data_audit.json] [--sample data_audit_sample.jsonl] \
       [--cot] [--require-finish-reason] [--source-field source] [--label-field arm] [--text-field assistant] \
       [--dup-field response] [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — --out/--sample defaults are DERIVED FROM DATA's location, not CWD: `--out` defaults to
+`<data_dir>/data_audit.json` and `--sample` defaults to `<out-stem>_sample.jsonl` in that same directory.
+Built 2026-07-21 after an incident where the old bare-literal `--out data_audit.json` default resolved
+against CWD, so running the audit from inside the skill source dir dropped run artifacts (an untracked
+report + sample) straight into live skill source, tripping the SessionStart drift guard. Pass --out
+and/or --sample explicitly to place them somewhere else.
 
 IMPORTANT — looping over N files (the common per-arm/per-wave case): `--sample` defaults to
 `<out-stem>_sample.jsonl`, DERIVED FROM `--out`, not a fixed literal — so a unique `--out` per
@@ -107,7 +114,9 @@ def assistant_text(r, field):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data")
-    ap.add_argument("--out", default="data_audit.json")
+    ap.add_argument("--out", default=None, help="audit report output path; defaults to "
+                     "'<data_dir>/data_audit.json' (derived from DATA's location, not CWD) so running "
+                     "from an unrelated CWD doesn't drop artifacts there — pass this explicitly to override")
     ap.add_argument("--sample", default=None, help="stratified-sample output path; defaults to "
                      "'<out-stem>_sample.jsonl' (derived from --out) so looping over N files with a "
                      "unique --out each also gets a unique sample by default — pass this explicitly "
@@ -126,6 +135,8 @@ def main():
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
     a = ap.parse_args()
+    if a.out is None:
+        a.out = os.path.join(os.path.dirname(a.data), "data_audit.json")
     if a.sample is None:
         a.sample = os.path.splitext(a.out)[0] + "_sample.jsonl"
 
