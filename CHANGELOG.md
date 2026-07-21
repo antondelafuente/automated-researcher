@@ -6,6 +6,24 @@
   secret scan and adds one cheap fail-closed structural check: exploration requires a `Status: EXPLORATORY`
   header in `FINDINGS.md`; dataset requires a sha256 table and an `r2://` path in `MANIFEST.md`. PR
   title/body already key off `$KIND`, so they reflect the new kinds with no separate change (#358).
+- verify-claims 0.7.27 (2026-07-21): `audit_experiment.sh` fixes from the 2026-07-10 csp1-scrub-ladder-1
+  close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery needed undocumented
+  moves), #373. (1) The built-in codex auditor now retries a usage-limit failure via an ephemeral,
+  apikey-authenticated `CODEX_HOME`: `codex login --with-api-key`, fed `OPENAI_API_KEY` over stdin so the
+  key never appears in the process argument list (`-c preferred_auth_method=apikey` alone does not switch
+  auth in codex 0.144, and `--api-key VALUE` is not a supported flag), announcing the switch to API billing
+  (~$2-5/audit) loudly in stderr/the run log rather than silently; with no `OPENAI_API_KEY` set it BLOCKs
+  naming the missing key instead of retrying blindly; the ephemeral `CODEX_HOME` is now removed via EXIT/
+  INT/TERM traps, so an interrupt mid-login/mid-exec can no longer strand API-key-authenticated credentials
+  on disk. (2) The script now unsets `BASH_ENV` for its own subshells/eval/external processes as soon as it
+  starts — defense-in-depth so an instance `~/.env` that re-injects `AUDIT_VERIFIER_CMD` via `BASH_ENV`
+  (#262) can't clobber a caller's override a second time inside a child bash the script spawns (#262's own
+  re-injection into the script's own top-level invocation is unchanged, still needing the documented
+  `BASH_ENV=` workaround). `cross_family_verifier_smoke.sh` gains cases (f)-(i) covering the BASH_ENV
+  sanitize and the quota fallback (success, missing-key block, non-quota failure). #373's second fix —
+  family-sniffing the override's EXECUTABLE token instead of a whole-string substring match — was descoped
+  to #601 after three review rounds surfaced fail-open parser bypasses on that slice; this PR keeps main's
+  whole-string classifier unchanged.
 - verify-claims 0.7.22 (2026-07-21): `audit_data.py`'s `--sample` now defaults to `<out-stem>_sample.jsonl`,
   derived from `--out`, instead of the fixed literal `data_audit_sample.jsonl` (#521). Looping over N
   files (the common per-arm/per-wave case) with a unique `--out` per invocation but no explicit `--sample`

@@ -199,10 +199,24 @@ alive_check(){ # alive_check <output-file> <staleness-min> — true iff <file> e
   [ -z "$(find "$f" -mmin +"$stale" 2>/dev/null)" ]  # empty ⇒ newer than stale-min ⇒ alive
 }
 
-env_get(){ # env_get <VAR> [file=/workspace/.env] — read VAR tolerating `export VAR=…`; dies if empty
-  local var=$1 file=${2:-/workspace/.env} val
-  val=$(grep -E "^(export )?${var}=" "$file" 2>/dev/null | tail -1 | sed 's/^export //' \
-        | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+env_get(){ # env_get <VAR> [file=/workspace/.env] — read VAR tolerating `export VAR=…`; dies if empty.
+           # Reverses bootstrap_pod.sh's `_shell_quote` single-quote wrapping (each embedded `'`
+           # encoded as `'\''`) so a PASS_ENV value containing a literal quote round-trips
+           # identically whether a script `source`s the file or reads it through here (code-review
+           # Finding: the old plain one-quote-char strip left `'\''` escape sequences in the
+           # returned value verbatim instead of decoding them back to `'`). A plain/no-special-char
+           # value, or one hand-written with a simple leading/trailing quote, is unaffected.
+  local var=$1 file=${2:-/workspace/.env} raw val esc
+  raw=$(grep -E "^(export )?${var}=" "$file" 2>/dev/null | tail -1 | sed 's/^export //' | cut -d= -f2-)
+  case "$raw" in
+    \'*\')
+      val=${raw#\'}; val=${val%\'}
+      esc="'\\\\''"
+      val=${val//$esc/\'}
+      ;;
+    \"*\") val=${raw#\"}; val=${val%\"} ;;
+    *) val=$raw ;;
+  esac
   [ -n "$val" ] || die "env_get: $var empty/missing in $file"
   printf '%s' "$val"
 }

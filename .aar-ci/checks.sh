@@ -503,4 +503,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 17. bootstrap_pod.sh PASS_ENV persistence smoke (#341): _persist_passed_env reads PID 1's environ
+#     (a fake one here) via PASSED_ENV_NAMES, writes exactly those vars to /workspace/.env (always) and
+#     /etc/environment (root only), skips names with no/empty value, is idempotent on a re-run, and is
+#     a no-op when PASSED_ENV_NAMES is absent — behavior the JSON/syntax checks can't cover. Runs when
+#     bootstrap_pod.sh, deploy_pod.py, or the smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scripts/(bootstrap_pod|bootstrap_pod_env_smoke|deploy_pod)\.(sh|py)$'; then
+  BE_SMOKE="$ROOT/plugins/gpu-job/skills/gpu-job/scripts/bootstrap_pod_env_smoke.sh"
+  if [ -f "$BE_SMOKE" ]; then
+    echo "[checks] bootstrap_pod PASS_ENV persistence smoke" >&2
+    bash "$BE_SMOKE" >&2 && ok "bootstrap_pod_env smoke" || err "bootstrap_pod_env smoke FAILED"
+  else
+    err "bootstrap_pod.sh changed but bootstrap_pod_env_smoke.sh missing — cannot verify PASS_ENV persistence"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
