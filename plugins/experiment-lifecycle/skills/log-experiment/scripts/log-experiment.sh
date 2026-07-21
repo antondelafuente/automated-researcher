@@ -9,10 +9,13 @@
 #   every existing staged-set gate (check_ignored_files/symlink_scan/secret_scan) automatically runs against
 #   this reduced set — none of them need their own --only awareness. Fail-closed: a named path that does not
 #   exist under <registry-dir>, or an allowlist that ends up staging nothing, dies — it never silently falls
-#   back to staging the whole dir. Restricted to a dir that classifies as KIND=note (the dashboard use case
-#   always does): the experiment/design-stage gates read their audit/design evidence straight from
-#   <registry-dir>, not the allowlisted staged set, so --only on those KINDs is refused rather than risk
-#   approving evidence that never actually gets committed.
+#   back to staging the whole dir. A named path is never symlink-resolved (#586 review): the allowlist stages
+#   exactly the path you name, even if it is itself a symlink — a staged symlink then wholesale-BLOCKs via
+#   symlink_scan same as any other, rather than silently substituting a co-tenant's file at the symlink's
+#   target. Restricted to a dir that classifies as KIND=note (the dashboard use case always does): the
+#   experiment/design-stage gates read their audit/design evidence straight from <registry-dir>, not the
+#   allowlisted staged set, so --only on those KINDs is refused rather than risk approving evidence that
+#   never actually gets committed.
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -172,8 +175,15 @@ for _op in "${ONLY_PATHS[@]}"; do
   esac
   [ -e "$DIR/$_op" ] || die "--only path does not exist under $DIR: $_op"
   # realpath resolution runs INSIDE the `cd`'d subshell (no die there — see comment above); only its exit
-  # status, checked here outside the subshell, decides pass/fail.
-  _rel="$(cd "$DIR" && realpath --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
+  # status, checked here outside the subshell, decides pass/fail. `-s`/`--no-symlinks` is DELIBERATE (#586
+  # review): plain `realpath --relative-to` resolves symlinks to their CANONICAL target, so `--only mine.py`
+  # where `mine.py` is a symlink to a co-tenant's `cotenant.py` would silently rewrite the allowlist entry to
+  # `cotenant.py` — staging and scanning the co-tenant's file under a name the caller never asked for, exactly
+  # the sweep-in this flag exists to prevent. `-s` still lexically normalizes `.`/`..`/repeated `/` (so the
+  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone; if `_op` (or a
+  # path component) is a symlink, it stages as a symlink verbatim, and symlink_scan (which runs on every KIND
+  # right after stage_worktree) then wholesale-BLOCKs it same as any other staged symlink.
+  _rel="$(cd "$DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
   [ "${_rel#..}" = "$_rel" ] || die "--only path escapes the registry dir: $_op"
   ONLY_REL+=("$_rel")
 done

@@ -50,6 +50,9 @@
 # --only is refused outright for a dir that classifies as KIND != note (e.g. design-stage/experiment),
 # since those gates read their audit/design evidence straight from $DIR rather than the allowlisted staged
 # set — narrowing there could approve/merge a record whose cited evidence never actually gets committed.
+# Also covers a further review-round hardening: a --only path that is itself a symlink is staged (and then
+# symlink-scan-BLOCKed) as the named symlink, never resolved to its canonical target — the target-resolving
+# behavior would otherwise silently stage/scan a co-tenant's file under a name the caller never asked for.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -432,6 +435,17 @@ printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDet
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design" --only DESIGN.md; then fail "--only on a design-stage dir was NOT blocked"; else
   case "$LAST_ERR" in *"--only is only supported for KIND=note"*) pass "--only on a design-stage dir refused";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 36: --only names a path that is itself a SYMLINK to a co-tenant's secret file -> BLOCK on the staged symlink itself, NOT on the co-tenant's secret content (#586 review: --only must not resolve a named symlink to its canonical target, which would silently stage/scan the co-tenant's file under a name the caller never asked for)"
+T=$(mktemp_d); make_repo "$T"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+ln -s cotenant_secret.md "$T/reg/note/mine.py"
+if run_dry "$T/reg/note" --only mine.py; then fail "--only on a symlink to a co-tenant's file was NOT blocked"; else
+  case "$LAST_ERR" in
+    *"staged symlink"*) pass "--only stages the named symlink as-is; symlink_scan blocks it (co-tenant target never substituted in)";;
+    *"secret-value pattern"*) fail "REGRESSION: --only resolved the symlink to its target and staged/scanned the co-tenant's file instead of the named symlink: $LAST_ERR";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
