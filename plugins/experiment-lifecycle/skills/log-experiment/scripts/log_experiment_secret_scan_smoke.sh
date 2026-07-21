@@ -81,7 +81,7 @@ make_repo() {
 # Echoes nothing; returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
 LAST_ERR=""
 run_dry() {
-  local dir="$1"; shift; local cfg; cfg="$(mktemp_d)"
+  local dir="$1"; shift; local cfg; cfg="$(mktemp_d)" || return 1
   local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
       bash "$SCRIPT" "$dir" --dry-run "$@" 2>&1)"; local rc=$?
   LAST_ERR="$out"; rm -rf "$cfg"; return $rc
