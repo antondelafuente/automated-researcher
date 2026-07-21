@@ -82,6 +82,8 @@ FP_LINE='anchor: my-agent-task-always-succeeds-in-suspicious-ways'
 # Real-looking secret VALUES (assembled so this smoke file itself stays clean of a literal secret pattern).
 REAL_SK="sk-$(printf 'a%.0s' {1..28})"                 # sk- + 28 chars, after a non-word boundary
 REAL_GHP="ghp_$(printf 'A%.0s' {1..30})"
+# A format-valid (but not a real content hash) 64-hex-character sha256-shaped digest, for dataset MANIFEST.md fixtures.
+FAKE_SHA256="$(printf '0123456789abcdef%.0s' {1..4})"
 
 # make_repo <dir>: a fresh git repo with origin/main carrying a pre-existing journal page (the FP line).
 make_repo() {
@@ -522,7 +524,7 @@ rm -rf "$T"
 
 echo "[smoke] case 41: MANIFEST.md with a sha256 table + an r2:// path, no DESIGN.md -> classifies as dataset and PASSes"
 T=$(mktemp_d); make_design_stage_repo "$T"
-printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
+printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
 if run_dry "$T/reg/design"; then
   case "$LAST_ERR" in *"classified: dataset"*) pass "MANIFEST.md classifies as dataset and the gate passes";;
     *) fail "passed but did not classify as dataset: $LAST_ERR";; esac
@@ -539,7 +541,7 @@ rm -rf "$T"
 
 echo "[smoke] case 43: MANIFEST.md with a sha256 table but no r2:// path -> BLOCK"
 T=$(mktemp_d); make_design_stage_repo "$T"
-printf '# Manifest\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
+printf '# Manifest\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
 if run_dry "$T/reg/design"; then fail "dataset record with no R2 path was NOT blocked"; else
   case "$LAST_ERR" in *"no R2 path"*) pass "missing R2 path blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
@@ -555,7 +557,7 @@ rm -rf "$T"
 
 echo "[smoke] case 45: explicit KIND=dataset override (with a valid MANIFEST.md) -> PASS, not the 'unknown KIND override' die (the #358 bug this issue fixes)"
 T=$(mktemp_d); make_design_stage_repo "$T"
-printf 'R2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
+printf 'R2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
 printf 'dataset\n' > "$T/reg/design/KIND"
 if run_dry "$T/reg/design"; then pass "KIND=dataset override passes the gate"; else
   fail "KIND=dataset override was BLOCKED: $LAST_ERR"; fi
@@ -571,7 +573,7 @@ rm -rf "$T"
 
 echo "[smoke] case 47: dataset record with a real secret in MANIFEST.md -> BLOCK (the shared secret scan still runs for dataset)"
 T=$(mktemp_d); make_design_stage_repo "$T"
-printf 'R2 path: r2://bucket/dataset-1/\nkey = %s\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' "$REAL_GHP" > "$T/reg/design/MANIFEST.md"
+printf 'R2 path: r2://bucket/dataset-1/\nkey = %s\n\n| file | sha256 |\n|---|---|\n| a.jsonl | %s |\n' "$REAL_GHP" "$FAKE_SHA256" > "$T/reg/design/MANIFEST.md"
 if run_dry "$T/reg/design"; then fail "dataset record with a real secret was NOT blocked"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "dataset record's secret scan still runs and blocks";;
     *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
@@ -601,6 +603,22 @@ printf 'Status: EXPLORATORY\n' > "$T/reg/design/FINDINGS.md"
 if run_dry "$T/reg/design"; then :; fi
 case "$LAST_ERR" in *"classified: design-stage"*) pass "DESIGN.md takes precedence over FINDINGS.md in auto-classification";;
   *) fail "did not classify as design-stage when DESIGN.md is present: $LAST_ERR";; esac
+rm -rf "$T"
+
+echo "[smoke] case 51: FINDINGS.md merely MENTIONS 'Status: EXPLORATORY' in prose (not as its own header line) -> BLOCK (P0: gate must not accept a substring match anywhere in the file)"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Findings\n\nMissing Status: EXPLORATORY marker in this draft, will add before landing.\n' > "$T/reg/design/FINDINGS.md"
+if run_dry "$T/reg/design"; then fail "prose-only mention of Status: EXPLORATORY was NOT blocked (accepted a substring match instead of requiring a header line)"; else
+  case "$LAST_ERR" in *"no 'Status: EXPLORATORY' header"*) pass "prose-only mention of the marker blocked, header still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 52: MANIFEST.md sha256 table names the column but every row is a placeholder (no real 64-hex digest) -> BLOCK (P1: gate must verify an actual digest, not just the word 'sha256')"
+T=$(mktemp_d); make_design_stage_repo "$T"
+printf '# Manifest\n\nR2 path: r2://bucket/dataset-1/\n\n| file | sha256 |\n|---|---|\n| a.jsonl | abcabc |\n' > "$T/reg/design/MANIFEST.md"
+if run_dry "$T/reg/design"; then fail "dataset record with a placeholder (non-hex, non-64-char) hash was NOT blocked"; else
+  case "$LAST_ERR" in *"no real 64-character hex digest"*) pass "placeholder sha256 value blocked, real digest still required";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

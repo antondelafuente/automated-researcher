@@ -402,30 +402,37 @@ gate_design_stage() {
 gate_exploration() {
   # An exploration record (research-lab#136): a distilled exploratory burst — no design-audit/close-audit,
   # never citable as evidence. The only structural requirement beyond the shared secret scan is that
-  # FINDINGS.md visibly carries the Status: EXPLORATORY marker, so nobody downstream mistakes it for an
-  # audited result. Tolerant of markdown decoration around the marker (heading level, bold, a leading '>'),
-  # not of the marker text itself — same tolerant-of-decoration/precise-on-text split as the design-stage
-  # Presentation-lock check above.
+  # FINDINGS.md visibly carries the Status: EXPLORATORY marker AS A HEADER LINE, so nobody downstream
+  # mistakes it for an audited result. Tolerant of markdown decoration around the marker (heading level,
+  # bold, a leading '>'), not of the marker text itself — same tolerant-of-decoration/precise-on-text split
+  # as the design-stage Presentation-lock check above. The decoration prefix is anchored to the START of
+  # the line (`^[[:space:]#>*_]*`) specifically so a prose sentence merely MENTIONING the marker (e.g. "no
+  # Status: EXPLORATORY header found") does not satisfy the gate — the marker must open its own line, not
+  # appear anywhere in the file's text.
   # Defend the invariant on the KIND-override path too (auto-classify only reaches here when DESIGN.md is
   # absent, but a KIND=exploration file bypasses that).
   [ -f "$DIR/FINDINGS.md" ] || die "exploration dir missing FINDINGS.md — an exploration record is a distilled exploratory burst, never citable as evidence"
   [ -f "$DIR/DESIGN.md" ] && die "exploration dir unexpectedly has DESIGN.md — should classify as experiment/design-stage"
-  grep -qE '(^|[^A-Za-z0-9])Status[^A-Za-z0-9]{0,4}EXPLORATORY([^A-Za-z0-9]|$)' "$DIR/FINDINGS.md" \
-    || die "exploration dir's FINDINGS.md has no 'Status: EXPLORATORY' header — an exploration record must carry this marker so it is never mistaken for citable evidence — surface for human"
+  grep -qE '^[[:space:]#>*_]*Status[^A-Za-z0-9]{0,4}EXPLORATORY([^A-Za-z0-9]|$)' "$DIR/FINDINGS.md" \
+    || die "exploration dir's FINDINGS.md has no 'Status: EXPLORATORY' header — an exploration record must carry this marker as its own line (not merely mentioned in prose) so it is never mistaken for citable evidence — surface for human"
   APPROVAL_BODY="Exploration record — FINDINGS.md carries the Status: EXPLORATORY marker; secret scan clean; never citable as evidence per registry convention."
   note "exploration gate ok: Status: EXPLORATORY marker found in FINDINGS.md (secret scan runs on the staged set)"
 }
 gate_dataset() {
   # A dataset record (research-lab#136): generated data with its R2 bytes, shas, provenance, and consumers —
   # no design-audit/close-audit. The structural requirement beyond the shared secret scan: MANIFEST.md must
-  # carry both a sha256 table (pinning the generated data's content hashes, the same discipline
-  # ARTIFACT_MANIFEST.md uses for heavy artifacts elsewhere in this registry) and an R2 path (the r2://
-  # scheme this repo uses everywhere else for artifact-store pointers) locating the actual bytes.
+  # carry both a sha256 table with at least one REAL 64-hex-character digest (pinning the generated data's
+  # content hashes, the same discipline ARTIFACT_MANIFEST.md uses for heavy artifacts elsewhere in this
+  # registry — a table that merely names the 'sha256' column but carries no actual digest, e.g. a
+  # placeholder like 'abcabc', does not pin anything) and an R2 path (the r2:// scheme this repo uses
+  # everywhere else for artifact-store pointers) locating the actual bytes.
   # Defend the invariant on the KIND-override path too, same reasoning as gate_exploration above.
   [ -f "$DIR/MANIFEST.md" ] || die "dataset dir missing MANIFEST.md — a dataset record pins the generated data's R2 bytes, shas, provenance, and consumers"
   [ -f "$DIR/DESIGN.md" ] && die "dataset dir unexpectedly has DESIGN.md — should classify as experiment/design-stage"
   grep -qiE '^[[:space:]]*\|.*sha256' "$DIR/MANIFEST.md" \
     || die "dataset dir's MANIFEST.md has no sha256 table (expected a markdown table row naming 'sha256') — a dataset record must pin the generated data's content hashes — surface for human"
+  grep -qE '\|[[:space:]]*[0-9a-fA-F]{64}[[:space:]]*\|' "$DIR/MANIFEST.md" \
+    || die "dataset dir's MANIFEST.md sha256 table names the column but has no real 64-character hex digest in any row (e.g. a placeholder like 'abcabc') — a dataset record must pin actual content hashes, not placeholder text — surface for human"
   grep -qE 'r2://' "$DIR/MANIFEST.md" \
     || die "dataset dir's MANIFEST.md has no R2 path (expected an 'r2://' URI) — a dataset record must locate the generated data's bytes in the artifact store — surface for human"
   APPROVAL_BODY="Dataset record — MANIFEST.md carries a sha256 table and an R2 path; secret scan clean; per registry convention."
