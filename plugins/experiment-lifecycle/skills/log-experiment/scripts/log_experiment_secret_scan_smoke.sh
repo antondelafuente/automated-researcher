@@ -39,6 +39,14 @@
 # does not false-positive block either — and a claim about a file inside a WHOLLY-ignored directory (not just
 # an individually-ignored file) is still caught, since `ls-files` enumerates every file under an ignored
 # directory individually rather than collapsing it to one directory entry the way `git status` does.
+#
+# #374: also covers the `--only <path>` allowlist — a co-tenant's file left OUT of the allowlist is never
+# staged and so never scanned/blocked by secret_scan or the #340 ignored-file guard, even when it sits right
+# alongside the allowlisted file(s) in the same shared registry dir; a nonexistent or escaping (`/abs`,
+# `../`) --only path BLOCKs (fail-closed — never silently falls back to staging the whole dir); an allowlist
+# that stages nothing (the named file is unchanged vs base) BLOCKs on nothing-to-commit same as the
+# unscoped case; and a --only path that is itself gitignored is still caught by the #340 guard (the
+# allowlist narrows scope, it does not disable the existing gates).
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -334,6 +342,74 @@ printf '# Design\n\n## Presentation (locked with the researcher 2026-99-99)\nDet
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design"; then fail "malformed calendar date (2026-99-99) was NOT blocked"; else
   case "$LAST_ERR" in *"no locked Presentation section"*) pass "malformed calendar date blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+# #374: --only allowlist — restricts the staged set (and, transitively, check_ignored_files/secret_scan/
+# symlink_scan, which all scan whatever ends up staged) to exactly the named path(s), so a co-tenant
+# session's untracked files under a SHARED multi-tenant registry dir never sweep into this PR.
+
+echo "[smoke] case 27: --only names one clean new file; a co-tenant's file with a real secret sits alongside it -> PASS (the co-tenant file is never staged, so it is never scanned)"
+T=$(mktemp -d); make_repo "$T"
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+if run_dry "$T/reg/note" --only mine.md; then pass "--only stages just the named file; the co-tenant's secret file alongside it is never scanned"; else
+  fail "--only mine.md was BLOCKED despite the co-tenant secret file being outside the allowlist: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 28: repeated --only flags name two files; a co-tenant's secret file is left out -> PASS"
+T=$(mktemp -d); make_repo "$T"
+printf 'file a\n' > "$T/reg/note/a.md"
+printf 'file b\n' > "$T/reg/note/b.md"
+printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
+if run_dry "$T/reg/note" --only a.md --only b.md; then pass "repeated --only flags stage exactly the two named files"; else
+  fail "--only a.md --only b.md was BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 29: --only names a path that does not exist under the registry dir -> BLOCK (fail closed, never falls back to the whole dir)"
+T=$(mktemp -d); make_repo "$T"
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+if run_dry "$T/reg/note" --only missing.md; then fail "--only missing.md was NOT blocked"; else
+  case "$LAST_ERR" in *"--only path does not exist under"*) pass "nonexistent --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 30: --only given an absolute path -> BLOCK"
+T=$(mktemp -d); make_repo "$T"
+if run_dry "$T/reg/note" --only /etc/passwd; then fail "--only with an absolute path was NOT blocked"; else
+  case "$LAST_ERR" in *"must be relative to the registry dir, not absolute"*) pass "absolute --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 31: --only escapes the registry dir via '../' to a real file OUTSIDE it -> BLOCK (existence alone is not enough; containment is also checked)"
+T=$(mktemp -d); make_repo "$T"
+mkdir -p "$T/reg/sibling"
+printf 'not mine\n' > "$T/reg/sibling/file.txt"
+if run_dry "$T/reg/note" --only ../sibling/file.txt; then fail "--only escaping via '../' to a real file was NOT blocked"; else
+  case "$LAST_ERR" in *"escapes the registry dir"*) pass "'../'-escaping --only path blocked";;
+    *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 32: --only names the one file changed, but it is UNCHANGED vs base -> BLOCK on nothing-to-commit (never silently stages the whole dir instead)"
+T=$(mktemp -d); make_repo "$T"   # page.html is already committed on origin/main, unchanged
+if run_dry "$T/reg/note" --only page.html; then fail "--only on an unchanged file did NOT refuse (should be nothing to commit)"; else
+  case "$LAST_ERR" in *"nothing to commit"*"--only"*) pass "--only on an unchanged file refuses on nothing-to-commit";;
+    *) fail "failed but not on the expected nothing-to-commit message: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 33: --only names a clean file; a co-tenant's GITIGNORED file sits alongside it -> PASS (the ignored-file guard is scoped to the allowlist too, not just the secret scan)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf 'my own clean file\n' > "$T/reg/note/mine.md"
+printf '{"not": "mine"}\n' > "$T/reg/note/cotenant.jsonl"
+if run_dry "$T/reg/note" --only mine.md; then pass "--only scopes the gitignored-file guard too — a co-tenant's ignored file elsewhere in the dir does not block"; else
+  fail "--only mine.md was BLOCKED by a co-tenant's unrelated gitignored file: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 34: --only names a file that is itself GITIGNORED -> still BLOCK (the guard still catches an allowlisted path that silently failed to stage)"
+T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+printf '{"in": "battery"}\n' > "$T/reg/note/mine.jsonl"
+if run_dry "$T/reg/note" --only mine.jsonl; then fail "--only on a gitignored path was NOT blocked (#340 guard should still apply within the allowlist)"; else
+  case "$LAST_ERR" in *"gitignored file"*"mine.jsonl"*) pass "gitignored --only path still caught by the ignored-file guard";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 

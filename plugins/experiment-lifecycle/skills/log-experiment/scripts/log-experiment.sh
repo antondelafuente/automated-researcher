@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]
+# log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]...
 #   --skip-ignored proceeds WITHOUT the flagged gitignored files (acknowledge-and-exclude) — it never
 #   force-includes them into the commit.
+#   --only <path> (repeatable) restricts the staged set to exactly the named path(s), each given relative to
+#   <registry-dir>. Use this when <registry-dir> is a SHARED, multi-tenant tree (e.g. a viewer dashboard dir
+#   several sessions write into) so a co-tenant session's untracked files never sweep into YOUR PR (#374) —
+#   without --only, staging is dir-scoped (the whole tree). Applied at staging time (stage_worktree), so
+#   every existing staged-set gate (check_ignored_files/symlink_scan/secret_scan) automatically runs against
+#   this reduced set — none of them need their own --only awareness. Fail-closed: a named path that does not
+#   exist under <registry-dir>, or an allowlist that ends up staging nothing, dies — it never silently falls
+#   back to staging the whole dir.
 #
 # Log a research-repo registry directory to GitHub as a GATED pull request and merge it.
 # The gate is chosen by the directory's own content (auditability via the registry convention):
@@ -125,16 +133,20 @@ fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
-DRY_RUN=0; SKIP_IGNORED=0; DIR=""
-for a in "$@"; do
-  case "$a" in
-    --dry-run) DRY_RUN=1 ;;
-    --skip-ignored) SKIP_IGNORED=1 ;;
-    -*) die "unknown flag: $a" ;;
-    *) DIR="$a" ;;
+DRY_RUN=0; SKIP_IGNORED=0; DIR=""; declare -a ONLY_PATHS=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --skip-ignored) SKIP_IGNORED=1; shift ;;
+    --only)
+      [ "$#" -ge 2 ] || die "--only requires a <path> argument"
+      ONLY_PATHS+=("$2")
+      shift 2 ;;
+    -*) die "unknown flag: $1" ;;
+    *) DIR="$1"; shift ;;
   esac
 done
-[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored]"
+[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]..."
 [ -d "$DIR" ] || die "not a directory: $DIR"
 DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
@@ -142,6 +154,32 @@ REPO_ROOT="$(cd "$DIR" && git rev-parse --show-toplevel 2>/dev/null)" || die "no
 REL="$(cd "$REPO_ROOT" && realpath --relative-to="$REPO_ROOT" "$DIR")"
 [ "${REL#..}" = "$REL" ] || die "dir is outside the repo root"
 SLUG="$(basename "$REL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
+
+# ---- --only allowlist (#374): resolve + validate each named path against $DIR, then build STAGE_PATHS —
+# the exact set later staged (stage_worktree) and gitignore-checked (check_ignored_files) against. Doing
+# this once, up front, means both of those (and, transitively, symlink_scan/secret_scan, which scan
+# whatever ends up staged) automatically operate on the reduced set with no --only-awareness of their own.
+# Validated INLINE, not via a helper called through command substitution: `die` calls `exit`, and `exit`
+# inside a function invoked as `$(fn ...)` only terminates that subshell, not the script — a die swallowed
+# that way would silently fall through to an empty ONLY_REL entry instead of failing closed.
+declare -a ONLY_REL=() STAGE_PATHS=()
+for _op in "${ONLY_PATHS[@]}"; do
+  case "$_op" in
+    /*) die "--only path must be relative to the registry dir, not absolute: $_op" ;;
+  esac
+  [ -e "$DIR/$_op" ] || die "--only path does not exist under $DIR: $_op"
+  # realpath resolution runs INSIDE the `cd`'d subshell (no die there — see comment above); only its exit
+  # status, checked here outside the subshell, decides pass/fail.
+  _rel="$(cd "$DIR" && realpath --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
+  [ "${_rel#..}" = "$_rel" ] || die "--only path escapes the registry dir: $_op"
+  ONLY_REL+=("$_rel")
+done
+if [ "${#ONLY_REL[@]}" -gt 0 ]; then
+  for _r in "${ONLY_REL[@]}"; do STAGE_PATHS+=("$REL/$_r"); done
+  note "--only: staging restricted to ${#ONLY_REL[@]} path(s) under $REL: ${ONLY_REL[*]}"
+else
+  STAGE_PATHS=("$REL")
+fi
 
 # ---- classify (registry convention; KIND file is an explicit override) ----
 KIND=""
@@ -378,7 +416,7 @@ check_ignored_files() {
   while IFS= read -r -d '' path; do
     is_trivial_ignore "$path" && continue
     hits+=("$path")
-  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "$REL")
+  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "${STAGE_PATHS[@]}")
   [ "${#hits[@]}" -eq 0 ] && return 0
   note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
   printf '  %s\n' "${hits[@]}" >&2
@@ -398,11 +436,25 @@ stage_worktree() {
   CREATED_BRANCH=1
   mkdir -p "$WT/$(dirname "$REL")"
   cp -r "$DIR" "$WT/$(dirname "$REL")/"
-  git -C "$WT" add -- "$REL"                          # respects the BASE tree's .gitignore (large artifacts stay on R2)
+  # STAGE_PATHS is "$REL" (the whole dir) unless --only narrowed it (#374) — either way this `git add` also
+  # respects the BASE tree's .gitignore (large artifacts stay on R2). Anything under $DIR NOT named by
+  # STAGE_PATHS was copied into $WT above (for a possible sibling reference) but is never `git add`-ed, so it
+  # can never be staged/committed/pushed — it is discarded with the rest of $WT on cleanup.
+  # `|| true`: unlike adding a whole directory (which silently SKIPS any ignored entry inside it, exit 0),
+  # `git add` given an EXPLICITLY-named ignored pathspec (only reachable via --only) still adds every OTHER
+  # named path but exits 1 for the ignored one — under `set -e` that would kill the script here, before
+  # check_ignored_files (next line) gets to run its own, better-messaged detection of exactly this drop.
+  git -C "$WT" add -- "${STAGE_PATHS[@]}" || true
   check_ignored_files                                 # #340: BLOCK on a non-trivial file the .gitignore silently dropped
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.
-  if git -C "$WT" diff --cached --quiet; then die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"; fi
+  if git -C "$WT" diff --cached --quiet; then
+    if [ "${#ONLY_REL[@]}" -gt 0 ]; then
+      die "nothing to commit for $REL --only ${ONLY_REL[*]} (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"
+    else
+      die "nothing to commit for $REL (unchanged vs origin/$BASE_BRANCH, or all gitignored?)"
+    fi
+  fi
 }
 
 if [ "$DRY_RUN" = 1 ]; then
