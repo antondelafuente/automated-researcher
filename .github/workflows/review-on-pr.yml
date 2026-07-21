@@ -323,6 +323,14 @@ jobs:
 
           $history_section
 
+          If this is the first review of this PR (no prior review history above) and the diff touches a
+          risky surface -- shell/env-var/secrets handling, persistent state, or content parsed by more than
+          one parser -- set "risk_inventory" to a short design-level risk inventory: name which invariants
+          govern that surface and which, if any, this diff violates. This is read BEFORE your line-level
+          findings, so put the governing-invariant analysis there, not a restatement of the findings list.
+          Leave "risk_inventory" null on routine diffs outside that surface class, and on any round after
+          the first regardless of surface.
+
           Be concise and specific: cite the exact file and evidence for each finding. Set "verdict" to
           "approve" only if you find zero P0 findings; otherwise "changes_requested". List every finding
           you have, P0 and P1 alike, in the findings array — non-blocking P1 findings are still recorded
@@ -367,6 +375,7 @@ jobs:
               "required": ["verdict", "findings"],
               "properties": {
                 "verdict": { "enum": ["approve", "changes_requested"] },
+                "risk_inventory": { "type": ["string", "null"] },
                 "findings": {
                   "type": "array",
                   "items": {
@@ -455,6 +464,9 @@ jobs:
 
           body=$(jq -r '
             "## Codex review\n\n" +
+            (if .risk_inventory and (.risk_inventory | length) > 0 then
+              "### Risk inventory\n\n" + .risk_inventory + "\n\n"
+            else "" end) +
             (if (.findings | length) == 0 then "No findings.\n" else
               (.findings | map("- **" + .severity + "**: " + .summary +
                 (if .evidence and (.evidence | length) > 0 then "\n  evidence: " + .evidence else "" end))
