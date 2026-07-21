@@ -25,6 +25,14 @@ against CWD, so running the audit from inside the skill source dir dropped run a
 report + sample) straight into live skill source, tripping the SessionStart drift guard. Pass --out
 and/or --sample explicitly to place them somewhere else.
 
+IMPORTANT — a defaulted --out/--sample that would land ON DATA's own path is refused (exit 1)
+rather than silently overwriting your input. This can only happen with the derivation above: e.g.
+re-auditing a previously-produced `*_sample.jsonl` as new input DATA, where its basename matches
+the `--sample` default derived from the (also-defaulted) `--out`. Flagged in PR #598 review (this
+same 2026-07-21 default-derivation change) before it shipped. Explicitly-passed --out/--sample
+values are never checked this way — colliding with DATA on purpose is the caller's own call, same
+as always.
+
 IMPORTANT — looping over N files (the common per-arm/per-wave case): `--sample` defaults to
 `<out-stem>_sample.jsonl`, DERIVED FROM `--out`, not a fixed literal — so a unique `--out` per
 invocation also gets a unique sample by default. Built 2026-07-21 after automated-researcher#521:
@@ -135,10 +143,20 @@ def main():
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
     a = ap.parse_args()
+    out_defaulted = a.out is None
+    sample_defaulted = a.sample is None
     if a.out is None:
         a.out = os.path.join(os.path.dirname(a.data), "data_audit.json")
     if a.sample is None:
         a.sample = os.path.splitext(a.out)[0] + "_sample.jsonl"
+    # A defaulted --out/--sample landing on DATA's own path would silently overwrite the input
+    # (e.g. re-auditing a previously-produced *_sample.jsonl whose basename matches the derived
+    # default) — refuse rather than destroy it. An explicitly-passed --out/--sample that collides
+    # is the caller's own choice and is left alone, per this derivation's contract.
+    for flag, path, defaulted in (("--out", a.out, out_defaulted), ("--sample", a.sample, sample_defaulted)):
+        if defaulted and os.path.abspath(path) == os.path.abspath(a.data):
+            sys.exit(f"refusing to run: derived {flag} default '{path}' is the same file as DATA "
+                      f"('{a.data}') and would overwrite it — pass {flag} explicitly to a different path")
 
     rows = load(a.data)
     n = len(rows)
