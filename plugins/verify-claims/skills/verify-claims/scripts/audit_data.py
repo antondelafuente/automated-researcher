@@ -12,11 +12,28 @@ label/arm balance. The LLM (layer 2) reads the SAMPLE for semantics a script can
 leakage, off-distribution, mislabeling, "does this match the design intent").
 
 Usage:
-  python3 audit_data.py DATA.jsonl --out data_audit.json [--sample data_audit_sample.jsonl] \
+  python3 audit_data.py DATA.jsonl [--out data_audit.json] [--sample data_audit_sample.jsonl] \
       [--cot] [--require-finish-reason] [--source-field source] [--label-field arm] [--text-field assistant] \
       [--dup-field response] [--cap-chars 24000] [--sample-k 6]
 Exit 2 if any HARD invariant fails (open-think rows in --cot mode, empties, schema drift) — a BLOCK.
 The stratified sample deliberately includes the RISKY strata, not just random rows.
+
+IMPORTANT — --out/--sample defaults are DERIVED FROM DATA's location, not CWD: `--out` defaults to
+`<data_dir>/data_audit.json` and `--sample` defaults to `<out-stem>_sample.jsonl` in that same directory.
+Built 2026-07-21 after an incident where the old bare-literal `--out data_audit.json` default resolved
+against CWD, so running the audit from inside the skill source dir dropped run artifacts (an untracked
+report + sample) straight into live skill source, tripping the SessionStart drift guard. Pass --out
+and/or --sample explicitly to place them somewhere else.
+
+IMPORTANT — a defaulted --out/--sample that would land ON DATA's own path is refused (exit 1)
+rather than silently overwriting your input. This can only happen with the derivation above: e.g.
+re-auditing a previously-produced `*_sample.jsonl` as new input DATA, where its basename matches
+the `--sample` default derived from the (also-defaulted) `--out`. Flagged in PR #598 review (this
+same 2026-07-21 default-derivation change) before it shipped. The comparison resolves filesystem
+aliases (a DATA that is itself a symlink or hardlink to the derived path) via os.path.samefile,
+not a bare path-string compare — flagged in the same PR's review round 2 after the initial
+abspath-only version missed that case. Explicitly-passed --out/--sample values are never checked
+this way — colliding with DATA on purpose is the caller's own call, same as always.
 
 IMPORTANT — looping over N files (the common per-arm/per-wave case): `--sample` defaults to
 `<out-stem>_sample.jsonl`, DERIVED FROM `--out`, not a fixed literal — so a unique `--out` per
@@ -74,6 +91,21 @@ def get_field(r, path):
     return cur
 
 
+def same_file(path_a, path_b):
+    """True if path_a and path_b refer to the same underlying file, including via symlink or
+    hardlink aliasing that a plain os.path.abspath string-compare can't see (os.path.samefile
+    compares (st_dev, st_ino)). Falls back to abspath compare when either path doesn't exist yet
+    (the common case: a freshly-derived --out/--sample that hasn't been written) — samefile
+    requires both to exist, and a not-yet-existing derived path can't already alias DATA anyway.
+    Flagged in PR #598 review round 2 (2026-07-21): the abspath-only check let a DATA that is a
+    symlink/hardlink to the derived --out/--sample path slip past the overwrite-prevention refusal.
+    """
+    try:
+        return os.path.samefile(path_a, path_b)
+    except OSError:
+        return os.path.abspath(path_a) == os.path.abspath(path_b)
+
+
 def looks_deterministically_unique(rows):
     """Heuristic for eval-rollout-shaped data: per-row keys (id+sample, or a gen_config.seed-shaped
     field) that make every row unique BY CONSTRUCTION, so a whole-row exact-duplicate check is
@@ -107,7 +139,9 @@ def assistant_text(r, field):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data")
-    ap.add_argument("--out", default="data_audit.json")
+    ap.add_argument("--out", default=None, help="audit report output path; defaults to "
+                     "'<data_dir>/data_audit.json' (derived from DATA's location, not CWD) so running "
+                     "from an unrelated CWD doesn't drop artifacts there — pass this explicitly to override")
     ap.add_argument("--sample", default=None, help="stratified-sample output path; defaults to "
                      "'<out-stem>_sample.jsonl' (derived from --out) so looping over N files with a "
                      "unique --out each also gets a unique sample by default — pass this explicitly "
@@ -126,8 +160,20 @@ def main():
     ap.add_argument("--cap-chars", type=int, default=24000, help="length cap (char proxy); 'near-cap' = >95%% of cap")
     ap.add_argument("--sample-k", type=int, default=6, help="rows per stratum")
     a = ap.parse_args()
+    out_defaulted = a.out is None
+    sample_defaulted = a.sample is None
+    if a.out is None:
+        a.out = os.path.join(os.path.dirname(a.data), "data_audit.json")
     if a.sample is None:
         a.sample = os.path.splitext(a.out)[0] + "_sample.jsonl"
+    # A defaulted --out/--sample landing on DATA's own path would silently overwrite the input
+    # (e.g. re-auditing a previously-produced *_sample.jsonl whose basename matches the derived
+    # default) — refuse rather than destroy it. An explicitly-passed --out/--sample that collides
+    # is the caller's own choice and is left alone, per this derivation's contract.
+    for flag, path, defaulted in (("--out", a.out, out_defaulted), ("--sample", a.sample, sample_defaulted)):
+        if defaulted and same_file(path, a.data):
+            sys.exit(f"refusing to run: derived {flag} default '{path}' is the same file as DATA "
+                      f"('{a.data}') and would overwrite it — pass {flag} explicitly to a different path")
 
     rows = load(a.data)
     n = len(rows)
