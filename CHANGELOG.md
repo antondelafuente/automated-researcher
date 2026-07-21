@@ -1,3 +1,12 @@
+- verify-claims 0.7.19 (2026-07-21): `audit_experiment.sh --design` auto-numbers its output when no
+  explicit out-file is passed and `DESIGN_AUDIT.md` already exists in the experiment dir, writing to the
+  next free `DESIGN_AUDIT<n>.md` instead (#465). A sanctioned re-audit pass (the "one extra pass" after
+  revising a design) previously overwrote the pass-1 findings, clobbering the record design-experiment's
+  SKILL.md mandates as the validity record ("Number the outputs ... the chain is the validity record") —
+  survived once only because the pass-1 text happened to be in the designer's conversation context. An
+  explicitly passed out-file stays authoritative; `--data`'s `AUDIT.md`/`DATA_AUDIT.md` defaults are
+  unaffected. `cross_family_verifier_smoke.sh` gains case (e) covering the numbering chain and the
+  explicit-out-file escape hatch.
 - experiment-lifecycle 0.3.61 (2026-07-20): `run-experiment` SKILL.md's executor-disposition section now
   forbids dispatching `Agent(subagent_type: "fork")` for a narrow research question from an executor-framed
   session (#566). A fork inherits the FULL conversation context, including the "run to completion, don't

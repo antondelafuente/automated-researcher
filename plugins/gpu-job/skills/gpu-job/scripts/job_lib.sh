@@ -246,7 +246,10 @@ MA_VRAM_FLOOR_MIB=${MA_VRAM_FLOOR_MIB:-12000}
 # Default kill patterns are the two GENERIC vLLM process forms ONLY — no instance eval-driver name.
 # A driver that runs an IN-PROCESS pooled server (its process name is the driver's own, e.g. a
 # `run_pooled_…` script that spawns vLLM in-process) sets MA_KILL_PATTERNS to add that name so the
-# between-adapter teardown kills it too — the hook is here, the instance-specific value stays caller-side.
+# between-adapter teardown kills it too — the hook is here, the instance-specific value stays
+# caller-side. Self-safe by construction (#299): ma_teardown resolves each pattern to PIDs and drops
+# the driver itself/its ancestors before killing, so a pattern that happens to match the driver's own
+# command line can never take down the driver, even once a caller wires a real pooled-server name in.
 MA_KILL_PATTERNS=${MA_KILL_PATTERNS:-"vllm.entrypoints.openai.api_server VLLM::EngineCore"}
 # Distinctness check unit + mode (F4). GLOB scopes the compare to the CANONICAL eval artifact so
 # incidental sidecar metadata can't mask a real reuse (and serve.log is always excluded); MODE lets
@@ -254,13 +257,44 @@ MA_KILL_PATTERNS=${MA_KILL_PATTERNS:-"vllm.entrypoints.openai.api_server VLLM::E
 MA_DISTINCT_GLOB=${MA_DISTINCT_GLOB:-'*'}
 MA_DISTINCT_MODE=${MA_DISTINCT_MODE:-error}   # error (die) | warn (loud, continue) | off
 
+ma_self_and_ancestors(){ # ma_self_and_ancestors — space-delimited self ($$, $BASHPID) + BOTH their
+                         # ancestor chains up to PID 1 (the two diverge once called from inside a `( )`
+                         # subshell, e.g. serve_adapters_eval's die-isolating callers). Used to keep a
+                         # caller-supplied MA_KILL_PATTERNS match from ever self-killing the driver.
+  local pids=" $$ ${BASHPID:-$$} " seed p n
+  for seed in "$$" "${BASHPID:-$$}"; do
+    p=$seed; n=0
+    while [ "$p" != 1 ] && [ "$n" -lt 50 ]; do
+      p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+      [ -n "$p" ] || break
+      pids="$pids$p "
+      n=$((n+1))
+    done
+  done
+  printf '%s' "$pids"
+}
+
 ma_teardown(){ # ma_teardown [serve-pid] [port=8000] — kill the served process + every vLLM/pooled
                # form, then BLOCK until VRAM is below the floor AND the port refuses. KILLS (never
                # waits-for-exit): an OOM'd server hangs and never exits on its own. Dies loud if the
-               # GPU/port never frees — never a fixed-timeout "proceed regardless" gate.
-  local pid=${1:-} port=${2:-8000} pat i used
+               # GPU/port never frees — never a fixed-timeout "proceed regardless" gate. SELF-SAFE
+               # (#299): resolves each MA_KILL_PATTERNS pattern to PIDs first (pgrep -f), drops any
+               # that are the driver itself or an ancestor, and kill_tree's only the survivors — never
+               # a blind `pkill -9 -f` on a caller-supplied pattern, which can self-match the driver
+               # shell (or an unrelated same-pod process) exactly like the `pkill -f self-matches`
+               # hazard alive_check's header already warns about (≥6 prior incidents: killed own ssh,
+               # masked-dead jobs).
+  local pid=${1:-} port=${2:-8000} pat kp i used self_pids
   [ -n "$pid" ] && kill_tree "$pid" KILL
-  for pat in $MA_KILL_PATTERNS; do pkill -9 -f "$pat" 2>/dev/null || true; done
+  self_pids=$(ma_self_and_ancestors)
+  for pat in $MA_KILL_PATTERNS; do
+    for kp in $(pgrep -f "$pat" 2>/dev/null); do
+      case "$self_pids" in
+        *" $kp "*) say "ma_teardown: pattern '$pat' matched pid $kp (self/ancestor) — refusing to kill it" ;;
+        *) kill_tree "$kp" KILL ;;
+      esac
+    done
+  done
   for i in $(seq 1 180); do   # up to ~15 min
     used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null \
            | sort -n | tail -1)

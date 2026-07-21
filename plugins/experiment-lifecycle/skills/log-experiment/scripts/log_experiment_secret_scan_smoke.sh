@@ -47,7 +47,7 @@
 # that stages nothing (the named file is unchanged vs base) BLOCKs on nothing-to-commit same as the
 # unscoped case; and a --only path that is itself gitignored is still caught by the #340 guard (the
 # allowlist narrows scope, it does not disable the existing gates).
-set -uo pipefail
+set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SELF_DIR/log-experiment.sh"
@@ -56,6 +56,16 @@ SCRIPT="$SELF_DIR/log-experiment.sh"
 FAILS=0
 pass() { echo "  ok: $1"; }
 fail() { echo "  FAIL: $1" >&2; FAILS=$((FAILS+1)); }
+
+# mktemp_d: mktemp -d, but refuses to hand back an empty/non-existent path — every fixture and config dir in
+# this smoke is scoped under a dir from this helper, then rm -rf'd by name, so a bad path here (e.g. "") would
+# otherwise turn later `git -C "$dir"` / `rm -rf "$dir"` calls into ops against the caller's own cwd/root.
+mktemp_d() {
+  local d
+  d="$(mktemp -d)"
+  [ -n "$d" ] && [ -d "$d" ] || { echo "FAIL: mktemp -d returned an empty/non-existent path" >&2; exit 1; }
+  printf '%s\n' "$d"
+}
 
 # A committed anchor phrase that CONTAINS 'sk-' inside a long hyphenated identifier — the real #306 false-positive.
 FP_LINE='anchor: my-agent-task-always-succeeds-in-suspicious-ways'
@@ -79,7 +89,7 @@ make_repo() {
 # Echoes nothing; returns the script's exit code (0 = gate passed; non-zero = BLOCK). stderr captured to $LAST_ERR.
 LAST_ERR=""
 run_dry() {
-  local dir="$1"; shift; local cfg; cfg="$(mktemp -d)"
+  local dir="$1"; shift; local cfg; cfg="$(mktemp_d)" || return 1
   local out; out="$(XDG_CONFIG_HOME="$cfg" AAR_PROFILE="" LOG_EXPERIMENT_BASE_BRANCH=main \
       bash "$SCRIPT" "$dir" --dry-run "$@" 2>&1)"; local rc=$?
   LAST_ERR="$out"; rm -rf "$cfg"; return $rc
@@ -117,33 +127,33 @@ make_repo_with_gitignore() {
 }
 
 echo "[smoke] case 1: unchanged pre-existing FP page + a clean new note -> PASS (was: blocked #306)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'a fresh note, no secrets\n' > "$T/reg/note/note1.md"
 if run_dry "$T/reg/note"; then pass "clean new note logs despite pre-existing FP page"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
 echo "[smoke] case 2: NEW note containing a real sk- key -> BLOCK"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'key = %s\n' "$REAL_SK" > "$T/reg/note/note2.md"
 if run_dry "$T/reg/note"; then fail "real sk- key in a new file was NOT blocked"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "new sk- key blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 3: MODIFY the pre-existing page to add a real ghp_ token -> BLOCK"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'token %s\n' "$REAL_GHP" >> "$T/reg/note/page.html"
 if run_dry "$T/reg/note"; then fail "modified page with a real token was NOT blocked"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "modified page blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 4: the FP phrase added in a NEW file -> PASS (sk- boundary guard, no false-positive)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf '%s\n' "$FP_LINE" > "$T/reg/note/note4.md"
 if run_dry "$T/reg/note"; then pass "hyphenated 'sk-' phrase is not a false-positive even when newly added"; else fail "boundary guard failed — FP phrase blocked: $LAST_ERR"; fi
 rm -rf "$T"
 
 echo "[smoke] case 5: no origin base ref -> FAIL CLOSED (refuse to log, no scan bypass) even with a new secret"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 git -C "$T" update-ref -d refs/remotes/origin/main       # remove the base ref the log must be based on
 printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/note5.md"     # a real secret present; must NOT slip through
 if run_dry "$T/reg/note"; then fail "missing base ref did NOT refuse to log (possible scan bypass): $LAST_ERR"; else
@@ -151,7 +161,7 @@ if run_dry "$T/reg/note"; then fail "missing base ref did NOT refuse to log (pos
 rm -rf "$T"
 
 echo "[smoke] case 6: empty delta (nothing changed vs base) -> refuse on 'nothing to commit'"
-T=$(mktemp -d); make_repo "$T"   # branch head == origin/main, page.html unchanged, no new files
+T=$(mktemp_d); make_repo "$T"   # branch head == origin/main, page.html unchanged, no new files
 if run_dry "$T/reg/note"; then fail "empty delta did NOT refuse (should be nothing to commit): $LAST_ERR"; else
   case "$LAST_ERR" in *"nothing to commit"*) pass "empty delta refuses on nothing-to-commit";; *) fail "failed but not on nothing-to-commit: $LAST_ERR";; esac; fi
 rm -rf "$T"
@@ -159,14 +169,14 @@ rm -rf "$T"
 echo "[smoke] case 7: NEW file with a NON-ASCII name containing a real key -> BLOCK (NUL-delimited path handling)"
 # git quotes non-ASCII paths in `diff --cached --name-only` by default; without -z the quoted string is not a
 # real path and the staged file would be scan-skipped while still committed. -z emits raw paths so it is scanned.
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'k=%s\n' "$REAL_GHP" > "$T/reg/note/n"$'\303\266'"te.md"   # 'nöte.md' (UTF-8), staged as a new file
 if run_dry "$T/reg/note"; then fail "non-ASCII-named file with a real key was NOT blocked (quoted-path skip)"; else
   case "$LAST_ERR" in *"secret-value pattern"*) pass "non-ASCII-named file scanned + blocked";; *) fail "blocked but not on the secret scan: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 8: NEW staged symlink pointing OUTSIDE the repo -> BLOCK (the #416 incident)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'a fresh clean note\n' > "$T/reg/note/note8.md"
 ln -s /etc/passwd "$T/reg/note/bad_link"
 git -C "$T" add -A
@@ -175,7 +185,7 @@ if run_dry "$T/reg/note"; then fail "symlink pointing outside the repo was NOT b
 rm -rf "$T"
 
 echo "[smoke] case 9: NEW staged symlink whose RELATIVE target resolves INSIDE the repo -> still BLOCK (wholesale reject, not resolve-and-judge)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'a fresh clean note\n' > "$T/reg/note/note9.md"
 ln -s note9.md "$T/reg/note/rel_link"
 git -C "$T" add -A
@@ -184,7 +194,7 @@ if run_dry "$T/reg/note"; then fail "symlink resolving inside the repo was NOT b
 rm -rf "$T"
 
 echo "[smoke] case 10: a pinned .jsonl silently gitignored alongside other content that stages fine -> BLOCK (#340)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
 printf 'notes\n' > "$T/reg/note/note10.md"                      # a normal new file — stages fine
 printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"      # pinned instrument file — silently gitignored
 if run_dry "$T/reg/note"; then fail "gitignored pinned file was NOT blocked (#340 regression) — record looked complete but dropped battery.jsonl"; else
@@ -192,7 +202,7 @@ if run_dry "$T/reg/note"; then fail "gitignored pinned file was NOT blocked (#34
 rm -rf "$T"
 
 echo "[smoke] case 11: same gitignored pinned file, but with --skip-ignored -> PASS (explicit acknowledgment)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
 printf 'notes\n' > "$T/reg/note/note11.md"
 printf '{"in": "battery"}\n' > "$T/reg/note/battery.jsonl"
 if run_dry "$T/reg/note" --skip-ignored; then pass "--skip-ignored proceeds past the ignored-file guard"; else
@@ -200,7 +210,7 @@ if run_dry "$T/reg/note" --skip-ignored; then pass "--skip-ignored proceeds past
 rm -rf "$T"
 
 echo "[smoke] case 12: only a trivial ignored file (.DS_Store) -> PASS, no block (junk filter)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" '.DS_Store'
+T=$(mktemp_d); make_repo_with_gitignore "$T" '.DS_Store'
 printf 'notes\n' > "$T/reg/note/note12.md"
 touch "$T/reg/note/.DS_Store"
 if run_dry "$T/reg/note"; then pass "trivial .DS_Store ignore does not block"; else
@@ -208,7 +218,7 @@ if run_dry "$T/reg/note"; then pass "trivial .DS_Store ignore does not block"; e
 rm -rf "$T"
 
 echo "[smoke] case 13: gitignored file with no committed-claim, --skip-ignored -> PASS, still PRINTED as excluded (#331)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'a fresh note, no artifact claims\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then
@@ -218,7 +228,7 @@ else fail "clean case BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
 echo "[smoke] case 14: RESULTS.md verbatim-claims the dropped file is committed, WITHOUT --skip-ignored -> BLOCK with the specific claims message (#331 gate composed into the #340 default-block path)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note"; then fail "false 'committed' claim on a dropped file was NOT blocked"; else
@@ -227,7 +237,7 @@ if run_dry "$T/reg/note"; then fail "false 'committed' claim on a dropped file w
 rm -rf "$T"
 
 echo "[smoke] case 15: same false 'committed' claim, but WITH --skip-ignored -> still BLOCK (the #331 bug: --skip-ignored must never wave through a doc/tree divergence)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then fail "--skip-ignored bypassed a false 'committed' claim (the #331 incident)"; else
@@ -236,7 +246,7 @@ if run_dry "$T/reg/note" --skip-ignored; then fail "--skip-ignored bypassed a fa
 rm -rf "$T"
 
 echo "[smoke] case 16: ARTIFACT_MANIFEST.md verbatim-claims the dropped file is committed, --skip-ignored -> BLOCK"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'no artifact claims here\n' > "$T/reg/note/RESULTS.md"
 printf '| rollout_samples.jsonl | committed | 67 rows |\n' > "$T/reg/note/ARTIFACT_MANIFEST.md"
@@ -246,7 +256,7 @@ if run_dry "$T/reg/note" --skip-ignored; then fail "false 'committed' claim in A
 rm -rf "$T"
 
 echo "[smoke] case 17: RESULTS.md mentions the dropped filename WITHOUT 'committed' wording, --skip-ignored -> PASS (no false-positive)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then pass "filename mention without 'committed' wording does not false-positive block"; else
@@ -254,7 +264,7 @@ if run_dry "$T/reg/note" --skip-ignored; then pass "filename mention without 'co
 rm -rf "$T"
 
 echo "[smoke] case 18: an IGNORED symlink claimed committed, --skip-ignored -> BLOCK (check_ignored_files' status --ignored=matching list covers symlinks too, not just regular files)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 ln -s page.html "$T/reg/note/rollout_samples.jsonl"               # matches the base's reg/**/*.jsonl ignore rule
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then fail "ignored symlink falsely claimed committed was NOT blocked"; else
@@ -263,7 +273,7 @@ if run_dry "$T/reg/note" --skip-ignored; then fail "ignored symlink falsely clai
 rm -rf "$T"
 
 echo "[smoke] case 19: RESULTS.md uses bare 'commit' (not 'committed') on the same line, --skip-ignored -> BLOCK (a real claim, not just a false-positive fix)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'We commit rollout_samples.jsonl to the registry after review.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then fail "bare 'commit' claim on a dropped file was NOT blocked"; else
@@ -272,7 +282,7 @@ if run_dry "$T/reg/note" --skip-ignored; then fail "bare 'commit' claim on a dro
 rm -rf "$T"
 
 echo "[smoke] case 20: RESULTS.md claims 'in this dir' (no 'commit'/'committed' word) on the same line, --skip-ignored -> BLOCK"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is in this dir, alongside the other artifacts.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then fail "'in this dir' claim on a dropped file was NOT blocked"; else
@@ -281,7 +291,7 @@ if run_dry "$T/reg/note" --skip-ignored; then fail "'in this dir' claim on a dro
 rm -rf "$T"
 
 echo "[smoke] case 21: dropped filename and a 'committed' claim about something else appear on DIFFERENT lines, --skip-ignored -> PASS (no false-positive; same-line co-occurrence only)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl (67 rows) lives on R2, not in git.\nEverything else in this note is committed.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then pass "filename and unrelated 'committed' line on separate lines does not false-positive block"; else
@@ -289,7 +299,7 @@ if run_dry "$T/reg/note" --skip-ignored; then pass "filename and unrelated 'comm
 rm -rf "$T"
 
 echo "[smoke] case 22: RESULTS.md says the dropped file is 'not committed' (negated), --skip-ignored -> PASS (courtesy negation filter)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
 printf 'row\n' > "$T/reg/note/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is not committed; it lives on R2.\n' > "$T/reg/note/RESULTS.md"
 if run_dry "$T/reg/note" --skip-ignored; then pass "negated 'is not committed' claim does not false-positive block"; else
@@ -297,7 +307,7 @@ if run_dry "$T/reg/note" --skip-ignored; then pass "negated 'is not committed' c
 rm -rf "$T"
 
 echo "[smoke] case 23: dropped file lives inside a WHOLLY-ignored directory (not an individually-ignored file), RESULTS.md claims it's committed, WITHOUT --skip-ignored -> BLOCK (ls-files enumerates files inside the ignored dir, not just the dir's own basename)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" 'artifacts/'
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'artifacts/'
 mkdir -p "$T/reg/note/artifacts"
 printf 'row\n' > "$T/reg/note/artifacts/rollout_samples.jsonl"
 printf 'rollout_samples.jsonl is committed in the registry dir.\n' > "$T/reg/note/RESULTS.md"
@@ -307,10 +317,10 @@ if run_dry "$T/reg/note"; then fail "false 'committed' claim on a file inside a 
 rm -rf "$T"
 
 echo "[smoke] case 24: design-stage DESIGN.md with a valid locked Presentation header + a valid instance-profile snapshot -> PASS (#469/#470/#471)"
-T=$(mktemp -d); make_design_stage_repo "$T"
+T=$(mktemp_d); make_design_stage_repo "$T"
 printf '# Design\n\n## Presentation (locked with the researcher 2026-07-14)\nDetails.\n' > "$T/reg/design/DESIGN.md"
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
-cfg24="$(mktemp -d)"; mkdir -p "$cfg24/experiment-lifecycle"
+cfg24="$(mktemp_d)"; mkdir -p "$cfg24/experiment-lifecycle"
 cat > "$cfg24/experiment-lifecycle/aar-profile.toml" <<'EOF'
 schema_version = 1
 [github]
@@ -328,7 +338,7 @@ if [ "$rc24" -eq 0 ]; then pass "design-stage with a valid lock header + valid s
 rm -rf "$T"
 
 echo "[smoke] case 25: design-stage DESIGN.md with NO lock header -> BLOCK ('no locked Presentation section')"
-T=$(mktemp -d); make_design_stage_repo "$T"
+T=$(mktemp_d); make_design_stage_repo "$T"
 printf '# Design\n\n## Presentation\nDetails, not yet locked.\n' > "$T/reg/design/DESIGN.md"
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design"; then fail "design-stage with no lock header was NOT blocked"; else
@@ -337,7 +347,7 @@ if run_dry "$T/reg/design"; then fail "design-stage with no lock header was NOT 
 rm -rf "$T"
 
 echo "[smoke] case 26: design-stage DESIGN.md with a malformed calendar date in the lock header -> BLOCK (digit-shape alone would accept this)"
-T=$(mktemp -d); make_design_stage_repo "$T"
+T=$(mktemp_d); make_design_stage_repo "$T"
 printf '# Design\n\n## Presentation (locked with the researcher 2026-99-99)\nDetails.\n' > "$T/reg/design/DESIGN.md"
 printf 'design-audit findings, clean\n' > "$T/reg/design/DESIGN_AUDIT.md"
 if run_dry "$T/reg/design"; then fail "malformed calendar date (2026-99-99) was NOT blocked"; else
@@ -350,7 +360,7 @@ rm -rf "$T"
 # session's untracked files under a SHARED multi-tenant registry dir never sweep into this PR.
 
 echo "[smoke] case 27: --only names one clean new file; a co-tenant's file with a real secret sits alongside it -> PASS (the co-tenant file is never staged, so it is never scanned)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'my own clean file\n' > "$T/reg/note/mine.md"
 printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
 if run_dry "$T/reg/note" --only mine.md; then pass "--only stages just the named file; the co-tenant's secret file alongside it is never scanned"; else
@@ -358,7 +368,7 @@ if run_dry "$T/reg/note" --only mine.md; then pass "--only stages just the named
 rm -rf "$T"
 
 echo "[smoke] case 28: repeated --only flags name two files; a co-tenant's secret file is left out -> PASS"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'file a\n' > "$T/reg/note/a.md"
 printf 'file b\n' > "$T/reg/note/b.md"
 printf 'token %s\n' "$REAL_GHP" > "$T/reg/note/cotenant_secret.md"
@@ -367,7 +377,7 @@ if run_dry "$T/reg/note" --only a.md --only b.md; then pass "repeated --only fla
 rm -rf "$T"
 
 echo "[smoke] case 29: --only names a path that does not exist under the registry dir -> BLOCK (fail closed, never falls back to the whole dir)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 printf 'my own clean file\n' > "$T/reg/note/mine.md"
 if run_dry "$T/reg/note" --only missing.md; then fail "--only missing.md was NOT blocked"; else
   case "$LAST_ERR" in *"--only path does not exist under"*) pass "nonexistent --only path blocked";;
@@ -375,14 +385,14 @@ if run_dry "$T/reg/note" --only missing.md; then fail "--only missing.md was NOT
 rm -rf "$T"
 
 echo "[smoke] case 30: --only given an absolute path -> BLOCK"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 if run_dry "$T/reg/note" --only /etc/passwd; then fail "--only with an absolute path was NOT blocked"; else
   case "$LAST_ERR" in *"must be relative to the registry dir, not absolute"*) pass "absolute --only path blocked";;
     *) fail "blocked but not on the expected message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 31: --only escapes the registry dir via '../' to a real file OUTSIDE it -> BLOCK (existence alone is not enough; containment is also checked)"
-T=$(mktemp -d); make_repo "$T"
+T=$(mktemp_d); make_repo "$T"
 mkdir -p "$T/reg/sibling"
 printf 'not mine\n' > "$T/reg/sibling/file.txt"
 if run_dry "$T/reg/note" --only ../sibling/file.txt; then fail "--only escaping via '../' to a real file was NOT blocked"; else
@@ -391,14 +401,14 @@ if run_dry "$T/reg/note" --only ../sibling/file.txt; then fail "--only escaping 
 rm -rf "$T"
 
 echo "[smoke] case 32: --only names the one file changed, but it is UNCHANGED vs base -> BLOCK on nothing-to-commit (never silently stages the whole dir instead)"
-T=$(mktemp -d); make_repo "$T"   # page.html is already committed on origin/main, unchanged
+T=$(mktemp_d); make_repo "$T"   # page.html is already committed on origin/main, unchanged
 if run_dry "$T/reg/note" --only page.html; then fail "--only on an unchanged file did NOT refuse (should be nothing to commit)"; else
   case "$LAST_ERR" in *"nothing to commit"*"--only"*) pass "--only on an unchanged file refuses on nothing-to-commit";;
     *) fail "failed but not on the expected nothing-to-commit message: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 echo "[smoke] case 33: --only names a clean file; a co-tenant's GITIGNORED file sits alongside it -> PASS (the ignored-file guard is scoped to the allowlist too, not just the secret scan)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
 printf 'my own clean file\n' > "$T/reg/note/mine.md"
 printf '{"not": "mine"}\n' > "$T/reg/note/cotenant.jsonl"
 if run_dry "$T/reg/note" --only mine.md; then pass "--only scopes the gitignored-file guard too — a co-tenant's ignored file elsewhere in the dir does not block"; else
@@ -406,7 +416,7 @@ if run_dry "$T/reg/note" --only mine.md; then pass "--only scopes the gitignored
 rm -rf "$T"
 
 echo "[smoke] case 34: --only names a file that is itself GITIGNORED -> still BLOCK (the guard still catches an allowlisted path that silently failed to stage)"
-T=$(mktemp -d); make_repo_with_gitignore "$T" '*.jsonl'
+T=$(mktemp_d); make_repo_with_gitignore "$T" '*.jsonl'
 printf '{"in": "battery"}\n' > "$T/reg/note/mine.jsonl"
 if run_dry "$T/reg/note" --only mine.jsonl; then fail "--only on a gitignored path was NOT blocked (#340 guard should still apply within the allowlist)"; else
   case "$LAST_ERR" in *"gitignored file"*"mine.jsonl"*) pass "gitignored --only path still caught by the ignored-file guard";;

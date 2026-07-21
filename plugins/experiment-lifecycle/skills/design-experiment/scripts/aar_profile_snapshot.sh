@@ -233,14 +233,27 @@ def resolve_live():
     return {"path": path, "sha256": digest, "schema_version": sv, "github": gh, "viewer": viewer}
 
 
+# json.dumps only escapes the C0 control range (U+0000-U+001F) per the JSON spec; it leaves DEL (U+007F)
+# and the C1 range (U+0080-U+009F) as literal bytes when ensure_ascii=False. TOML basic strings forbid
+# literal control characters outright, so a profile path containing one of these (automated-researcher#474)
+# made tomllib reject the emitted block even though snapshot itself reported success. \uXXXX-escape them
+# post-hoc, the same way JSON already escapes C0.
+_EXTRA_CONTROL_RE = re.compile("[\x7f\x80-\x9f]")
+
+
+def _escape_extra_controls(s):
+    return _EXTRA_CONTROL_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", s)
+
+
 def _toml_str(value):
     # json.dumps's quoting (\" \\ \n \t \r \b \f \uXXXX) is a valid TOML basic string for every value we
     # emit here — needed because the resolved profile PATH is not charset-restricted like the [github] /
     # viewer fields are (those are regex-validated in require_github/read_viewer above), so a path
     # containing a literal '"' or '\' would otherwise break the emitted TOML. ensure_ascii=False keeps
     # non-BMP characters (e.g. emoji) as raw UTF-8 instead of \uD8xx surrogate-pair escapes — TOML \u
-    # escapes must be Unicode scalar values, and tomllib rejects a surrogate half on parse.
-    return json.dumps(value, ensure_ascii=False)
+    # escapes must be Unicode scalar values, and tomllib rejects a surrogate half on parse. DEL/C1 control
+    # characters still need the extra escaping pass above since json.dumps doesn't cover them.
+    return _escape_extra_controls(json.dumps(value, ensure_ascii=False))
 
 
 def render_block(live):

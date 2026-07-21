@@ -34,8 +34,15 @@
 #   "would this data make the experiment invalid or misleading?" Motivated by the washout truncation bug
 #   (a generated replay froze clean while 1160/6457 rows were truncated mid-CoT; a 2-sample smoke missed it).
 #   experiment-dir: the ~/orchestrator/<exp>/ dir to audit (read-only; the auditor sees its files)
-#   out-file:       findings destination (default: <experiment-dir>/AUDIT.md, or DESIGN_AUDIT.md in --design mode)
-#   design-file:    (--design mode) the proposal to audit; default = newest DESIGN*.md in the dir
+#   out-file:       findings destination. default: <experiment-dir>/AUDIT.md (close mode); in --design mode,
+#                    <experiment-dir>/DESIGN_AUDIT.md, or the next free DESIGN_AUDIT<n>.md if that already
+#                    exists (#465 — a sanctioned re-audit pass must not clobber the prior pass's record, which
+#                    design-experiment's numbered chain convention treats as the validity record). An
+#                    explicitly passed out-file is always authoritative — never auto-numbered.
+#   design-file:    (--design mode) the proposal to audit; default = newest DESIGN*.md in the dir, EXCLUDING
+#                    DESIGN_AUDIT*.md (#465 — those are this tool's own prior-pass output, never the proposal;
+#                    without the exclusion, a preserved DESIGN_AUDIT<n>.md is newer than DESIGN.md and a
+#                    default re-audit would audit the prior audit instead of the design)
 # --design audits the PROPOSAL's DATA-TRUSTABILITY before any money/GPU moves (third gate alongside
 # verify_claim pre-launch and the close audit): will it produce reliable, comparable data for its stated
 # purpose? comparability/co-measurement, confounds that corrupt the number, variable-pinning, anchor
@@ -65,9 +72,15 @@ if [ "${1:-}" = "--design" ]; then MODE=design; shift;
 elif [ "${1:-}" = "--data" ]; then MODE=data; shift; fi
 EXP=${1:?usage: audit_experiment.sh [--design|--data] <experiment-dir> [args...]}
 if [ "$MODE" = design ]; then
-  DESIGN_FILE=${2:-$(find "${EXP%/}" -maxdepth 1 -type f -name 'DESIGN*.md' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
+  DESIGN_FILE=${2:-$(find "${EXP%/}" -maxdepth 1 -type f -name 'DESIGN*.md' ! -name 'DESIGN_AUDIT*' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
   [ -n "$DESIGN_FILE" ] && [ -f "$DESIGN_FILE" ] || { echo "BLOCKED: no design file found in $EXP (pass one explicitly)" >&2; exit 1; }
-  OUT=${3:-${EXP%/}/DESIGN_AUDIT.md}
+  if [ -n "${3:-}" ]; then
+    OUT=$3
+  else
+    OUT=${EXP%/}/DESIGN_AUDIT.md
+    N=2
+    while [ -e "$OUT" ]; do OUT=${EXP%/}/DESIGN_AUDIT${N}.md; N=$((N+1)); done
+  fi
 elif [ "$MODE" = data ]; then
   MANIFEST=${2:-$(find "${EXP%/}" -maxdepth 1 -type f \( -name 'data_audit_manifest*.md' -o -name 'DESIGN*.md' \) -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)}
   [ -n "$MANIFEST" ] && [ -f "$MANIFEST" ] || { echo "BLOCKED: no manifest/design-intent found in $EXP (pass one explicitly) — the auditor needs to know what the data SHOULD be" >&2; exit 1; }
@@ -365,8 +378,8 @@ run_verifier(){
 # Testability seam: print the resolved cross-family selection without invoking a model (mirrors
 # AUDIT_DRY_RUN; lets the offline smoke assert selection + the exact $OUT_TMP redirect target). Cleans up.
 if [ -n "${AUDIT_PRINT_VERIFIER:-}" ]; then
-  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\n' \
-    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT_TMP" "$VERIFIER_CMD"
+  printf 'AUDITOR_FAMILY=%s\nRUNNER_FAMILY=%s\nOUT=%s\nOUT_TMP=%s\nVERIFIER_CMD=%s\nDESIGN_FILE=%s\n' \
+    "$AUDITOR_FAMILY" "$RUNNER_FAMILY" "$OUT" "$OUT_TMP" "$VERIFIER_CMD" "${DESIGN_FILE:-}"
   rm -f "$OUT_TMP"; exit 0
 fi
 echo "[audit_experiment] mode=$MODE exp=$EXP auditor=$AUDITOR_FAMILY runner=$RUNNER_FAMILY" >&2

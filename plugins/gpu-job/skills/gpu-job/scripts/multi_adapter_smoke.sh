@@ -3,8 +3,9 @@
 # JSON/syntax checks can't catch: per-adapter output ISOLATION (a pre-planted stale cache is wiped,
 # never reused), teardown BETWEEN adapters (ordering), the serve_fn PID contract (numeric-or-die,
 # both default + custom serve paths), and the distinctness assertion that catches the exact
-# "identical numbers across adapters" reuse bug (error dies, warn continues loud). Fully OFFLINE:
-# nvidia-smi / curl / pkill / pgrep are stubbed on PATH, and serve_wait is shadowed — no GPU, no vLLM.
+# "identical numbers across adapters" reuse bug (error dies, warn continues loud); and self-safety
+# (#299) — a caller pattern that matches the driver's OWN command line must never kill the driver.
+# Fully OFFLINE: nvidia-smi / curl / pgrep are stubbed on PATH, and serve_wait is shadowed — no GPU, no vLLM.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,14 +24,10 @@ cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 exit 1            # /v1/models always refuses -> ma_teardown's port-free check passes
 EOF
-cat > "$BIN/pkill" <<'EOF'
-#!/usr/bin/env bash
-[ -n "${MA_SMOKE_ORDER:-}" ] && echo KILL >> "$MA_SMOKE_ORDER"   # record teardowns for the ordering test
-exit 0
-EOF
 cat > "$BIN/pgrep" <<'EOF'
 #!/usr/bin/env bash
-exit 1
+[ -n "${MA_SMOKE_ORDER:-}" ] && echo KILL >> "$MA_SMOKE_ORDER"   # record teardowns for the ordering test
+exit 1                                                            # no pattern matches -> nothing to kill
 EOF
 # fake `python`: stand in for the vLLM api_server launch so vllm_serve_lora's real $! is a live PID
 cat > "$BIN/python" <<'EOF'
@@ -97,5 +94,25 @@ if ( serve_adapters_eval "$TMP/out9" 8000 dead_serve ref_eval -- a1 ) >/dev/null
 def_serve(){ vllm_serve_lora /fake/base "$1" "$2" "$3"; }        # closes over a fake base model
 PID=$(def_serve adapterX 8000 "$TMP/serve.log")
 case "$PID" in ''|*[!0-9]*) no "default-serve-numeric-pid ($PID)";; *) ok default-serve-numeric-pid; kill "$PID" 2>/dev/null;; esac
+
+# --- 7. self-safety (#299): a caller pattern that matches the DRIVER's own command line must not
+# kill the driver. Stub pgrep to report the smoke's own PID (self-match) plus an unrelated survivor
+# PID for the crafted pattern; override the `kill` builtin to LOG targets instead of signaling them,
+# so a bug here can't actually kill this smoke run.
+SELF=$$
+cat > "$BIN/pgrep" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *driver-pattern*) echo $SELF; echo 99999 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$BIN/pgrep"
+KILLED="$TMP/killed_pids"; : > "$KILLED"
+kill(){ echo "$2" >> "$KILLED"; }   # override the builtin: record the target instead of signaling it
+( MA_KILL_PATTERNS="driver-pattern" ma_teardown "" 8000 ) >/dev/null 2>&1
+unset -f kill
+grep -qx "$SELF" "$KILLED" && no "self-safety-no-self-kill (killed self pid $SELF)" || ok self-safety-no-self-kill
+grep -qx "99999" "$KILLED" && ok self-safety-kills-others || no "self-safety-kills-others ($(cat "$KILLED"))"
 
 [ "$fails" = 0 ] && { echo "PASS multi_adapter_smoke"; exit 0; } || { echo "FAIL multi_adapter_smoke"; exit 1; }
