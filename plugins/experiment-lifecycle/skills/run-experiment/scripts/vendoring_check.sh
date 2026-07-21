@@ -47,8 +47,17 @@ exp_dir = os.path.realpath(os.environ["EXP_DIR"])
 scripts_dir = sys.argv[1]
 
 
+# resolve_expr returns (value, exact) where exact=True means the value is anchored to the script's OWN
+# directory regardless of the process's runtime CWD (a __file__-derived expression), and exact=False means
+# it's a bare string literal -- Python resolves that against the process's CWD at invocation time, which a
+# static scan cannot know, so callers must check it against every plausible invocation CWD (#499 P0 review:
+# `sys.path.insert(0, "..")` invoked as `python scripts/main.py` from the experiment root resolves against
+# the experiment root, NOT the script's own directory -- anchoring a bare literal to script_dir alone missed
+# exactly this case).
+
+
 def resolve_dirname_file(node, script_dir):
-    # os.path.dirname(__file__) -> the script's own directory
+    # os.path.dirname(__file__) -> the script's own directory (exact, CWD-independent)
     if (isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "dirname"
@@ -65,7 +74,7 @@ def resolve_join(node, script_dir):
         return None
     if not node.args:
         return None
-    base = resolve_expr(node.args[0], script_dir)
+    base, exact = resolve_expr(node.args[0], script_dir)
     if base is None:
         return None
     parts = [base]
@@ -74,21 +83,21 @@ def resolve_join(node, script_dir):
             parts.append(a.value)
         else:
             return None
-    return os.path.join(*parts)
+    return os.path.join(*parts), exact
 
 
 def resolve_expr(node, script_dir):
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
+        return node.value, False
     if isinstance(node, ast.Name) and node.id == "__file__":
-        return script_dir
+        return script_dir, True
     r = resolve_dirname_file(node, script_dir)
     if r is not None:
-        return r
+        return r, True
     r = resolve_join(node, script_dir)
     if r is not None:
         return r
-    return None
+    return None, False
 
 
 violations = []
@@ -125,14 +134,28 @@ for root, _dirs, files in os.walk(scripts_dir):
                 continue
             # insert(idx, target) vs append(target) -- the target is always the LAST positional arg.
             target_node = node.args[-1]
-            target = resolve_expr(target_node, script_dir)
+            target, exact = resolve_expr(target_node, script_dir)
             if target is None:
                 unresolved.append((path, node.lineno, ast.dump(target_node)))
                 continue
-            resolved = target if os.path.isabs(target) else os.path.normpath(os.path.join(script_dir, target))
-            resolved = os.path.realpath(resolved)
-            if not (resolved == exp_dir or resolved.startswith(exp_dir + os.sep)):
-                violations.append((path, node.lineno, f"{target!r} -> {resolved} (outside {exp_dir})"))
+            if os.path.isabs(target):
+                anchors = [None]  # absolute path, no anchor needed
+            elif exact:
+                anchors = [script_dir]
+            else:
+                # A bare relative string literal: Python resolves it against the process's CWD at
+                # invocation time, which this static scan cannot know. Check every plausible invocation
+                # CWD -- the script's own directory, and the experiment root (the common CWD when a
+                # script is invoked as `python scripts/main.py` from the experiment root) -- and flag a
+                # violation if EITHER anchor escapes, fail-closed rather than trusting one guessed anchor.
+                anchors = sorted({script_dir, exp_dir})
+            for anchor in anchors:
+                resolved = target if anchor is None else os.path.normpath(os.path.join(anchor, target))
+                resolved = os.path.realpath(resolved)
+                if not (resolved == exp_dir or resolved.startswith(exp_dir + os.sep)):
+                    anchor_note = "" if anchor is None else f" (resolved from CWD={anchor})"
+                    violations.append((path, node.lineno, f"{target!r} -> {resolved}{anchor_note} (outside {exp_dir})"))
+                    break
 
 for path, lineno, msg in unresolved:
     print(f"UNRESOLVED: {path}:{lineno}: sys.path target could not be statically resolved ({msg}) -- review by hand")

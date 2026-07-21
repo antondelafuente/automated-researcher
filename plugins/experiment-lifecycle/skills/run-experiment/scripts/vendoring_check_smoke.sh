@@ -102,6 +102,19 @@ OUT=$(bash "$V" "$T/exp"); RC=$?
 [ "$RC" = 1 ] && echo "$OUT" | grep -q 'bad.py' && ok mixed-files-violation-named || no "mixed-files-violation-named (rc=$RC out=$OUT)"
 rm -rf "$T"
 
+# --- 10b. a BARE relative literal that stays in-tree when resolved from script_dir, but escapes when
+# resolved from the experiment root (the process's CWD when invoked as `python scripts/main.py` from the
+# experiment root, the review's exact #499 P0 repro) -> VIOLATION (fail closed on the CWD-anchored read,
+# not just the script_dir-anchored one) ------------------------------------------------------------------
+T=$(mktemp_d); mkdir -p "$T/exp/scripts"
+cat > "$T/exp/scripts/main.py" <<'PY'
+import sys
+sys.path.insert(0, "..")
+PY
+OUT=$(bash "$V" "$T/exp"); RC=$?
+[ "$RC" = 1 ] && echo "$OUT" | grep -q 'VIOLATION' && ok cwd-anchored-relative-escape-violation || no "cwd-anchored-relative-escape-violation (rc=$RC out=$OUT)"
+rm -rf "$T"
+
 # --- 10. a script with a syntax error -> reported as a violation (fail closed, not silently skipped) ---
 T=$(mktemp_d); mkdir -p "$T/exp/scripts"
 cat > "$T/exp/scripts/broken.py" <<'PY'
