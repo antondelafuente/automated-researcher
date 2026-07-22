@@ -550,18 +550,22 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     at your OWN worktree's registry dir, never the live `origin/$BASE_BRANCH` registry, since this verification
     runs before `log-experiment`** — the step below that actually lands the experiment's dir into the live
     tree — so the live registry doesn't have it yet; your worktree, branched from main, at least has the new
-    dir. **This check proves the mechanism, not production completeness:** it exists to show the
-    assemble→render→bundle→gallery-rebuild pipeline actually produces a correctly-sorted index containing the
-    new slug — it is not asserting that the built index is a complete, currently-accurate production gallery.
-    A long-running branch can predate a sibling's concurrent merge, so that sibling's dir may be absent from
-    this preview; that's fine, since every directory your worktree DOES have still resolves `git log -1`
-    normally, so the entries present still sort correctly. The fail-closed failure mode this gate exists to
-    prevent — a registry root where `git log -1` resolves for NONE of the directories, collapsing the whole
-    index to file-mtime ordering (an observed incident, not a hypothetical, when pointed at the live
-    pre-merge registry — automated-researcher#610) — is a property of the root you point at, not of how
-    fresh your worktree's own history is, so a stale-but-otherwise-normal worktree cannot reproduce it.
-    `runs.jsonl` isn't git-tracked, so a fresh worktree won't have it — copy the live registry's `runs.jsonl`
-    in as an uncommitted scratch file first, or accept it being stale/absent for this one pre-merge check.
+    dir. **Refresh that worktree from the current base before running the rebuild whose output you land:**
+    `git fetch origin && git merge origin/$BASE_BRANCH` inside the worktree. There is no post-merge gallery
+    rebuild anywhere in this product — the index this rebuild produces IS what the dashboard serves until a
+    later close rebuilds it — so a sibling's registry dir merged after your branch point would otherwise
+    silently vanish from the served gallery. The merge is safe: registry dirs are per-experiment disjoint
+    (conflict-free in practice), and `log-experiment` stages from its own fresh worktree off
+    `origin/$BASE_BRANCH` (below, automated-researcher#553), so this refresh can't contaminate the record
+    landing. The one accepted residual: a sibling merging in the minutes between your fetch and your land
+    can still be briefly absent from the served gallery — that self-heals at the next close's rebuild, and
+    the refresh above is what closes the unbounded branch-age window, which is the one that matters. The
+    fail-closed failure mode this gate exists to prevent — a registry root where `git log -1` resolves for
+    NONE of the directories, collapsing the whole index to file-mtime ordering (an observed incident, not a
+    hypothetical, when pointed at the live pre-merge registry — automated-researcher#610) — is a property
+    of the root you point at. `runs.jsonl` isn't git-tracked, so a fresh worktree won't have it — copy the
+    live registry's `runs.jsonl` in as an uncommitted scratch file first, or accept it being stale/absent
+    for this one pre-merge check.
   - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
     land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
     shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
