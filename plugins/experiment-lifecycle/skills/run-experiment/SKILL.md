@@ -546,7 +546,28 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     (the command + the matching output line) cited in the close notes/CHECKLIST. A publish leg without this
     evidence is an incomplete close, not a judgment call: this is the same fail-closed pattern as the skill's
     other gates, added because a real close (run-csp1-gemma4-refusal-ablation-1) built the page but skipped the
-    rebuild, so the page existed but the dashboard never listed it.
+    rebuild, so the page existed but the dashboard never listed it. **Point the rebuild's registry-root argument
+    at your OWN worktree's registry dir, never the live base-branch registry, since this verification
+    runs before `log-experiment`** — the step below that actually lands the experiment's dir into the live
+    tree — so the live registry doesn't have it yet; your worktree, branched from the base branch, at least has the new
+    dir. **Refresh that worktree from the current base before running the rebuild whose output you land:**
+    inside the worktree, run `git fetch origin && git merge origin/<base-branch>`, where `<base-branch>` is
+    the `[github] base_branch` value from your START.md instance-profile snapshot (a required snapshot
+    field — the same base your worktree was forked from and `log-experiment` will target). There is no post-merge gallery
+    rebuild anywhere in this product — the index this rebuild produces IS what the dashboard serves until a
+    later close rebuilds it — so a sibling's registry dir merged after your branch point would otherwise
+    silently vanish from the served gallery. The merge is safe: registry dirs are per-experiment disjoint
+    (conflict-free in practice), and `log-experiment` stages from its own fresh worktree off
+    `origin/$BASE_BRANCH` (below, automated-researcher#553), so this refresh can't contaminate the record
+    landing. The one accepted residual: a sibling merging in the minutes between your fetch and your land
+    can still be briefly absent from the served gallery — that self-heals at the next close's rebuild, and
+    the refresh above is what closes the unbounded branch-age window, which is the one that matters. The
+    fail-closed failure mode this gate exists to prevent — a registry root where `git log -1` resolves for
+    NONE of the directories, collapsing the whole index to file-mtime ordering (an observed incident, not a
+    hypothetical, when pointed at the live pre-merge registry — automated-researcher#610) — is a property
+    of the root you point at. `runs.jsonl` isn't git-tracked, so a fresh worktree won't have it — copy the
+    live registry's `runs.jsonl` in as an uncommitted scratch file first, or accept it being stale/absent
+    for this one pre-merge check.
   - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
     land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
     shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
