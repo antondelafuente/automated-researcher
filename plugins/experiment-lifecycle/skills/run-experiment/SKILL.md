@@ -549,13 +549,19 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     rebuild, so the page existed but the dashboard never listed it. **Point the rebuild's registry-root argument
     at your OWN worktree's registry dir, never the live `origin/$BASE_BRANCH` registry, since this verification
     runs before `log-experiment`** — the step below that actually lands the experiment's dir into the live
-    tree — so the live registry doesn't have it yet; your worktree is branched from main and already carries
-    the new dir plus everything already merged, making it the only tree the slug can appear in at this point.
-    Pointing at the live registry here doesn't just fail to show the slug: a registry root where `git log -1`
-    resolves for none of the directories falls back to file mtime for every row, silently collapsing the whole
-    index's sort order (an observed incident, not a hypothetical — automated-researcher#610). `runs.jsonl`
-    isn't git-tracked, so a fresh worktree won't have it — copy the live registry's `runs.jsonl` in as an
-    uncommitted scratch file first, or accept it being stale/absent for this one pre-merge check.
+    tree — so the live registry doesn't have it yet; your worktree, branched from main, at least has the new
+    dir. **This check proves the mechanism, not production completeness:** it exists to show the
+    assemble→render→bundle→gallery-rebuild pipeline actually produces a correctly-sorted index containing the
+    new slug — it is not asserting that the built index is a complete, currently-accurate production gallery.
+    A long-running branch can predate a sibling's concurrent merge, so that sibling's dir may be absent from
+    this preview; that's fine, since every directory your worktree DOES have still resolves `git log -1`
+    normally, so the entries present still sort correctly. The fail-closed failure mode this gate exists to
+    prevent — a registry root where `git log -1` resolves for NONE of the directories, collapsing the whole
+    index to file-mtime ordering (an observed incident, not a hypothetical, when pointed at the live
+    pre-merge registry — automated-researcher#610) — is a property of the root you point at, not of how
+    fresh your worktree's own history is, so a stale-but-otherwise-normal worktree cannot reproduce it.
+    `runs.jsonl` isn't git-tracked, so a fresh worktree won't have it — copy the live registry's `runs.jsonl`
+    in as an uncommitted scratch file first, or accept it being stale/absent for this one pre-merge check.
   - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
     land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
     shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
