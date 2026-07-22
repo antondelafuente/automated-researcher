@@ -547,11 +547,13 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     evidence is an incomplete close, not a judgment call: this is the same fail-closed pattern as the skill's
     other gates, added because a real close (run-csp1-gemma4-refusal-ablation-1) built the page but skipped the
     rebuild, so the page existed but the dashboard never listed it. **Point the rebuild's registry-root argument
-    at your OWN worktree's registry dir, never the live `origin/$BASE_BRANCH` registry, since this verification
+    at your OWN worktree's registry dir, never the live base-branch registry, since this verification
     runs before `log-experiment`** — the step below that actually lands the experiment's dir into the live
-    tree — so the live registry doesn't have it yet; your worktree, branched from main, at least has the new
+    tree — so the live registry doesn't have it yet; your worktree, branched from the base branch, at least has the new
     dir. **Refresh that worktree from the current base before running the rebuild whose output you land:**
-    `git fetch origin && git merge origin/$BASE_BRANCH` inside the worktree. There is no post-merge gallery
+    inside the worktree, run `git fetch origin && git merge origin/<base-branch>`, where `<base-branch>` is
+    the `[github] base_branch` value from your START.md instance-profile snapshot (a required snapshot
+    field — the same base your worktree was forked from and `log-experiment` will target). There is no post-merge gallery
     rebuild anywhere in this product — the index this rebuild produces IS what the dashboard serves until a
     later close rebuilds it — so a sibling's registry dir merged after your branch point would otherwise
     silently vanish from the served gallery. The merge is safe: registry dirs are per-experiment disjoint
