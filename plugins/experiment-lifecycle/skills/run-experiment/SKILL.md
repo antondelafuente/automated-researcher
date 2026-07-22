@@ -547,16 +547,15 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     evidence is an incomplete close, not a judgment call: this is the same fail-closed pattern as the skill's
     other gates, added because a real close (run-csp1-gemma4-refusal-ablation-1) built the page but skipped the
     rebuild, so the page existed but the dashboard never listed it. **Point the rebuild's registry-root argument
-    at your OWN worktree's registry (e.g. `~/ws/run/<exp>/registry`), never `~/research-lab/registry`, since
-    this verification runs before `log-experiment`** — the step below that actually lands the experiment's dir
-    into `~/research-lab` — so the live registry doesn't have it yet; your worktree is branched from main and
-    already carries the new dir plus everything already merged, making it the only tree the slug can appear in
-    at this point. Pointing at the live registry here doesn't just fail to show the slug: a registry root where
-    `git log -1` resolves for none of the directories falls back to file mtime for every row, silently
-    collapsing the whole index's sort order (an observed incident, not a hypothetical — automated-researcher#610).
-    `runs.jsonl` isn't git-tracked, so a fresh worktree won't have it — copy the live
-    `~/research-lab/registry/runs.jsonl` in as an uncommitted scratch file first, or accept it being
-    stale/absent for this one pre-merge check.
+    at your OWN worktree's registry dir, never the live `origin/$BASE_BRANCH` registry, since this verification
+    runs before `log-experiment`** — the step below that actually lands the experiment's dir into the live
+    tree — so the live registry doesn't have it yet; your worktree is branched from main and already carries
+    the new dir plus everything already merged, making it the only tree the slug can appear in at this point.
+    Pointing at the live registry here doesn't just fail to show the slug: a registry root where `git log -1`
+    resolves for none of the directories falls back to file mtime for every row, silently collapsing the whole
+    index's sort order (an observed incident, not a hypothetical — automated-researcher#610). `runs.jsonl`
+    isn't git-tracked, so a fresh worktree won't have it — copy the live registry's `runs.jsonl` in as an
+    uncommitted scratch file first, or accept it being stale/absent for this one pre-merge check.
   - **Commit the iterable SOURCE, not just rendered HTML:** the per-experiment build/assemble scripts + manifest
     land in the viewer repo, so any later agent iterates by editing a script and re-running. Framing genuinely
     shifts on contact with the data (a real headline plot changed form after the researcher saw it) — committed
