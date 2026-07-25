@@ -80,7 +80,10 @@
 #              first.
 #   answer-question -> the designer answers the current pending question (optionally naming the
 #              --question-id it's answering, refused on a mismatch — protects a racy designer from
-#              answering a question that's since moved on). FAILS if there is no pending question.
+#              answering a question that's since moved on). FAILS if there is no pending question, and
+#              FAILS if the pending question already has an unconsumed answer — one answer at a time,
+#              same reasoning as ask-question's own one-in-flight guard: a second answer-question before
+#              consume-question would silently destroy an answer the executor hasn't read yet.
 #   has-question -> exit 0 iff an unanswered question is pending on a still-active record; else exit 1
 #              (fail-closed on missing/corrupt/terminal, same shape as is-relaunch-requested).
 #   has-answer -> exit 0 iff the pending question has been answered (awaiting the executor's
@@ -223,7 +226,8 @@ PY
 #                     yet); "" -> leave. Caller (cmd_ask_question) has already refused this call if a
 #                     question is already pending and unanswered.
 #   <set_answer>     non-empty -> set the answer text + answered_at for the CURRENT pending question;
-#                     "" -> leave. Caller has already confirmed a question is pending.
+#                     "" -> leave. Caller has already confirmed a question is pending AND not already
+#                     answered (cmd_answer_question refuses a second answer before consume-question).
 #   <clear_qa>       "true" -> clear question/question_id/question_asked_at/answer/answered_at (the
 #                     executor's consume-question); question_seq is NOT reset, so ids stay monotonic
 #                     across the run's lifetime and a stale --question-id can never alias a later question.
@@ -621,9 +625,16 @@ cmd_answer_question(){
     active)  : ;;
     *)       die "answer-question: unexpected record state '$state' for '$id'";;
   esac
-  local cur_q cur_id
+  local cur_q cur_id cur_a
   cur_q=$(get_field "$file" question)
   [ -n "$cur_q" ] || die "answer-question: run '$id' has no pending question to answer"
+  # Same one-in-flight guard as ask-question's own (see #223's answered-but-unconsumed clobber fix):
+  # an already-answered-but-unconsumed pending question must not be silently re-answered — that would
+  # destroy an answer the executor hasn't read yet. consume-question first.
+  cur_a=$(get_field "$file" answer)
+  if [ -n "$cur_a" ]; then
+    die "answer-question: run '$id' already has an unconsumed answer for the pending question — consume it first before answering again"
+  fi
   if [ -n "$want_id" ]; then
     cur_id=$(get_field "$file" question_id)
     [ "$want_id" = "$cur_id" ] || die "answer-question: --question-id $want_id does not match the current pending question_id $cur_id (it may have moved on — re-read the question first)"

@@ -356,6 +356,12 @@ if run ask-question q10 --text "third?" >/dev/null 2>&1; then no answered-uncons
 [ "$(jget q10 question)" = "smaller GPU ok?" ] && ok answered-unconsumed-ask-noop-question || no answered-unconsumed-ask-noop-question
 [ "$(jget q10 answer)" = "yes, use the small one" ] && ok answered-unconsumed-ask-noop-answer || no answered-unconsumed-ask-noop-answer
 
+# a second answer-question while the first answer is unconsumed is also refused — it must not
+# clobber an answer the executor hasn't read yet (the symmetric gap to the ask-side one above:
+# answer-question used to only check a question was pending, not that it was still unanswered)
+if run answer-question q10 --text "actually, use the big one" >/dev/null 2>&1; then no answered-unconsumed-reanswer-refused; else ok answered-unconsumed-reanswer-refused; fi
+[ "$(jget q10 answer)" = "yes, use the small one" ] && ok answered-unconsumed-reanswer-noop || no answered-unconsumed-reanswer-noop
+
 # consuming clears both; consuming again is idempotent (no error, no residual state)
 run consume-question q10 >/dev/null
 if hasq q10; then no consume-clears-question; else ok consume-clears-question; fi
