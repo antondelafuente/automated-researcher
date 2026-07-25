@@ -75,8 +75,9 @@
 #   ask-question -> the executor asks the designer-of-record a load-bearing question (a fresh
 #              question_id, monotonic across the run's lifetime). FAILS CLOSED on a stopped/closed/
 #              missing/corrupt record (same guard as request-relaunch) and REFUSES if a question is
-#              already pending and unanswered — one in-flight question at a time, so a second ask never
-#              silently clobbers the first; answer or consume it first.
+#              already pending — answered or not — one in-flight question at a time, so a second ask
+#              never silently clobbers the first (an answered-but-unconsumed one included); consume it
+#              first.
 #   answer-question -> the designer answers the current pending question (optionally naming the
 #              --question-id it's answering, refused on a mismatch — protects a racy designer from
 #              answering a question that's since moved on). FAILS if there is no pending question.
@@ -585,13 +586,14 @@ cmd_ask_question(){
     active)  : ;;
     *)       die "ask-question: unexpected record state '$state' for '$id'";;
   esac
-  # One in-flight question at a time — a second ask before the first is answered/consumed would
-  # silently clobber it (the designer could be mid-answer to the first).
-  local cur_q cur_a
+  # One in-flight question at a time — a second ask before the first is consumed would silently
+  # clobber it, whether or not it's been answered yet: an answered-but-unconsumed question still
+  # holds an answer the executor hasn't read, and a fresh ask would overwrite that answer along with
+  # the question (the designer could also be mid-answer to the first).
+  local cur_q
   cur_q=$(get_field "$file" question)
-  cur_a=$(get_field "$file" answer)
-  if [ -n "$cur_q" ] && [ -z "$cur_a" ]; then
-    die "ask-question: run '$id' already has an unanswered pending question — answer or consume it first"
+  if [ -n "$cur_q" ]; then
+    die "ask-question: run '$id' already has a pending question — consume it first (answer it first if unanswered)"
   fi
   write_record "$file" "" "" "" "" "false" "" "" "" "" "" "" "" "" "" "$text" "" ""
   local qid; qid=$(get_field "$file" question_id)

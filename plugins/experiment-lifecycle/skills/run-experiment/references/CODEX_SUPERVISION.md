@@ -45,9 +45,10 @@ that the designer can answer without stepping into the run. The record now carri
 question/answer inbox:
 
 - **`ask-question <run-id> --text "..."`** (the executor) — records a load-bearing question and a fresh,
-  monotonic `question_id`. Refuses if a question is already pending and unanswered (one in flight at a
-  time — a second ask before the first is resolved would silently clobber it, and the executor should be
-  working on everything else in the meantime, not queuing more questions no one has seen yet).
+  monotonic `question_id`. Refuses if a question is already pending — answered or not — until it is
+  consumed (one in flight at a time — a second ask before the first is consumed would silently clobber
+  it, including overwriting an answer the executor hasn't read yet; the executor should be working on
+  everything else in the meantime, not queuing more questions no one has seen yet).
 - **`answer-question <run-id> --text "..." [--question-id N]`** (the designer) — answers the current
   pending question. Passing `--question-id` guards against answering a question that has since moved on
   (mismatched id is refused, not silently accepted).

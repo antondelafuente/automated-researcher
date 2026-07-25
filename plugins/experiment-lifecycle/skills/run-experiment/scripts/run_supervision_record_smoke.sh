@@ -349,6 +349,13 @@ run answer-question q10 --text "yes, use the small one" --question-id 1 >/dev/nu
 if hasa q10; then ok answer-sets-has-answer; else no answer-sets-has-answer; fi
 [ "$(jget q10 answer)" = "yes, use the small one" ] && ok answer-records-text || no answer-records-text
 
+# a second ask after the first is answered but NOT YET consumed is also refused — it must not
+# clobber an answer the executor hasn't read yet (regression: this used to only guard the
+# unanswered case, so an answered-but-unconsumed question could be silently overwritten)
+if run ask-question q10 --text "third?" >/dev/null 2>&1; then no answered-unconsumed-ask-refused; else ok answered-unconsumed-ask-refused; fi
+[ "$(jget q10 question)" = "smaller GPU ok?" ] && ok answered-unconsumed-ask-noop-question || no answered-unconsumed-ask-noop-question
+[ "$(jget q10 answer)" = "yes, use the small one" ] && ok answered-unconsumed-ask-noop-answer || no answered-unconsumed-ask-noop-answer
+
 # consuming clears both; consuming again is idempotent (no error, no residual state)
 run consume-question q10 >/dev/null
 if hasq q10; then no consume-clears-question; else ok consume-clears-question; fi
