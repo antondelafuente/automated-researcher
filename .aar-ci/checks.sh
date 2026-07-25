@@ -533,4 +533,22 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/classify(-ticket-t
   fi
 fi
 
+# 19. blocked-state smoke (#629): the issue-side blocked-state machine that turns a blocked implement run
+#     from a dead letter into a terminal routed state (the #620 incident: ~14h silent stall, then four
+#     stateless runs re-deriving the same block). Covers the dispatchable/inert decision (a bare `ready`
+#     re-add is inert; a restore-authority `DECISION:` or a body edit releases it; the blocked agent can
+#     never unblock itself; a missing/forged state record fails closed), block-reason normalization, and
+#     static assertions that implement-on-ready.yml actually routes a block (`ready` removed +
+#     blocked-state label + needs-human + machine-readable record + non-success run conclusion) while
+#     leaving the `opened` path unchanged. Runs when the helper, its smoke, or implement-on-ready.yml changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/blocked(-state|_state_smoke)\.sh|\.github/workflows/implement-on-ready\.yml)$'; then
+  BS_SMOKE="$ROOT/.github/scripts/blocked_state_smoke.sh"
+  if [ -f "$BS_SMOKE" ]; then
+    echo "[checks] blocked-state smoke" >&2
+    bash "$BS_SMOKE" >&2 && ok "blocked-state smoke" || err "blocked-state smoke FAILED"
+  else
+    err "blocked-state.sh or implement-on-ready.yml changed but blocked_state_smoke.sh missing — cannot verify the blocked-state machine"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
