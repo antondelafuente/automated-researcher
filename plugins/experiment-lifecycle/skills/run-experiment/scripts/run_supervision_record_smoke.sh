@@ -515,6 +515,16 @@ if run verify-bootstrap vb6 --executor-family codex --supervision-mode controlle
      --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb6.out" 2>&1; then no verify-bootstrap-timeout; else ok verify-bootstrap-timeout; fi
 grep -q "never reached the full expected state" "$TMP/vb6.out" && ok verify-bootstrap-timeout-message || no verify-bootstrap-timeout-message
 
+# --- verify-bootstrap: a coarse --poll-interval-sec must never let the wait overshoot --timeout-sec by
+# the full interval (round-1 review P0: the deadline used to be checked only before sleeping the whole
+# poll_sec, so --timeout-sec 1 --poll-interval-sec 30 could block ~30s instead of failing near 1s) ---
+VB8_START=$(date +%s)
+if run verify-bootstrap vb_overshoot --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb_overshoot --question-route record --terminal-route record \
+     --timeout-sec 1 --poll-interval-sec 30 >/dev/null 2>&1; then no verify-bootstrap-no-overshoot; else ok verify-bootstrap-no-overshoot; fi
+VB8_ELAPSED=$(( $(date +%s) - VB8_START ))
+[ "$VB8_ELAPSED" -lt 10 ] && ok verify-bootstrap-no-overshoot-timing || no "verify-bootstrap-no-overshoot-timing (took ${VB8_ELAPSED}s)"
+
 # --- verify-bootstrap: terminal (stopped/closed/invalid) records refused immediately, never treated as a healthy wait ---
 run create vb7 --handoff /art/vb7/TEMP.md --executor-family codex --supervision-mode controller-supervised \
   --worktree /ws/run/vb7 --question-route record --terminal-route record --look-again "777" >/dev/null

@@ -1,3 +1,12 @@
+- experiment-lifecycle 0.3.81 (2026-07-25): fixes two round-1 review P0s in #628's `verify-bootstrap` gate.
+  `classify_record` + six separate `get_field` calls each opened and re-parsed the record file independently,
+  so a concurrent `stop`/`close` landing between them could be observed as "active" alongside stale
+  terminal-adjacent field values, letting a race falsely PASS the receipt; replaced with a single
+  `snapshot_verify_fields` read (one `json.load()`, state + all six fields together) so classification and
+  field values can never straddle a mutation. Separately, the poll loop checked the deadline only before
+  sleeping the full `--poll-interval-sec`, so a coarse interval (e.g. `--timeout-sec 1 --poll-interval-sec
+  30`) could overshoot the requested timeout by up to that interval; the sleep is now clamped to whatever is
+  left of the deadline. Added smoke coverage for the overshoot case.
 - experiment-lifecycle 0.3.80 (2026-07-25): hardens Codex-native dispatch with a deterministic
   supervision-bootstrap receipt (#628) — a successful `create_thread` only proved a thread exists, not that
   the executor's supervision record was ever written, bound to the right worktree/routes/mode, or backed by

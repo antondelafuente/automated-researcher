@@ -768,6 +768,50 @@ cmd_has_answer(){
   exit 1
 }
 
+# snapshot-verify-fields: print state + the verify-bootstrap fields from ONE json.load(), so classification
+# and field values can never straddle a concurrent stop/close (automated-researcher#628 review round-1:
+# separate classify_record + per-field get_field calls could observe "active" then read fields from a
+# record that went terminal in between, letting a stop/close race verification into a false PASS). ALWAYS
+# emits exactly 7 lines (state, then the 6 fields, "" when unset/no record) so a fixed-count `read` on the
+# caller side never blocks on a short read; a value is never itself multi-line (opaque names/enum/paths).
+snapshot_verify_fields(){ # <file>
+  python3 - "$1" <<'PY'
+import json, os, sys
+
+FIELDS = ("executor_family", "supervision_mode", "worktree_path", "question_route", "terminal_state_route", "look_again_by")
+
+def emit(state, d):
+    print(state)
+    for name in FIELDS:
+        v = (d or {}).get(name)
+        if v is None:
+            print("")
+        elif isinstance(v, bool):
+            print("true" if v else "false")
+        else:
+            print(v)
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    emit("absent", None)
+    sys.exit(0)
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        raise ValueError
+except Exception:
+    emit("invalid", None)
+    sys.exit(0)
+if d.get("closed") is True:
+    state = "closed"
+elif d.get("stopped") is True:
+    state = "stopped"
+else:
+    state = "active"
+emit(state, d)
+PY
+}
+
 # is-closed: exit 0 iff the record is a CLEAN close — closed==true AND NOT also stopped. exit 1 otherwise.
 # absent/invalid/active fail closed via classify_record; a `stopped`-then-`closed` record (the deliberate-quit
 # finalize — cmd_close allows stop->close, and classify_record collapses it to "closed") ALSO fails closed,
@@ -887,20 +931,18 @@ cmd_verify_bootstrap(){
   local start_ts; start_ts=$(date +%s)
   local state
   while :; do
-    state=$(classify_record "$file")
+    # One snapshot call per iteration: state and all six fields come from the SAME json.load(), so a
+    # concurrent stop/close can never be observed as "active" alongside terminal-stale field values (see
+    # snapshot_verify_fields's header note — the round-1 TOCTOU this closes).
+    local got_family got_mode got_wt got_qr got_tr got_la
+    { IFS= read -r state; IFS= read -r got_family; IFS= read -r got_mode; IFS= read -r got_wt; \
+      IFS= read -r got_qr; IFS= read -r got_tr; IFS= read -r got_la; } < <(snapshot_verify_fields "$file")
     case "$state" in
       invalid) die "verify-bootstrap: run '$id' has a malformed record on disk — refusing to treat dispatch as complete (inspect $file)";;
       stopped) die "verify-bootstrap: run '$id' is stopped (terminal) before bootstrap completed — dispatch cannot be treated as complete";;
       closed)  die "verify-bootstrap: run '$id' is closed (terminal) before bootstrap completed — dispatch cannot be treated as complete";;
       absent)  : ;;  # keep polling — the executor may not have created the record yet
       active)
-        local got_family got_mode got_wt got_qr got_tr got_la
-        got_family=$(get_field "$file" executor_family)
-        got_mode=$(get_field "$file" supervision_mode)
-        got_wt=$(get_field "$file" worktree_path)
-        got_qr=$(get_field "$file" question_route)
-        got_tr=$(get_field "$file" terminal_state_route)
-        got_la=$(get_field "$file" look_again_by)
         # A field that is SET but WRONG never self-corrects by waiting longer — fail fast, not at the deadline.
         [ -z "$got_family" ] || [ "$got_family" = "$exp_family" ] || \
           die "verify-bootstrap: run '$id' executor_family mismatch — expected '$exp_family', got '$got_family'"
@@ -920,15 +962,21 @@ cmd_verify_bootstrap(){
         ;;
       *) die "verify-bootstrap: unexpected record state '$state' for '$id'";;
     esac
-    local now; now=$(date +%s)
-    if [ $(( now - start_ts )) -ge "$timeout_sec" ]; then
+    local now elapsed; now=$(date +%s); elapsed=$(( now - start_ts ))
+    if [ "$elapsed" -ge "$timeout_sec" ]; then
       if [ "$state" = "absent" ]; then
         die "verify-bootstrap: timed out after ${timeout_sec}s waiting for run '$id' — no supervision record ever appeared (executor never started run_supervision_record.sh, or the run-id is wrong)"
       else
         die "verify-bootstrap: timed out after ${timeout_sec}s waiting for run '$id' bootstrap to complete — record is active but never reached the full expected state with a look-again receipt (inspect $file)"
       fi
     fi
-    [ "$poll_sec" -gt 0 ] && sleep "$poll_sec"
+    # Clamp the sleep to what's left of the deadline — sleeping the full --poll-interval-sec regardless
+    # would let a coarse poll interval overshoot --timeout-sec by up to that interval (round-1 review P0).
+    if [ "$poll_sec" -gt 0 ]; then
+      local remaining=$(( timeout_sec - elapsed )) sleep_for=$poll_sec
+      [ "$remaining" -lt "$sleep_for" ] && sleep_for=$remaining
+      [ "$sleep_for" -gt 0 ] && sleep "$sleep_for"
+    fi
   done
 }
 
