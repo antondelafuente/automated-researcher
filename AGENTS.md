@@ -139,8 +139,13 @@ agentic-engineering#43).
   discovers *after* opening a PR routes to that PR's `needs-senior-engineer` — the summons senior-engineer.yml
   actually watches — verified present there, with the Issue left alone (its PR is in flight, so `ready` stays
   until the PR merges) and auto-merge deliberately not enabled on a PR its own author reported incomplete.
-  The reported PR number is model-authored, so it is verified to be an open PR in this repo first and falls
-  back to Issue-side routing when it isn't: a block is never lost to a mis-reported surface. Whichever
+  The reported PR number is model-authored, so the PR route is taken only for a PR that demonstrably belongs
+  to THIS issue and THIS implementor — open, same-repo, head branch `agent/issue-<n>` (deterministic per
+  `implement.md`), and authored by the claude engineer bot under the same canonicalized author predicate
+  `address-review.yml` and `review-on-pr.yml` use. "Open PR in this repo" alone is too weak: a wrong-but-open
+  number would hand `needs-senior-engineer` to an unrelated PR and leave the real Issue `ready` with the block
+  recorded nowhere. Any predicate failing falls back to Issue-side routing: a block is never lost to a
+  mis-reported surface. Whichever
   surface carries it, the run still concludes red. `needs-human` is the routing target
   rather than issue-level senior-engineer summoning because restoring an Issue's dispatchable state is an
   authority question carved out to #632, and it also stops the triager from re-proposing a flip on a ticket

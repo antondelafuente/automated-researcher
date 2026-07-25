@@ -13,8 +13,12 @@
 #     `ready` removed + blocked-state label + `needs-human` + machine-readable record + a non-success run
 #     conclusion, a bare-ready re-add refused before any implementor run is spent, the pre-PR and post-PR
 #     blocks routed to their distinct escalation surfaces, every restore path clearing BOTH blocked labels,
-#     and the `opened` path left exactly as it was (enable-automerge still gated only on `pr_number`).
-# Fully offline: no network, no gh, no tokens.
+#     and the `opened` path left exactly as it was (enable-automerge still gated only on `pr_number`);
+#   - the escalation-surface step's ACTUAL run body, extracted from the workflow and executed against a
+#     stubbed `gh`, because "which surface carries this block" is branch behavior a static grep cannot
+#     prove: a valid-but-unrelated open PR number must fall back to the issue, not steal the summons
+#     (round-3 review P0).
+# Fully offline: no network, no real gh, no tokens.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -318,6 +322,16 @@ else
   assert_step_guarded "Run pinned Claude Code CLI (implementor)"
   assert_step_guarded "Resolve job outputs"
 
+  # Everything from a named step's `- name:` line up to (not including) the next step's.
+  step_block() {
+    local step="$1" line next
+    line=$(grep -n -m1 -F -- "- name: $step" "$WORKFLOW" | cut -d: -f1)
+    [ -n "$line" ] || return 1
+    next=$(tail -n "+$((line + 1))" "$WORKFLOW" | grep -n -m1 -E '^      - name: ' | cut -d: -f1)
+    if [ -n "$next" ]; then sed -n "$line,$((line + next - 1))p" "$WORKFLOW"
+    else tail -n "+$line" "$WORKFLOW"; fi
+  }
+
   # The `if:` line of a named step (steps declare it within the first few lines of their block).
   step_if() {
     local step="$1" line
@@ -382,9 +396,18 @@ else
   fi
   assert_yaml "route-blocked resolves which surface carries the escalation" "id: surface"
   assert_yaml "the reported blocked PR is verified against GitHub, not trusted" \
-    'gh pr view "\$BLOCKED_PR" --repo "\$REPO" --json state'
-  assert_yaml "only an OPEN pull request takes the PR route (anything else falls back to the issue)" \
-    '\[ "\$state" = "OPEN" \]'
+    'gh pr view "\$BLOCKED_PR" --repo "\$REPO" --json state,isCrossRepository,headRefName,author'
+  # Scoped to the step's OWN block: `ISSUE_NUMBER:` appears in several route-blocked steps, so a
+  # workflow-wide grep would pass even with the surface step's env entry missing — and without it the
+  # branch predicate below compares against `agent/issue-` and silently rejects every real PR.
+  if printf '%s' "$(step_block "Resolve the escalation surface")" \
+     | grep -qF 'ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}'; then
+    pass "the surface step's own env passes the issue number it ties the reported PR back to"
+  else
+    fail "the surface step does not receive ISSUE_NUMBER — its head-branch predicate cannot work"
+  fi
+  assert_yaml "the PR author predicate canonicalizes (gh reports App authors as app/<slug>)" \
+    "canonical_login \"\\\$author\""
   assert_surface_gated() {
     local step="$1" want="$2" cond
     cond=$(step_if "$step")
@@ -417,6 +440,105 @@ else
     fail "enable-automerge's gate now references the blocked state — the opened path must be unchanged"
   else
     pass "enable-automerge's gate is untouched by the blocked-state machinery"
+  fi
+
+  # ---------------------------------------------------------------------------------------------
+  echo "[smoke] group E: the surface step's ACTUAL body, run against a stubbed gh"
+  # Static greps can only prove a predicate is written down; they cannot prove the branch structure
+  # routes correctly. This extracts the real `run:` body out of the workflow and executes it, so the
+  # round-3 review P0 — an unrelated-but-open PR number accepted as the escalation surface — is covered
+  # by behavior. Fully offline: `gh` is a stub that prints a fixture.
+  extract_step_body() {
+    STEP="$1" python3 - "$WORKFLOW" <<'PY'
+import os
+import sys
+
+step = os.environ["STEP"]
+lines = open(sys.argv[1]).read().splitlines()
+start = next(i for i, l in enumerate(lines) if l.strip() == f"- name: {step}")
+run = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+indent = len(lines[run + 1]) - len(lines[run + 1].lstrip())
+body = []
+for l in lines[run + 1:]:
+    if l.strip() and len(l) - len(l.lstrip()) < indent:
+        break
+    body.append(l[indent:] if l.strip() else "")
+sys.stdout.write("\n".join(body) + "\n")
+PY
+  }
+
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/gh" <<'SH'
+#!/usr/bin/env bash
+# Stub: the surface step's only gh call is `gh pr view … --json …`. A fixture file means the PR exists
+# and gh prints it; no fixture means gh fails the way it does on a number that identifies no PR.
+if [ -n "${STUB_PR_JSON:-}" ] && [ -f "$STUB_PR_JSON" ]; then cat "$STUB_PR_JSON"; exit 0; fi
+echo "no pull requests found for the given number" >&2
+exit 1
+SH
+  chmod +x "$TMP/bin/gh"
+
+  pr_fixture() {
+    local out="$1" state="$2" cross="$3" head="$4" author="$5"
+    jq -n --arg s "$state" --argjson c "$cross" --arg h "$head" --arg a "$author" \
+      '{state: $s, isCrossRepository: $c, headRefName: $h, author: {login: $a}}' > "$out"
+  }
+
+  SURFACE_BODY="$TMP/surface_step.sh"
+  if ! extract_step_body "Resolve the escalation surface" > "$SURFACE_BODY" 2>"$TMP/extract.err"; then
+    fail "could not extract the surface step's run body ($(tr '\n' ' ' < "$TMP/extract.err"))"
+  else
+    pass "extracted the surface step's run body ($(wc -l < "$SURFACE_BODY") lines)"
+
+    # <fixture-or-empty> <blocked_pr> <issue_number> -> the `target` the real step body resolves.
+    run_surface() {
+      local body="$1" fixture="$2" blocked_pr="$3" issue="$4" out="$TMP/surface_out.txt"
+      : > "$out"
+      ( cd "$REPO_ROOT" && PATH="$TMP/bin:$PATH" STUB_PR_JSON="$fixture" GH_TOKEN=stub \
+          REPO=antondelafuente/automated-researcher BLOCKED_PR="$blocked_pr" ISSUE_NUMBER="$issue" \
+          GITHUB_OUTPUT="$out" bash "$body" ) >/dev/null 2>&1
+      grep -m1 '^target=' "$out" | cut -d= -f2
+    }
+    assert_surface() {
+      local desc="$1" expected="$2" fixture="$3" blocked_pr="${4-635}" got
+      got=$(run_surface "$SURFACE_BODY" "$fixture" "$blocked_pr" 629)
+      if [ "$got" = "$expected" ]; then pass "$desc -> $got"
+      else fail "$desc -> '$got', expected '$expected'"; fi
+    }
+
+    pr_fixture "$TMP/pr_good.json" OPEN false agent/issue-629 app/claude-code-engineer
+    pr_fixture "$TMP/pr_good_rest.json" OPEN false agent/issue-629 "claude-code-engineer[bot]"
+    pr_fixture "$TMP/pr_other_branch.json" OPEN false agent/issue-777 app/claude-code-engineer
+    pr_fixture "$TMP/pr_human.json" OPEN false agent/issue-629 some-outsider
+    pr_fixture "$TMP/pr_fork.json" OPEN true agent/issue-629 app/claude-code-engineer
+    pr_fixture "$TMP/pr_closed.json" CLOSED false agent/issue-629 app/claude-code-engineer
+
+    assert_surface "open PR on this issue's implementor branch, authored by the claude bot" \
+      pr "$TMP/pr_good.json"
+    assert_surface "the same PR with the author in REST '<slug>[bot]' form (identity-form equivalence)" \
+      pr "$TMP/pr_good_rest.json"
+    # The round-3 review's case: a valid, open, bot-authored PR that simply is not this issue's.
+    assert_surface "open PR whose head branch belongs to a DIFFERENT issue (the unrelated-PR case)" \
+      issue "$TMP/pr_other_branch.json"
+    assert_surface "matching head branch but a non-claude-engineer author" \
+      issue "$TMP/pr_human.json"
+    assert_surface "cross-repository (fork) PR" issue "$TMP/pr_fork.json"
+    assert_surface "a closed PR" issue "$TMP/pr_closed.json"
+    assert_surface "a number that identifies no PR at all" issue ""
+    assert_surface "no PR reported by the implementor (the pre-PR block)" issue "$TMP/pr_good.json" ""
+
+    # Mutation test: drop the head-branch predicate and confirm the unrelated-PR case above actually
+    # catches it, rather than passing for some incidental reason.
+    MUTANT="$TMP/surface_mutant.sh"
+    sed 's/elif \[ "\$head_ref" != "agent\/issue-\$ISSUE_NUMBER" \]; then/elif false; then/' \
+      "$SURFACE_BODY" > "$MUTANT"
+    if ! grep -qF 'elif false; then' "$MUTANT"; then
+      fail "mutation test could not drop the head-branch predicate — the smoke is not testing what it claims"
+    elif [ "$(run_surface "$MUTANT" "$TMP/pr_other_branch.json" 635 629)" = "pr" ]; then
+      pass "mutation: dropping the head-branch predicate routes the unrelated PR to 'pr' (case is load-bearing)"
+    else
+      fail "mutation: dropping the head-branch predicate did NOT change the unrelated-PR result — some other predicate is doing the work"
+    fi
   fi
 fi
 

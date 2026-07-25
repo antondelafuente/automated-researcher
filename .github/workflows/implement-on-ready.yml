@@ -465,24 +465,52 @@ jobs:
       # a block that happened after a PR was opened would mark the issue blocked while its PR is in flight,
       # strand `implementation-blocked` + `needs-human` on it through the merge that closes it, and point a
       # maintainer at a restore procedure for a state that is not the real one (round-1 review P0).
-      # The reported number is VERIFIED, never trusted: `pr_number` is model-authored, so anything that is
-      # not an OPEN pull request in this repo falls back to issue-side routing — a block must never become a
-      # dead letter because the implementor mis-reported where it happened.
+      # The reported number is VERIFIED, never trusted: `blocked_pr` is model-authored, so the PR route is
+      # taken only for a PR that demonstrably belongs to THIS issue and THIS implementor. "Open PR in this
+      # repo" alone is too weak — a wrong-but-open number (reporting the issue number when an unrelated PR
+      # happens to carry it) would put `needs-senior-engineer` on a stranger's PR and leave the real issue
+      # `ready` with the block recorded nowhere (round-3 review P0). Any predicate failing falls back to
+      # issue-side routing, which is the correct fail-closed surface: the block still lands, on the issue.
       - name: Resolve the escalation surface
         id: surface
         env:
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           REPO: ${{ github.repository }}
           BLOCKED_PR: ${{ needs.implement.outputs.blocked_pr }}
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
         run: |
           set -uo pipefail
+          # Same spoof-resistant author predicate address-review.yml and review-on-pr.yml use: `gh pr view
+          # --json author` reports an App-authored PR as `app/<slug>`, so a raw string compare against
+          # `<slug>[bot]` would reject every real implementor PR. Sourcing the helper is safe here — this
+          # job's checkout is the trusted base branch, never the agent's.
+          source .github/scripts/canonical-login.sh
           target=issue
           if [ -n "$BLOCKED_PR" ]; then
-            state=$(gh pr view "$BLOCKED_PR" --repo "$REPO" --json state --jq '.state' 2>/dev/null || echo "")
-            if [ "$state" = "OPEN" ]; then
-              target=pr
+            pr_json=$(gh pr view "$BLOCKED_PR" --repo "$REPO" --json state,isCrossRepository,headRefName,author 2>/dev/null || echo "")
+            state=$(printf '%s' "$pr_json" | jq -r '.state // ""' 2>/dev/null || echo "")
+            # `tostring`, not `// ""`: jq's alternative operator treats `false` as empty, so `// ""` would
+            # turn the same-repo answer we are looking for into "" and reject every legitimate PR.
+            is_cross=$(printf '%s' "$pr_json" | jq -r '.isCrossRepository | tostring' 2>/dev/null || echo "")
+            head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName // ""' 2>/dev/null || echo "")
+            author=$(printf '%s' "$pr_json" | jq -r '.author.login // ""' 2>/dev/null || echo "")
+            author_canon=$(canonical_login "$author" 2>/dev/null || echo "")
+            why=""
+            if [ "$state" != "OPEN" ]; then
+              why="it is not an open pull request in $REPO (state: ${state:-not-found})"
+            elif [ "$is_cross" != "false" ]; then
+              why="it is a cross-repository (fork) pull request"
+            elif [ "$head_ref" != "agent/issue-$ISSUE_NUMBER" ]; then
+              # implement.md step 2 makes the implementor's branch name deterministic, so this ties the
+              # reported PR to THIS issue by construction rather than by trusting the reported number.
+              why="its head branch '${head_ref:-unknown}' is not this issue's implementor branch agent/issue-$ISSUE_NUMBER"
+            elif [ "$author_canon" != "claude-code-engineer[bot]" ]; then
+              why="its author '${author:-unknown}' is not the claude engineer bot"
             else
-              echo "::warning::the implementor reported blocking against PR #$BLOCKED_PR, but that is not an open pull request in $REPO (state: ${state:-not-found}) — falling back to issue-side routing so the block is still recorded"
+              target=pr
+            fi
+            if [ "$target" != "pr" ]; then
+              echo "::warning::the implementor reported blocking against PR #$BLOCKED_PR, but $why — falling back to issue-side routing so the block is still recorded"
             fi
           fi
           echo "escalation surface for this blocked run: $target"
