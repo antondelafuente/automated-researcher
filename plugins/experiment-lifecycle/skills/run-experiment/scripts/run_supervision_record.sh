@@ -16,6 +16,22 @@
 #   reads `worktree-path` (bound at `start`) for the run-id<->worktree binding `reap_worktree.sh` checks
 #   before it will remove a worktree (automated-researcher#535 review round 2).
 #
+# CODEX-NATIVE DISPATCH/SUPERVISION FIELDS (automated-researcher#223): the same record also carries the
+#   substrate-neutral supervision metadata a Codex-family dispatch needs, so it need not invent a parallel
+#   channel — see `references/CODEX_SUPERVISION.md` for the full contract this backs:
+#   executor_family / supervision_mode / question_route / terminal_state_route / question / question_id /
+#   answer / timestamps. `executor_family` names WHO the fresh executor is (e.g. "codex"/"claude", opaque —
+#   the product never branches on it); `supervision_mode` is a validated enum, `autonomous-detached` or
+#   `controller-supervised` — the honest self-classification a dispatcher writes once it capability-detects
+#   whether an independent scheduled wake is available (never claim autonomous-detached for a
+#   controller-held blocking watcher). `question_route` / `terminal_state_route` are opaque pointers
+#   naming HOW the executor's load-bearing questions and DONE/BLOCKED/failed terminal state reach the
+#   designer-of-record — default `record`, poll this same file — but instance-overridable to a chat
+#   channel, pager, etc. The question/answer fields are a single-in-flight file-based inbox: `ask-question` (the
+#   executor) and `answer-question` (the designer) let the executor ask without idling and the designer
+#   answer without taking over the run — the durable two-way control channel #223 asks for, reusing this
+#   record's existing atomic-write + fail-closed machinery instead of a new parallel file format.
+#
 # WHY A HELPER, NOT PROSE: the record is genuinely stateful, so one product implementation owns the
 #   atomic-write + monotonic-state semantics rather than every consumer (claude-pane-loop.sh, the
 #   instance stop helpers, the supervisor, a StopFailure-style hook) re-deriving them and drifting.
@@ -56,6 +72,28 @@
 #              Read-only, no lock (write_record's atomic replace means a list never observes a partial
 #              write). This is the box-level session-janitor's enumeration input (session_janitor.sh),
 #              the run-supervision analog of pod_lease.sh's own `list`.
+#   ask-question -> the executor asks the designer-of-record a load-bearing question (a fresh
+#              question_id, monotonic across the run's lifetime). FAILS CLOSED on a stopped/closed/
+#              missing/corrupt record (same guard as request-relaunch) and REFUSES if a question is
+#              already pending — answered or not — one in-flight question at a time, so a second ask
+#              never silently clobbers the first (an answered-but-unconsumed one included); consume it
+#              first.
+#   answer-question -> the designer answers the current pending question (optionally naming the
+#              --question-id it's answering, refused on a mismatch — protects a racy designer from
+#              answering a question that's since moved on). FAILS if there is no pending question, and
+#              FAILS if the pending question already has an unconsumed answer — one answer at a time,
+#              same reasoning as ask-question's own one-in-flight guard: a second answer-question before
+#              consume-question would silently destroy an answer the executor hasn't read yet.
+#   has-question -> exit 0 iff an unanswered question is pending on a still-active record; else exit 1
+#              (fail-closed on missing/corrupt/terminal, same shape as is-relaunch-requested).
+#   has-answer -> exit 0 iff the pending question has been answered (awaiting the executor's
+#              consume-question) on a still-active record; else exit 1.
+#   consume-question -> the executor's read-then-clear: clears the question/answer pair after the
+#              executor has read the answer. REFUSES to clear a still-unanswered question (the designer
+#              hasn't answered yet — clearing it would silently drop it); idempotent when nothing is
+#              pending. Allowed on a terminal record too (residual Q&A cleanup at close).
+#   supervision-mode / executor-family / question-route / terminal-route -> print the respective opaque/
+#              enum value ("" + exit 1 if unset/missing), same shape as session-handle/worktree-path.
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
 #   the terminal-state guard runs INSIDE that lock — so a concurrent `update` cannot read-modify-write
@@ -64,16 +102,29 @@
 #
 # USAGE:
 #   run_supervision_record.sh start|create <run-id> [--handoff PATH] [--session-handle H] [--worktree PATH]
+#       [--executor-family NAME] [--supervision-mode autonomous-detached|controller-supervised]
+#       [--question-route ROUTE] [--terminal-route ROUTE]
 #   run_supervision_record.sh checkpoint|update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H] [--worktree PATH]
+#       [--executor-family NAME] [--supervision-mode autonomous-detached|controller-supervised]
+#       [--question-route ROUTE] [--terminal-route ROUTE]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
 #   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
 #   run_supervision_record.sh clear-relaunch   <run-id>
+#   run_supervision_record.sh ask-question     <run-id> --text TEXT
+#   run_supervision_record.sh answer-question  <run-id> --text TEXT [--question-id ID]
+#   run_supervision_record.sh consume-question <run-id>
 #   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-closed             <run-id>  # exit 0/1, no output (0 iff finished/closed)
+#   run_supervision_record.sh has-question          <run-id>  # exit 0/1, no output
+#   run_supervision_record.sh has-answer            <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh session-handle        <run-id>  # print opaque handle (exit 1 if unset)
 #   run_supervision_record.sh worktree-path         <run-id>  # print bound worktree path (exit 1 if unset)
+#   run_supervision_record.sh supervision-mode      <run-id>  # print mode (exit 1 if unset)
+#   run_supervision_record.sh executor-family       <run-id>  # print opaque family (exit 1 if unset)
+#   run_supervision_record.sh question-route        <run-id>  # print opaque route (exit 1 if unset)
+#   run_supervision_record.sh terminal-route         <run-id>  # print opaque route (exit 1 if unset)
 #   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
 #   run_supervision_record.sh list                           # `<run-id> <state>` per record (enumeration)
@@ -96,6 +147,16 @@ validate_id(){
 
 record_path(){ printf '%s/%s.json' "$ROOT" "$1"; }
 lock_path(){ printf '%s/%s.lock' "$ROOT" "$1"; }
+
+# supervision_mode is a validated enum, not a free-text field — an unrecognized value would silently
+# defeat the honest-classification contract (#223): a dispatcher must say EXACTLY autonomous-detached or
+# controller-supervised, never invent a third state that downstream consumers can't interpret.
+validate_supervision_mode(){
+  case "$1" in
+    autonomous-detached|controller-supervised) ;;
+    *) die "invalid --supervision-mode '$1' (allowed: autonomous-detached, controller-supervised)";;
+  esac
+}
 
 # Read a top-level field from the record JSON ("" if record or field absent). python3 is already a
 # hard dependency of the .aar-ci checks + the rest of the plugin scaffold.
@@ -155,14 +216,33 @@ PY
 #                     (used by request-relaunch: the recover-me signal needs a handoff for the successor path)
 #   <worktree_path>  non-empty -> bind the run's own worktree path (the run-id<->worktree binding
 #                     `reap_worktree.sh` checks); "" -> leave
+#   <executor_family> non-empty -> set the opaque executor-family name (#223); "" -> leave
+#   <supervision_mode> non-empty -> set the validated supervision-mode enum (bash already validated it
+#                     via validate_supervision_mode before calling); "" -> leave
+#   <question_route> non-empty -> set the opaque question-route pointer; "" -> leave
+#   <terminal_route> non-empty -> set the opaque terminal-state-route pointer; "" -> leave
+#   <set_question>   non-empty -> set a FRESH pending question (text), bump question_id monotonically,
+#                     stamp question_asked_at, and clear any prior answer (a fresh question has no answer
+#                     yet); "" -> leave. Caller (cmd_ask_question) has already refused this call if a
+#                     question is already pending and unanswered.
+#   <set_answer>     non-empty -> set the answer text + answered_at for the CURRENT pending question;
+#                     "" -> leave. Caller has already confirmed a question is pending AND not already
+#                     answered (cmd_answer_question refuses a second answer before consume-question).
+#   <clear_qa>       "true" -> clear question/question_id/question_asked_at/answer/answered_at (the
+#                     executor's consume-question); question_seq is NOT reset, so ids stay monotonic
+#                     across the run's lifetime and a stale --question-id can never alias a later question.
 # Preserves existing fields it doesn't touch. For any non-create mutation, malformed existing JSON fails
 # CLOSED (exit 3) rather than being treated as empty.
-write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff> <worktree_path>]
+write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff> <worktree_path> <executor_family> <supervision_mode> <question_route> <terminal_route> <set_question> <set_answer> <clear_qa>]
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
   local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-} require_handoff=${10:-} worktree_path=${11:-}
+  local executor_family=${12:-} supervision_mode=${13:-} question_route=${14:-} terminal_route=${15:-}
+  local set_question=${16:-} set_answer=${17:-} clear_qa=${18:-}
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
   SESSION_HANDLE="$session_handle" SET_RELAUNCH="$set_relaunch" RELAUNCH_REASON="$relaunch_reason" \
   REQUIRE_HANDOFF="$require_handoff" WORKTREE_PATH="$worktree_path" \
+  EXECUTOR_FAMILY="$executor_family" SUPERVISION_MODE="$supervision_mode" QUESTION_ROUTE="$question_route" \
+  TERMINAL_ROUTE="$terminal_route" SET_QUESTION="$set_question" SET_ANSWER="$set_answer" CLEAR_QA="$clear_qa" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -194,6 +274,16 @@ if creating:
         "relaunch_requested": False,
         "relaunch_reason": None,
         "worktree_path": None,
+        "executor_family": None,
+        "supervision_mode": None,
+        "question_route": "record",
+        "terminal_state_route": "record",
+        "question": None,
+        "question_id": None,
+        "question_seq": 0,
+        "question_asked_at": None,
+        "answer": None,
+        "answered_at": None,
         "created_at": now,
     }
 rec.setdefault("desired_active", True)
@@ -204,6 +294,16 @@ rec.setdefault("session_handle", None)
 rec.setdefault("relaunch_requested", False)
 rec.setdefault("relaunch_reason", None)
 rec.setdefault("worktree_path", None)
+rec.setdefault("executor_family", None)
+rec.setdefault("supervision_mode", None)
+rec.setdefault("question_route", "record")
+rec.setdefault("terminal_state_route", "record")
+rec.setdefault("question", None)
+rec.setdefault("question_id", None)
+rec.setdefault("question_seq", 0)
+rec.setdefault("question_asked_at", None)
+rec.setdefault("answer", None)
+rec.setdefault("answered_at", None)
 
 handoff = os.environ.get("HANDOFF", "")
 if handoff:
@@ -214,6 +314,37 @@ if session_handle:
 worktree_path = os.environ.get("WORKTREE_PATH", "")
 if worktree_path:
     rec["worktree_path"] = worktree_path
+executor_family = os.environ.get("EXECUTOR_FAMILY", "")
+if executor_family:
+    rec["executor_family"] = executor_family
+supervision_mode = os.environ.get("SUPERVISION_MODE", "")
+if supervision_mode:
+    rec["supervision_mode"] = supervision_mode
+question_route = os.environ.get("QUESTION_ROUTE", "")
+if question_route:
+    rec["question_route"] = question_route
+terminal_route = os.environ.get("TERMINAL_ROUTE", "")
+if terminal_route:
+    rec["terminal_state_route"] = terminal_route
+set_question = os.environ.get("SET_QUESTION", "")
+if set_question:
+    rec["question"] = set_question
+    rec["question_seq"] = int(rec.get("question_seq") or 0) + 1
+    rec["question_id"] = rec["question_seq"]
+    rec["question_asked_at"] = now
+    # a fresh question has no answer yet — clear any stale one from a prior consumed round.
+    rec["answer"] = None
+    rec["answered_at"] = None
+set_answer = os.environ.get("SET_ANSWER", "")
+if set_answer:
+    rec["answer"] = set_answer
+    rec["answered_at"] = now
+if os.environ.get("CLEAR_QA") == "true":
+    rec["question"] = None
+    rec["question_id"] = None
+    rec["question_asked_at"] = None
+    rec["answer"] = None
+    rec["answered_at"] = None
 add_pods = [p for p in os.environ.get("ADD_PODS", "").splitlines() if p]
 if add_pods:
     seen = list(rec.get("lease_pod_ids") or [])
@@ -294,11 +425,16 @@ require_val(){ # <flag> <value>
 cmd_create(){
   local id=$1; shift
   local handoff="" got_handoff=0 session_handle="" worktree=""
+  local executor_family="" supervision_mode="" question_route="" terminal_route=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff)        require_val --handoff "${2:-}";        handoff=$2; got_handoff=1; shift 2;;
-      --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;         shift 2;;
-      --worktree)       require_val --worktree "${2:-}";       worktree=$2;                shift 2;;
+      --handoff)          require_val --handoff "${2:-}";          handoff=$2; got_handoff=1; shift 2;;
+      --session-handle)   require_val --session-handle "${2:-}";   session_handle=$2;         shift 2;;
+      --worktree)         require_val --worktree "${2:-}";         worktree=$2;                shift 2;;
+      --executor-family)  require_val --executor-family "${2:-}";  executor_family=$2;         shift 2;;
+      --supervision-mode) require_val --supervision-mode "${2:-}"; validate_supervision_mode "$2"; supervision_mode=$2; shift 2;;
+      --question-route)   require_val --question-route "${2:-}";   question_route=$2;          shift 2;;
+      --terminal-route)   require_val --terminal-route "${2:-}";   terminal_route=$2;           shift 2;;
       *) die "create: unknown arg '$1'";;
     esac
   done
@@ -314,19 +450,25 @@ cmd_create(){
     invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" "" "" "$worktree"
+  write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" "" "" "$worktree" \
+    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route"
   echo "created run-supervision record: $file (desired-active)"
 }
 
 cmd_update(){
   local id=$1; shift
   local handoff="" pods="" session_handle="" worktree=""
+  local executor_family="" supervision_mode="" question_route="" terminal_route=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --handoff)        require_val --handoff "${2:-}";        handoff=$2;             shift 2;;
-      --lease-pod)      require_val --lease-pod "${2:-}";      pods="${pods}${2}"$'\n'; shift 2;;
-      --session-handle) require_val --session-handle "${2:-}"; session_handle=$2;      shift 2;;
-      --worktree)       require_val --worktree "${2:-}";       worktree=$2;             shift 2;;
+      --handoff)          require_val --handoff "${2:-}";          handoff=$2;             shift 2;;
+      --lease-pod)        require_val --lease-pod "${2:-}";        pods="${pods}${2}"$'\n'; shift 2;;
+      --session-handle)   require_val --session-handle "${2:-}";   session_handle=$2;      shift 2;;
+      --worktree)         require_val --worktree "${2:-}";         worktree=$2;             shift 2;;
+      --executor-family)  require_val --executor-family "${2:-}";  executor_family=$2;      shift 2;;
+      --supervision-mode) require_val --supervision-mode "${2:-}"; validate_supervision_mode "$2"; supervision_mode=$2; shift 2;;
+      --question-route)   require_val --question-route "${2:-}";   question_route=$2;       shift 2;;
+      --terminal-route)   require_val --terminal-route "${2:-}";   terminal_route=$2;        shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
   done
@@ -341,7 +483,8 @@ cmd_update(){
     active)  : ;;
     *)       die "update: unexpected record state '$state' for '$id'";;
   esac
-  write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" "" "" "$worktree"
+  write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" "" "" "$worktree" \
+    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route"
   echo "updated run-supervision record: $file"
 }
 
@@ -425,6 +568,102 @@ cmd_clear_relaunch(){
   echo "cleared relaunch request: $file"
 }
 
+cmd_ask_question(){
+  local id=$1; shift
+  local text=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --text) require_val --text "${2:-}"; text=$2; shift 2;;
+      *) die "ask-question: unknown arg '$1'";;
+    esac
+  done
+  [ -n "$text" ] || die "ask-question: --text is required"
+  local file; file=$(record_path "$id")
+  # Same terminal guard as request-relaunch: a load-bearing question from a deliberately-ended or
+  # finished run must never be recorded as if the run were still live.
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "ask-question: no record for '$id' (create it first)";;
+    invalid) die "ask-question: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped) die "ask-question: run '$id' is stopped (terminal) — refusing to ask on a deliberately-stopped run";;
+    closed)  die "ask-question: run '$id' is closed (terminal) — refusing to ask on a finished run";;
+    active)  : ;;
+    *)       die "ask-question: unexpected record state '$state' for '$id'";;
+  esac
+  # One in-flight question at a time — a second ask before the first is consumed would silently
+  # clobber it, whether or not it's been answered yet: an answered-but-unconsumed question still
+  # holds an answer the executor hasn't read, and a fresh ask would overwrite that answer along with
+  # the question (the designer could also be mid-answer to the first).
+  local cur_q
+  cur_q=$(get_field "$file" question)
+  if [ -n "$cur_q" ]; then
+    die "ask-question: run '$id' already has a pending question — consume it first (answer it first if unanswered)"
+  fi
+  write_record "$file" "" "" "" "" "false" "" "" "" "" "" "" "" "" "" "$text" "" ""
+  local qid; qid=$(get_field "$file" question_id)
+  echo "asked question $qid on $file"
+}
+
+cmd_answer_question(){
+  local id=$1; shift
+  local text="" want_id=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --text)        require_val --text "${2:-}";        text=$2;    shift 2;;
+      --question-id) require_val --question-id "${2:-}"; want_id=$2; shift 2;;
+      *) die "answer-question: unknown arg '$1'";;
+    esac
+  done
+  [ -n "$text" ] || die "answer-question: --text is required"
+  local file; file=$(record_path "$id")
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "answer-question: no record for '$id'";;
+    invalid) die "answer-question: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped) die "answer-question: run '$id' is stopped (terminal) — refusing to modify";;
+    closed)  die "answer-question: run '$id' is closed (terminal) — refusing to modify";;
+    active)  : ;;
+    *)       die "answer-question: unexpected record state '$state' for '$id'";;
+  esac
+  local cur_q cur_id cur_a
+  cur_q=$(get_field "$file" question)
+  [ -n "$cur_q" ] || die "answer-question: run '$id' has no pending question to answer"
+  # Same one-in-flight guard as ask-question's own (see #223's answered-but-unconsumed clobber fix):
+  # an already-answered-but-unconsumed pending question must not be silently re-answered — that would
+  # destroy an answer the executor hasn't read yet. consume-question first.
+  cur_a=$(get_field "$file" answer)
+  if [ -n "$cur_a" ]; then
+    die "answer-question: run '$id' already has an unconsumed answer for the pending question — consume it first before answering again"
+  fi
+  if [ -n "$want_id" ]; then
+    cur_id=$(get_field "$file" question_id)
+    [ "$want_id" = "$cur_id" ] || die "answer-question: --question-id $want_id does not match the current pending question_id $cur_id (it may have moved on — re-read the question first)"
+  fi
+  write_record "$file" "" "" "" "" "false" "" "" "" "" "" "" "" "" "" "" "$text" ""
+  echo "answered question on $file"
+}
+
+cmd_consume_question(){
+  local id=$1; local file; file=$(record_path "$id")
+  # Consuming is allowed on any classified state (active or terminal — residual Q&A cleanup at close),
+  # same permissiveness as clear-relaunch; only missing/corrupt records fail closed.
+  local state; state=$(classify_record "$file")
+  case "$state" in
+    absent)  die "consume-question: no record for '$id'";;
+    invalid) die "consume-question: run '$id' has a malformed record on disk — refusing to modify (inspect $file)";;
+    stopped|closed|active) : ;;
+    *)       die "consume-question: unexpected record state '$state' for '$id'";;
+  esac
+  local cur_q cur_a
+  cur_q=$(get_field "$file" question)
+  cur_a=$(get_field "$file" answer)
+  if [ -n "$cur_q" ] && [ -z "$cur_a" ]; then
+    die "consume-question: run '$id' has an unanswered pending question — cannot consume before it is answered"
+  fi
+  write_record "$file" "" "" "" "" "false" "" "" "" "" "" "" "" "" "" "" "" "true"
+  echo "consumed question/answer on $file"
+}
+
 # is-desired-active: exit 0 iff supervisor should relaunch this run; exit 1 otherwise. No mutation, but
 # read under the lock so it never observes a half-applied state. A MISSING record is exit 1 (fail-closed).
 cmd_is_desired_active(){
@@ -452,6 +691,40 @@ cmd_is_relaunch_requested(){
   stopped=$(get_field "$file" stopped)
   closed=$(get_field "$file" closed)
   if [ "$requested" = "true" ] && [ "$active" = "true" ] && [ "$stopped" != "true" ] && [ "$closed" != "true" ]; then
+    exit 0
+  fi
+  exit 1
+}
+
+# has-question: exit 0 iff an unanswered question is pending on a still-active record; else exit 1
+# (fail-closed on missing/corrupt/terminal — same shape as is-relaunch-requested).
+cmd_has_question(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local q a active stopped closed
+  q=$(get_field "$file" question)
+  a=$(get_field "$file" answer)
+  active=$(get_field "$file" desired_active)
+  stopped=$(get_field "$file" stopped)
+  closed=$(get_field "$file" closed)
+  if [ -n "$q" ] && [ -z "$a" ] && [ "$active" = "true" ] && [ "$stopped" != "true" ] && [ "$closed" != "true" ]; then
+    exit 0
+  fi
+  exit 1
+}
+
+# has-answer: exit 0 iff the pending question has been answered (awaiting consume-question) on a
+# still-active record; else exit 1.
+cmd_has_answer(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local q a active stopped closed
+  q=$(get_field "$file" question)
+  a=$(get_field "$file" answer)
+  active=$(get_field "$file" desired_active)
+  stopped=$(get_field "$file" stopped)
+  closed=$(get_field "$file" closed)
+  if [ -n "$q" ] && [ -n "$a" ] && [ "$active" = "true" ] && [ "$stopped" != "true" ] && [ "$closed" != "true" ]; then
     exit 0
   fi
   exit 1
@@ -495,6 +768,40 @@ cmd_worktree_path(){
   local w; w=$(get_field "$file" worktree_path)
   [ -n "$w" ] || exit 1
   printf '%s\n' "$w"
+}
+
+# supervision-mode / executor-family / question-route / terminal-route: print the respective opaque/enum
+# value; exit 1 (no output) if the record or the field is absent. Same shape as session-handle/worktree-path.
+cmd_supervision_mode(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local v; v=$(get_field "$file" supervision_mode)
+  [ -n "$v" ] || exit 1
+  printf '%s\n' "$v"
+}
+
+cmd_executor_family(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local v; v=$(get_field "$file" executor_family)
+  [ -n "$v" ] || exit 1
+  printf '%s\n' "$v"
+}
+
+cmd_question_route(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local v; v=$(get_field "$file" question_route)
+  [ -n "$v" ] || exit 1
+  printf '%s\n' "$v"
+}
+
+cmd_terminal_route(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local v; v=$(get_field "$file" terminal_state_route)
+  [ -n "$v" ] || exit 1
+  printf '%s\n' "$v"
 }
 
 cmd_show(){
@@ -552,6 +859,16 @@ print(f"relaunch_requested={fmt_bool(rec.get('relaunch_requested'))}")
 reason = rec.get("relaunch_reason")
 if reason:
     print(f"relaunch_reason={reason}")
+print(f"executor_family={rec.get('executor_family') or ''}")
+print(f"supervision_mode={rec.get('supervision_mode') or ''}")
+print(f"question_route={rec.get('question_route') or ''}")
+print(f"terminal_state_route={rec.get('terminal_state_route') or ''}")
+question = rec.get("question")
+if question:
+    print(f"question_id={rec.get('question_id') or ''}")
+    print(f"question={question}")
+    answer = rec.get("answer")
+    print(f"answer={answer or ''}")
 PY
 }
 
@@ -559,16 +876,16 @@ main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show)
+    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show|ask-question|answer-question|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route)
       validate_id "$id"; shift;;
     list) [ $# -eq 0 ] || die "list: unexpected extra argument(s): $*";;
-    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show|list> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|ask-question|answer-question|consume-question|is-desired-active|is-relaunch-requested|is-closed|has-question|has-answer|session-handle|worktree-path|supervision-mode|executor-family|question-route|terminal-route|status|show|list> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path)
+    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
@@ -580,13 +897,22 @@ main(){
     close)                 with_lock "$id" cmd_close            "$id";;
     request-relaunch)      with_lock "$id" cmd_request_relaunch "$id" "$@";;
     clear-relaunch)        with_lock "$id" cmd_clear_relaunch   "$id";;
-    # the is-* predicates + session-handle/worktree-path exit 0/1 (or print+exit) from inside with_lock;
-    # preserve that exit code
+    ask-question)          with_lock "$id" cmd_ask_question     "$id" "$@";;
+    answer-question)       with_lock "$id" cmd_answer_question  "$id" "$@";;
+    consume-question)      with_lock "$id" cmd_consume_question "$id";;
+    # the is-*/has-* predicates + session-handle/worktree-path/supervision-mode/executor-family/
+    # question-route/terminal-route exit 0/1 (or print+exit) from inside with_lock; preserve that exit code
     is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
     is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
     is-closed)             with_lock "$id" cmd_is_closed             "$id";;
+    has-question)          with_lock "$id" cmd_has_question          "$id";;
+    has-answer)            with_lock "$id" cmd_has_answer            "$id";;
     session-handle)        with_lock "$id" cmd_session_handle        "$id";;
     worktree-path)         with_lock "$id" cmd_worktree_path         "$id";;
+    supervision-mode)      with_lock "$id" cmd_supervision_mode      "$id";;
+    executor-family)       with_lock "$id" cmd_executor_family       "$id";;
+    question-route)        with_lock "$id" cmd_question_route        "$id";;
+    terminal-route)        with_lock "$id" cmd_terminal_route        "$id";;
     status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;
     list)                  cmd_list;;

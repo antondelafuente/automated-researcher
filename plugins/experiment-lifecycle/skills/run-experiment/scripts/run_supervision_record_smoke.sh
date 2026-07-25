@@ -6,7 +6,12 @@
 # fail-closed is-relaunch-requested, request cleared by stop/close); plus the #188 finding-2 rule that
 # request-relaunch requires a bound handoff_path (fail-closed without one; --handoff binds it atomically),
 # and the agent-facing lifecycle aliases (`start`/`checkpoint`/`status`) preserving the same fail-closed
-# behavior.
+# behavior. Also covers the #223 Codex-native supervision additions: the validated supervision-mode
+# enum, the opaque executor-family/question-route/terminal-route fields, and the single-in-flight
+# question/answer inbox (ask-question/answer-question/consume-question/has-question/has-answer) —
+# refusing a second ask while one is unanswered, refusing to answer nothing, the --question-id mismatch
+# guard, refusing to consume before an answer exists, idempotent consume, and the same terminal/missing/
+# corrupt fail-closed guards as the rest of the record.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -294,5 +299,150 @@ echo "$LOUT" | grep -qx 'lst_broken invalid' && ok list-invalid || no list-inval
 if AAR_RUN_SUPERVISION_DIR="$LISTROOT" run list extra >/dev/null 2>&1; then no list-surplus-rejected; else ok list-surplus-rejected; fi
 [ -z "$(AAR_RUN_SUPERVISION_DIR="$TMP/no-such-dir" run list)" ] && ok list-missing-dir-empty || no list-missing-dir-empty
 rm -rf "$LISTROOT"
+
+# ===== #223: Codex-native supervision — executor_family / supervision_mode / question+terminal routes =====
+smode(){ run supervision-mode "$1"; }
+efam(){ run executor-family "$1"; }
+qroute(){ run question-route "$1"; }
+troute(){ run terminal-route "$1"; }
+
+# --- create with the new fields; all readable, and validated ---
+run create cx1 --handoff /art/cx1/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --question-route record --terminal-route record >/dev/null
+[ "$(efam cx1)" = codex ] && ok codex-executor-family-create || no codex-executor-family-create
+[ "$(smode cx1)" = controller-supervised ] && ok codex-supervision-mode-create || no codex-supervision-mode-create
+[ "$(qroute cx1)" = record ] && ok codex-question-route-create || no codex-question-route-create
+[ "$(troute cx1)" = record ] && ok codex-terminal-route-create || no codex-terminal-route-create
+
+# --- update can change them; absent fields on a plain record are fail-closed (exit 1, no output) ---
+run create cx2 >/dev/null
+
+# --- question_route / terminal_state_route default to "record" on a flagless create, per
+#     CODEX_SUPERVISION.md's documented default; an explicit flag still overrides it ---
+[ "$(qroute cx2)" = record ] && ok codex-question-route-default || no codex-question-route-default
+[ "$(troute cx2)" = record ] && ok codex-terminal-route-default || no codex-terminal-route-default
+run update cx2 --question-route "chan:#runs" >/dev/null
+[ "$(qroute cx2)" = "chan:#runs" ] && ok codex-question-route-override || no codex-question-route-override
+
+if run supervision-mode cx2 >/dev/null 2>&1; then no supervision-mode-absent-failclosed; else ok supervision-mode-absent-failclosed; fi
+if run executor-family cx2 >/dev/null 2>&1; then no executor-family-absent-failclosed; else ok executor-family-absent-failclosed; fi
+run update cx2 --executor-family claude --supervision-mode autonomous-detached >/dev/null
+[ "$(efam cx2)" = claude ] && ok executor-family-update || no executor-family-update
+[ "$(smode cx2)" = autonomous-detached ] && ok supervision-mode-update || no supervision-mode-update
+
+# --- supervision-mode is a validated enum: an unrecognized value is rejected, on create AND update ---
+if run create cx3 --supervision-mode bogus >/dev/null 2>&1; then no supervision-mode-create-rejects-bogus; else ok supervision-mode-create-rejects-bogus; fi
+run create cx3 >/dev/null
+if run update cx3 --supervision-mode bogus >/dev/null 2>&1; then no supervision-mode-update-rejects-bogus; else ok supervision-mode-update-rejects-bogus; fi
+if run update cx3 --supervision-mode "" >/dev/null 2>&1; then no supervision-mode-empty-rejected; else ok supervision-mode-empty-rejected; fi
+
+# --- question/answer inbox: ask -> has-question -> answer -> has-answer -> consume -> clean ---
+hasq(){ run has-question "$1"; }   # exit 0 = an unanswered question is pending
+hasa(){ run has-answer "$1"; }     # exit 0 = pending question has been answered, awaiting consume
+run create q10 --handoff /art/q10/TEMP.md >/dev/null
+if hasq q10; then no fresh-no-question; else ok fresh-no-question; fi
+run ask-question q10 --text "smaller GPU ok?" >/dev/null
+if hasq q10; then ok ask-sets-has-question; else no ask-sets-has-question; fi
+if hasa q10; then no ask-not-yet-answered; else ok ask-not-yet-answered; fi
+[ "$(jget q10 question)" = "smaller GPU ok?" ] && ok ask-records-text || no ask-records-text
+[ "$(jget q10 question_id)" = 1 ] && ok ask-assigns-id-1 || no "ask-assigns-id-1 ($(jget q10 question_id))"
+
+# a second ask while the first is unanswered is refused, and does NOT overwrite the pending question
+if run ask-question q10 --text "second?" >/dev/null 2>&1; then no second-ask-refused; else ok second-ask-refused; fi
+[ "$(jget q10 question)" = "smaller GPU ok?" ] && ok second-ask-noop || no second-ask-noop
+
+# answering with the wrong --question-id is refused; the right id (or no id at all) succeeds
+if run answer-question q10 --text "no" --question-id 99 >/dev/null 2>&1; then no answer-wrong-id-refused; else ok answer-wrong-id-refused; fi
+run answer-question q10 --text "yes, use the small one" --question-id 1 >/dev/null
+if hasa q10; then ok answer-sets-has-answer; else no answer-sets-has-answer; fi
+[ "$(jget q10 answer)" = "yes, use the small one" ] && ok answer-records-text || no answer-records-text
+
+# a second ask after the first is answered but NOT YET consumed is also refused — it must not
+# clobber an answer the executor hasn't read yet (regression: this used to only guard the
+# unanswered case, so an answered-but-unconsumed question could be silently overwritten)
+if run ask-question q10 --text "third?" >/dev/null 2>&1; then no answered-unconsumed-ask-refused; else ok answered-unconsumed-ask-refused; fi
+[ "$(jget q10 question)" = "smaller GPU ok?" ] && ok answered-unconsumed-ask-noop-question || no answered-unconsumed-ask-noop-question
+[ "$(jget q10 answer)" = "yes, use the small one" ] && ok answered-unconsumed-ask-noop-answer || no answered-unconsumed-ask-noop-answer
+
+# a second answer-question while the first answer is unconsumed is also refused — it must not
+# clobber an answer the executor hasn't read yet (the symmetric gap to the ask-side one above:
+# answer-question used to only check a question was pending, not that it was still unanswered)
+if run answer-question q10 --text "actually, use the big one" >/dev/null 2>&1; then no answered-unconsumed-reanswer-refused; else ok answered-unconsumed-reanswer-refused; fi
+[ "$(jget q10 answer)" = "yes, use the small one" ] && ok answered-unconsumed-reanswer-noop || no answered-unconsumed-reanswer-noop
+
+# consuming clears both; consuming again is idempotent (no error, no residual state)
+run consume-question q10 >/dev/null
+if hasq q10; then no consume-clears-question; else ok consume-clears-question; fi
+[ -z "$(jget q10 question)" ] && ok consume-clears-question-field || no consume-clears-question-field
+[ -z "$(jget q10 answer)" ] && ok consume-clears-answer-field || no consume-clears-answer-field
+run consume-question q10 >/dev/null && ok consume-idempotent || no consume-idempotent
+
+# question ids stay monotonic across a second round on the same run (never reused after a consume)
+run ask-question q10 --text "round 2?" >/dev/null
+[ "$(jget q10 question_id)" = 2 ] && ok question-id-monotonic || no "question-id-monotonic ($(jget q10 question_id))"
+run answer-question q10 --text "ok" >/dev/null; run consume-question q10 >/dev/null
+
+# --- consume refuses to clear a still-unanswered question (would silently drop it) ---
+run create q11 --handoff /art/q11/TEMP.md >/dev/null
+run ask-question q11 --text "pending" >/dev/null
+if run consume-question q11 >/dev/null 2>&1; then no consume-before-answer-refused; else ok consume-before-answer-refused; fi
+if hasq q11; then ok consume-refusal-preserves-question; else no consume-refusal-preserves-question; fi
+
+# --- answering with nothing pending is refused ---
+run create q12 >/dev/null
+if run answer-question q12 --text "x" >/dev/null 2>&1; then no answer-nothing-pending-refused; else ok answer-nothing-pending-refused; fi
+
+# --- ask-question / answer-question are refused on terminal (stopped/closed) and missing records ---
+run create q13 >/dev/null; run stop q13 >/dev/null
+if run ask-question q13 --text "x" >/dev/null 2>&1; then no ask-on-stopped-refused; else ok ask-on-stopped-refused; fi
+run create q14 >/dev/null; run close q14 >/dev/null
+if run ask-question q14 --text "x" >/dev/null 2>&1; then no ask-on-closed-refused; else ok ask-on-closed-refused; fi
+if run ask-question nonesuch --text "x" >/dev/null 2>&1; then no ask-missing-refused; else ok ask-missing-refused; fi
+if run answer-question nonesuch --text "x" >/dev/null 2>&1; then no answer-missing-refused; else ok answer-missing-refused; fi
+
+# has-question / has-answer are fail-closed on missing/corrupt/terminal records
+if hasq nonesuch; then no hasquestion-missing-failclosed; else ok hasquestion-missing-failclosed; fi
+if hasq broken; then no hasquestion-corrupt-failclosed; else ok hasquestion-corrupt-failclosed; fi  # broken.json from earlier
+run create q15 --handoff /art/q15/TEMP.md >/dev/null; run ask-question q15 --text "x" >/dev/null; run stop q15 >/dev/null
+if hasq q15; then no hasquestion-stopped-failclosed; else ok hasquestion-stopped-failclosed; fi
+
+# --- consume-question IS allowed on a terminal record (residual cleanup at close) ---
+run create q16 --handoff /art/q16/TEMP.md >/dev/null
+run ask-question q16 --text "x" >/dev/null; run answer-question q16 --text "y" >/dev/null
+run close q16 >/dev/null
+if run consume-question q16 >/dev/null 2>&1; then ok consume-on-closed-ok; else no consume-on-closed-ok; fi
+
+# --- missing --text is rejected ---
+run create q17 --handoff /art/q17/TEMP.md >/dev/null
+if run ask-question q17 >/dev/null 2>&1; then no ask-missing-text-rejected; else ok ask-missing-text-rejected; fi
+run ask-question q17 --text "x" >/dev/null
+if run answer-question q17 >/dev/null 2>&1; then no answer-missing-text-rejected; else ok answer-missing-text-rejected; fi
+
+# --- surplus-arg rejected on the no-further-arg new commands ---
+run create q18 >/dev/null
+if run consume-question q18 oops >/dev/null 2>&1; then no surplus-consume-rejected; else ok surplus-consume-rejected; fi
+if run has-question q18 oops >/dev/null 2>&1; then no surplus-hasquestion-rejected; else ok surplus-hasquestion-rejected; fi
+if run has-answer q18 oops >/dev/null 2>&1; then no surplus-hasanswer-rejected; else ok surplus-hasanswer-rejected; fi
+if run supervision-mode q18 oops >/dev/null 2>&1; then no surplus-supmode-rejected; else ok surplus-supmode-rejected; fi
+if run executor-family q18 oops >/dev/null 2>&1; then no surplus-execfam-rejected; else ok surplus-execfam-rejected; fi
+if run question-route q18 oops >/dev/null 2>&1; then no surplus-qroute-rejected; else ok surplus-qroute-rejected; fi
+if run terminal-route q18 oops >/dev/null 2>&1; then no surplus-troute-rejected; else ok surplus-troute-rejected; fi
+
+# --- status surfaces the new fields, and question/answer only when a question exists ---
+run create q19 --handoff /art/q19/TEMP.md --executor-family codex --supervision-mode controller-supervised >/dev/null
+status=$(run status q19)
+printf '%s\n' "$status" | grep -qx 'executor_family=codex' && ok status-executor-family || no status-executor-family
+printf '%s\n' "$status" | grep -qx 'supervision_mode=controller-supervised' && ok status-supervision-mode || no status-supervision-mode
+printf '%s\n' "$status" | grep -q '^question=' && no status-no-question-line-when-absent || ok status-no-question-line-when-absent
+run ask-question q19 --text "smoke q" >/dev/null
+status=$(run status q19)
+printf '%s\n' "$status" | grep -qx 'question=smoke q' && ok status-question-line || no status-question-line
+printf '%s\n' "$status" | grep -qx 'question_id=1' && ok status-question-id-line || no status-question-id-line
+printf '%s\n' "$status" | grep -qx 'answer=' && ok status-answer-empty-line || no status-answer-empty-line
+
+# --- backward-compat: a legacy record with none of the new fields reads as absent-everything, not corrupt ---
+if hasq legacy; then no legacy-no-question; else ok legacy-no-question; fi
+if run supervision-mode legacy >/dev/null 2>&1; then no legacy-no-supervision-mode; else ok legacy-no-supervision-mode; fi
+if run executor-family legacy >/dev/null 2>&1; then no legacy-no-executor-family; else ok legacy-no-executor-family; fi
 
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }
