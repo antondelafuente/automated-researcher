@@ -20,7 +20,7 @@
 #   substrate-neutral supervision metadata a Codex-family dispatch needs, so it need not invent a parallel
 #   channel — see `references/CODEX_SUPERVISION.md` for the full contract this backs:
 #   executor_family / supervision_mode / question_route / terminal_state_route / question / question_id /
-#   answer / timestamps. `executor_family` names WHO the fresh executor is (e.g. "codex"/"claude", opaque —
+#   answer / look_again_by / timestamps. `executor_family` names WHO the fresh executor is (e.g. "codex"/"claude", opaque —
 #   the product never branches on it); `supervision_mode` is a validated enum, `autonomous-detached` or
 #   `controller-supervised` — the honest self-classification a dispatcher writes once it capability-detects
 #   whether an independent scheduled wake is available (never claim autonomous-detached for a
@@ -31,6 +31,18 @@
 #   executor) and `answer-question` (the designer) let the executor ask without idling and the designer
 #   answer without taking over the run — the durable two-way control channel #223 asks for, reusing this
 #   record's existing atomic-write + fail-closed machinery instead of a new parallel file format.
+#
+# SUPERVISION-BOOTSTRAP RECEIPT (automated-researcher#628): `create_thread` (or the Claude-path session spawn)
+#   only proves the executor's thread/session exists — it says nothing about whether the executor ever wrote
+#   its own supervision record, bound the right worktree/routes/mode, or armed its own watcher. `look_again_by`
+#   is the executor's positive liveness receipt (an opaque "I am alive and will check again by" value, set via
+#   `--look-again` on `start`/`checkpoint`) — the one bounded signal the executor sends before any paid work.
+#   `verify-bootstrap` is the designer-side gate: it polls the record (bounded by `--timeout-sec`) until it is
+#   active/desired-active, every named field (`executor_family` / `supervision_mode` / `worktree_path` /
+#   `question_route` / `terminal_state_route`) matches EXACTLY what the designer expected, AND `look_again_by`
+#   is bound — failing fast on an actual mismatch (never self-corrects by waiting longer) and failing at the
+#   deadline on a record that never appears or never completes. Dispatch is not "done" until this passes; see
+#   `references/CODEX_SUPERVISION.md` §2 for the full contract this backs.
 #
 # WHY A HELPER, NOT PROSE: the record is genuinely stateful, so one product implementation owns the
 #   atomic-write + monotonic-state semantics rather than every consumer (claude-pane-loop.sh, the
@@ -92,8 +104,20 @@
 #              executor has read the answer. REFUSES to clear a still-unanswered question (the designer
 #              hasn't answered yet — clearing it would silently drop it); idempotent when nothing is
 #              pending. Allowed on a terminal record too (residual Q&A cleanup at close).
-#   supervision-mode / executor-family / question-route / terminal-route -> print the respective opaque/
-#              enum value ("" + exit 1 if unset/missing), same shape as session-handle/worktree-path.
+#   supervision-mode / executor-family / question-route / terminal-route / look-again -> print the respective
+#              opaque/enum value ("" + exit 1 if unset/missing), same shape as session-handle/worktree-path.
+#   verify-bootstrap -> the designer-side supervision-bootstrap-receipt gate (#628): polls the record (bounded
+#              by --timeout-sec, default 300s; --poll-interval-sec, default 5s) until it is active/
+#              desired-active AND executor_family/supervision_mode/worktree_path/question_route/
+#              terminal_state_route all match the given --executor-family/--supervision-mode/--worktree/
+#              --question-route/--terminal-route EXACTLY AND look_again_by is bound. FAILS IMMEDIATELY (not
+#              at the timeout) the moment any of those fields is SET but does not match — a mismatch never
+#              self-corrects by waiting longer. FAILS AT THE DEADLINE if the record never appears, or never
+#              reaches the full matching state, within --timeout-sec. Also fails immediately on an
+#              invalid/stopped/closed record. Does NOT take the per-record lock across its poll (it must
+#              never block the executor's own concurrent start/checkpoint writes) — each tick is a plain,
+#              lock-free read, safe because write_record's atomic replace means a tick never observes a
+#              partial write. Exit 0 + a receipt line on success; non-zero + a diagnosing message otherwise.
 #
 # CONCURRENCY: every mutation takes a per-record flock for the whole read-modify-write window, and
 #   the terminal-state guard runs INSIDE that lock — so a concurrent `update` cannot read-modify-write
@@ -103,10 +127,10 @@
 # USAGE:
 #   run_supervision_record.sh start|create <run-id> [--handoff PATH] [--session-handle H] [--worktree PATH]
 #       [--executor-family NAME] [--supervision-mode autonomous-detached|controller-supervised]
-#       [--question-route ROUTE] [--terminal-route ROUTE]
+#       [--question-route ROUTE] [--terminal-route ROUTE] [--look-again RECEIPT]
 #   run_supervision_record.sh checkpoint|update <run-id> [--handoff PATH] [--lease-pod ID]... [--session-handle H] [--worktree PATH]
 #       [--executor-family NAME] [--supervision-mode autonomous-detached|controller-supervised]
-#       [--question-route ROUTE] [--terminal-route ROUTE]
+#       [--question-route ROUTE] [--terminal-route ROUTE] [--look-again RECEIPT]
 #   run_supervision_record.sh stop   <run-id>
 #   run_supervision_record.sh close  <run-id>
 #   run_supervision_record.sh request-relaunch <run-id> [--handoff PATH] [--reason TEXT]
@@ -114,6 +138,8 @@
 #   run_supervision_record.sh ask-question     <run-id> --text TEXT
 #   run_supervision_record.sh answer-question  <run-id> --text TEXT [--question-id ID]
 #   run_supervision_record.sh consume-question <run-id>
+#   run_supervision_record.sh verify-bootstrap <run-id> --executor-family NAME --supervision-mode MODE \
+#       --worktree PATH --question-route ROUTE --terminal-route ROUTE [--timeout-sec N] [--poll-interval-sec N]
 #   run_supervision_record.sh is-desired-active     <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-relaunch-requested <run-id>  # exit 0/1, no output
 #   run_supervision_record.sh is-closed             <run-id>  # exit 0/1, no output (0 iff finished/closed)
@@ -125,6 +151,7 @@
 #   run_supervision_record.sh executor-family       <run-id>  # print opaque family (exit 1 if unset)
 #   run_supervision_record.sh question-route        <run-id>  # print opaque route (exit 1 if unset)
 #   run_supervision_record.sh terminal-route         <run-id>  # print opaque route (exit 1 if unset)
+#   run_supervision_record.sh look-again             <run-id>  # print the look-again receipt (exit 1 if unset)
 #   run_supervision_record.sh status <run-id>               # compact checklist evidence
 #   run_supervision_record.sh show   <run-id>                # print the JSON (debug)
 #   run_supervision_record.sh list                           # `<run-id> <state>` per record (enumeration)
@@ -231,18 +258,22 @@ PY
 #   <clear_qa>       "true" -> clear question/question_id/question_asked_at/answer/answered_at (the
 #                     executor's consume-question); question_seq is NOT reset, so ids stay monotonic
 #                     across the run's lifetime and a stale --question-id can never alias a later question.
+#   <look_again>     non-empty -> set the executor's opaque look-again-by receipt (#628's supervision-
+#                     bootstrap positive liveness signal — "I am alive and will check again by this");
+#                     "" -> leave.
 # Preserves existing fields it doesn't touch. For any non-create mutation, malformed existing JSON fails
 # CLOSED (exit 3) rather than being treated as empty.
-write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff> <worktree_path> <executor_family> <supervision_mode> <question_route> <terminal_route> <set_question> <set_answer> <clear_qa>]
+write_record(){ # <file> <handoff> <add_pods> <set_stopped> <set_closed> <create> [<session_handle> <set_relaunch> <relaunch_reason> <require_handoff> <worktree_path> <executor_family> <supervision_mode> <question_route> <terminal_route> <set_question> <set_answer> <clear_qa> <look_again>]
   local file=$1 handoff=$2 add_pods=$3 set_stopped=$4 set_closed=$5 create=$6
   local session_handle=${7:-} set_relaunch=${8:-} relaunch_reason=${9:-} require_handoff=${10:-} worktree_path=${11:-}
   local executor_family=${12:-} supervision_mode=${13:-} question_route=${14:-} terminal_route=${15:-}
-  local set_question=${16:-} set_answer=${17:-} clear_qa=${18:-}
+  local set_question=${16:-} set_answer=${17:-} clear_qa=${18:-} look_again=${19:-}
   HANDOFF="$handoff" ADD_PODS="$add_pods" SET_STOPPED="$set_stopped" SET_CLOSED="$set_closed" CREATE="$create" \
   SESSION_HANDLE="$session_handle" SET_RELAUNCH="$set_relaunch" RELAUNCH_REASON="$relaunch_reason" \
   REQUIRE_HANDOFF="$require_handoff" WORKTREE_PATH="$worktree_path" \
   EXECUTOR_FAMILY="$executor_family" SUPERVISION_MODE="$supervision_mode" QUESTION_ROUTE="$question_route" \
   TERMINAL_ROUTE="$terminal_route" SET_QUESTION="$set_question" SET_ANSWER="$set_answer" CLEAR_QA="$clear_qa" \
+  LOOK_AGAIN="$look_again" \
   python3 - "$file" <<'PY'
 import json, os, sys, tempfile, time
 
@@ -284,6 +315,7 @@ if creating:
         "question_asked_at": None,
         "answer": None,
         "answered_at": None,
+        "look_again_by": None,
         "created_at": now,
     }
 rec.setdefault("desired_active", True)
@@ -304,6 +336,7 @@ rec.setdefault("question_seq", 0)
 rec.setdefault("question_asked_at", None)
 rec.setdefault("answer", None)
 rec.setdefault("answered_at", None)
+rec.setdefault("look_again_by", None)
 
 handoff = os.environ.get("HANDOFF", "")
 if handoff:
@@ -345,6 +378,9 @@ if os.environ.get("CLEAR_QA") == "true":
     rec["question_asked_at"] = None
     rec["answer"] = None
     rec["answered_at"] = None
+look_again = os.environ.get("LOOK_AGAIN", "")
+if look_again:
+    rec["look_again_by"] = look_again
 add_pods = [p for p in os.environ.get("ADD_PODS", "").splitlines() if p]
 if add_pods:
     seen = list(rec.get("lease_pod_ids") or [])
@@ -425,7 +461,7 @@ require_val(){ # <flag> <value>
 cmd_create(){
   local id=$1; shift
   local handoff="" got_handoff=0 session_handle="" worktree=""
-  local executor_family="" supervision_mode="" question_route="" terminal_route=""
+  local executor_family="" supervision_mode="" question_route="" terminal_route="" look_again=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --handoff)          require_val --handoff "${2:-}";          handoff=$2; got_handoff=1; shift 2;;
@@ -435,6 +471,7 @@ cmd_create(){
       --supervision-mode) require_val --supervision-mode "${2:-}"; validate_supervision_mode "$2"; supervision_mode=$2; shift 2;;
       --question-route)   require_val --question-route "${2:-}";   question_route=$2;          shift 2;;
       --terminal-route)   require_val --terminal-route "${2:-}";   terminal_route=$2;           shift 2;;
+      --look-again)       require_val --look-again "${2:-}";       look_again=$2;               shift 2;;
       *) die "create: unknown arg '$1'";;
     esac
   done
@@ -451,14 +488,14 @@ cmd_create(){
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
   write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" "" "" "$worktree" \
-    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route"
+    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route" "" "" "" "$look_again"
   echo "created run-supervision record: $file (desired-active)"
 }
 
 cmd_update(){
   local id=$1; shift
   local handoff="" pods="" session_handle="" worktree=""
-  local executor_family="" supervision_mode="" question_route="" terminal_route=""
+  local executor_family="" supervision_mode="" question_route="" terminal_route="" look_again=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --handoff)          require_val --handoff "${2:-}";          handoff=$2;             shift 2;;
@@ -469,6 +506,7 @@ cmd_update(){
       --supervision-mode) require_val --supervision-mode "${2:-}"; validate_supervision_mode "$2"; supervision_mode=$2; shift 2;;
       --question-route)   require_val --question-route "${2:-}";   question_route=$2;       shift 2;;
       --terminal-route)   require_val --terminal-route "${2:-}";   terminal_route=$2;        shift 2;;
+      --look-again)       require_val --look-again "${2:-}";       look_again=$2;            shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
   done
@@ -484,7 +522,7 @@ cmd_update(){
     *)       die "update: unexpected record state '$state' for '$id'";;
   esac
   write_record "$file" "$handoff" "$pods" "" "" "false" "$session_handle" "" "" "" "$worktree" \
-    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route"
+    "$executor_family" "$supervision_mode" "$question_route" "$terminal_route" "" "" "" "$look_again"
   echo "updated run-supervision record: $file"
 }
 
@@ -730,6 +768,50 @@ cmd_has_answer(){
   exit 1
 }
 
+# snapshot-verify-fields: print state + the verify-bootstrap fields from ONE json.load(), so classification
+# and field values can never straddle a concurrent stop/close (automated-researcher#628 review round-1:
+# separate classify_record + per-field get_field calls could observe "active" then read fields from a
+# record that went terminal in between, letting a stop/close race verification into a false PASS). ALWAYS
+# emits exactly 7 lines (state, then the 6 fields, "" when unset/no record) so a fixed-count `read` on the
+# caller side never blocks on a short read; a value is never itself multi-line (opaque names/enum/paths).
+snapshot_verify_fields(){ # <file>
+  python3 - "$1" <<'PY'
+import json, os, sys
+
+FIELDS = ("executor_family", "supervision_mode", "worktree_path", "question_route", "terminal_state_route", "look_again_by")
+
+def emit(state, d):
+    print(state)
+    for name in FIELDS:
+        v = (d or {}).get(name)
+        if v is None:
+            print("")
+        elif isinstance(v, bool):
+            print("true" if v else "false")
+        else:
+            print(v)
+
+path = sys.argv[1]
+if not os.path.exists(path):
+    emit("absent", None)
+    sys.exit(0)
+try:
+    d = json.load(open(path))
+    if not isinstance(d, dict):
+        raise ValueError
+except Exception:
+    emit("invalid", None)
+    sys.exit(0)
+if d.get("closed") is True:
+    state = "closed"
+elif d.get("stopped") is True:
+    state = "stopped"
+else:
+    state = "active"
+emit(state, d)
+PY
+}
+
 # is-closed: exit 0 iff the record is a CLEAN close — closed==true AND NOT also stopped. exit 1 otherwise.
 # absent/invalid/active fail closed via classify_record; a `stopped`-then-`closed` record (the deliberate-quit
 # finalize — cmd_close allows stop->close, and classify_record collapses it to "closed") ALSO fails closed,
@@ -804,6 +886,100 @@ cmd_terminal_route(){
   printf '%s\n' "$v"
 }
 
+# look-again: print the executor's opaque look-again-by receipt (#628's supervision-bootstrap positive
+# liveness signal, set via --look-again on start/checkpoint); exit 1 (no output) if the record or the
+# field is absent. Same shape as session-handle/worktree-path.
+cmd_look_again(){
+  local id=$1; local file; file=$(record_path "$id")
+  [ -f "$file" ] || exit 1
+  local v; v=$(get_field "$file" look_again_by)
+  [ -n "$v" ] || exit 1
+  printf '%s\n' "$v"
+}
+
+# verify-bootstrap: the designer-side supervision-bootstrap-receipt gate (automated-researcher#628). Polls
+# (bounded by --timeout-sec) until the record is active/desired-active AND executor_family/supervision_mode/
+# worktree_path/question_route/terminal_state_route all match the expected values EXACTLY AND look_again_by
+# is bound — the full "dispatch is durably supervised" state, not merely "a thread/record exists". Does NOT
+# take the per-record lock (see the file-header note): this must never block the executor's own concurrent
+# start/checkpoint writes while it polls.
+cmd_verify_bootstrap(){
+  local id=$1; shift
+  local exp_family="" exp_mode="" exp_worktree="" exp_qroute="" exp_troute=""
+  local timeout_sec=300 poll_sec=5
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --executor-family)   require_val --executor-family "${2:-}";   exp_family=$2;   shift 2;;
+      --supervision-mode)  require_val --supervision-mode "${2:-}";  validate_supervision_mode "$2"; exp_mode=$2; shift 2;;
+      --worktree)          require_val --worktree "${2:-}";          exp_worktree=$2; shift 2;;
+      --question-route)    require_val --question-route "${2:-}";    exp_qroute=$2;   shift 2;;
+      --terminal-route)    require_val --terminal-route "${2:-}";    exp_troute=$2;   shift 2;;
+      --timeout-sec)       require_val --timeout-sec "${2:-}";       timeout_sec=$2;  shift 2;;
+      --poll-interval-sec) require_val --poll-interval-sec "${2:-}"; poll_sec=$2;      shift 2;;
+      *) die "verify-bootstrap: unknown arg '$1'";;
+    esac
+  done
+  [ -n "$exp_family" ]   || die "verify-bootstrap: --executor-family is required"
+  [ -n "$exp_mode" ]     || die "verify-bootstrap: --supervision-mode is required"
+  [ -n "$exp_worktree" ] || die "verify-bootstrap: --worktree is required"
+  [ -n "$exp_qroute" ]   || die "verify-bootstrap: --question-route is required"
+  [ -n "$exp_troute" ]   || die "verify-bootstrap: --terminal-route is required"
+  case "$timeout_sec" in ''|*[!0-9]*) die "verify-bootstrap: --timeout-sec must be a non-negative integer (got '$timeout_sec')";; esac
+  case "$poll_sec"    in ''|*[!0-9]*) die "verify-bootstrap: --poll-interval-sec must be a non-negative integer (got '$poll_sec')";; esac
+
+  local file; file=$(record_path "$id")
+  local start_ts; start_ts=$(date +%s)
+  local state
+  while :; do
+    # One snapshot call per iteration: state and all six fields come from the SAME json.load(), so a
+    # concurrent stop/close can never be observed as "active" alongside terminal-stale field values (see
+    # snapshot_verify_fields's header note — the round-1 TOCTOU this closes).
+    local got_family got_mode got_wt got_qr got_tr got_la
+    { IFS= read -r state; IFS= read -r got_family; IFS= read -r got_mode; IFS= read -r got_wt; \
+      IFS= read -r got_qr; IFS= read -r got_tr; IFS= read -r got_la; } < <(snapshot_verify_fields "$file")
+    case "$state" in
+      invalid) die "verify-bootstrap: run '$id' has a malformed record on disk — refusing to treat dispatch as complete (inspect $file)";;
+      stopped) die "verify-bootstrap: run '$id' is stopped (terminal) before bootstrap completed — dispatch cannot be treated as complete";;
+      closed)  die "verify-bootstrap: run '$id' is closed (terminal) before bootstrap completed — dispatch cannot be treated as complete";;
+      absent)  : ;;  # keep polling — the executor may not have created the record yet
+      active)
+        # A field that is SET but WRONG never self-corrects by waiting longer — fail fast, not at the deadline.
+        [ -z "$got_family" ] || [ "$got_family" = "$exp_family" ] || \
+          die "verify-bootstrap: run '$id' executor_family mismatch — expected '$exp_family', got '$got_family'"
+        [ -z "$got_mode" ] || [ "$got_mode" = "$exp_mode" ] || \
+          die "verify-bootstrap: run '$id' supervision_mode mismatch — expected '$exp_mode', got '$got_mode'"
+        [ -z "$got_wt" ] || [ "$got_wt" = "$exp_worktree" ] || \
+          die "verify-bootstrap: run '$id' worktree_path mismatch — expected '$exp_worktree', got '$got_wt'"
+        [ -z "$got_qr" ] || [ "$got_qr" = "$exp_qroute" ] || \
+          die "verify-bootstrap: run '$id' question_route mismatch — expected '$exp_qroute', got '$got_qr'"
+        [ -z "$got_tr" ] || [ "$got_tr" = "$exp_troute" ] || \
+          die "verify-bootstrap: run '$id' terminal_state_route mismatch — expected '$exp_troute', got '$got_tr'"
+        if [ "$got_family" = "$exp_family" ] && [ "$got_mode" = "$exp_mode" ] && [ "$got_wt" = "$exp_worktree" ] \
+           && [ "$got_qr" = "$exp_qroute" ] && [ "$got_tr" = "$exp_troute" ] && [ -n "$got_la" ]; then
+          echo "supervision-bootstrap receipt PASSED: $file (executor_family=$got_family supervision_mode=$got_mode worktree=$got_wt question_route=$got_qr terminal_route=$got_tr look_again_by=$got_la)"
+          return 0
+        fi
+        ;;
+      *) die "verify-bootstrap: unexpected record state '$state' for '$id'";;
+    esac
+    local now elapsed; now=$(date +%s); elapsed=$(( now - start_ts ))
+    if [ "$elapsed" -ge "$timeout_sec" ]; then
+      if [ "$state" = "absent" ]; then
+        die "verify-bootstrap: timed out after ${timeout_sec}s waiting for run '$id' — no supervision record ever appeared (executor never started run_supervision_record.sh, or the run-id is wrong)"
+      else
+        die "verify-bootstrap: timed out after ${timeout_sec}s waiting for run '$id' bootstrap to complete — record is active but never reached the full expected state with a look-again receipt (inspect $file)"
+      fi
+    fi
+    # Clamp the sleep to what's left of the deadline — sleeping the full --poll-interval-sec regardless
+    # would let a coarse poll interval overshoot --timeout-sec by up to that interval (round-1 review P0).
+    if [ "$poll_sec" -gt 0 ]; then
+      local remaining=$(( timeout_sec - elapsed )) sleep_for=$poll_sec
+      [ "$remaining" -lt "$sleep_for" ] && sleep_for=$remaining
+      [ "$sleep_for" -gt 0 ] && sleep "$sleep_for"
+    fi
+  done
+}
+
 cmd_show(){
   local id=$1; local file; file=$(record_path "$id")
   [ -f "$file" ] || die "show: no record for '$id'"
@@ -863,6 +1039,7 @@ print(f"executor_family={rec.get('executor_family') or ''}")
 print(f"supervision_mode={rec.get('supervision_mode') or ''}")
 print(f"question_route={rec.get('question_route') or ''}")
 print(f"terminal_state_route={rec.get('terminal_state_route') or ''}")
+print(f"look_again_by={rec.get('look_again_by') or ''}")
 question = rec.get("question")
 if question:
     print(f"question_id={rec.get('question_id') or ''}")
@@ -876,16 +1053,16 @@ main(){
   local sub=${1:-}; shift || true
   local id=${1:-}
   case "$sub" in
-    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show|ask-question|answer-question|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route)
+    create|start|update|checkpoint|stop|close|request-relaunch|clear-relaunch|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|status|show|ask-question|answer-question|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route|look-again|verify-bootstrap)
       validate_id "$id"; shift;;
     list) [ $# -eq 0 ] || die "list: unexpected extra argument(s): $*";;
-    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|ask-question|answer-question|consume-question|is-desired-active|is-relaunch-requested|is-closed|has-question|has-answer|session-handle|worktree-path|supervision-mode|executor-family|question-route|terminal-route|status|show|list> <run-id> [...]";;
+    "") die "usage: run_supervision_record.sh <start|create|checkpoint|update|stop|close|request-relaunch|clear-relaunch|ask-question|answer-question|consume-question|verify-bootstrap|is-desired-active|is-relaunch-requested|is-closed|has-question|has-answer|session-handle|worktree-path|supervision-mode|executor-family|question-route|terminal-route|look-again|status|show|list> <run-id> [...]";;
     *) die "unknown subcommand '$sub'";;
   esac
   # commands that take NO further args must reject surplus tokens — a malformed wrapper call must fail
   # closed, especially before a terminal mutation, not silently stop/close a run.
   case "$sub" in
-    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route)
+    stop|close|clear-relaunch|status|show|is-desired-active|is-relaunch-requested|is-closed|session-handle|worktree-path|consume-question|has-question|has-answer|supervision-mode|executor-family|question-route|terminal-route|look-again)
       [ $# -eq 0 ] || die "$sub: unexpected extra argument(s): $*";;
   esac
   case "$sub" in
@@ -901,7 +1078,7 @@ main(){
     answer-question)       with_lock "$id" cmd_answer_question  "$id" "$@";;
     consume-question)      with_lock "$id" cmd_consume_question "$id";;
     # the is-*/has-* predicates + session-handle/worktree-path/supervision-mode/executor-family/
-    # question-route/terminal-route exit 0/1 (or print+exit) from inside with_lock; preserve that exit code
+    # question-route/terminal-route/look-again exit 0/1 (or print+exit) from inside with_lock; preserve that exit code
     is-desired-active)     with_lock "$id" cmd_is_desired_active     "$id";;
     is-relaunch-requested) with_lock "$id" cmd_is_relaunch_requested "$id";;
     is-closed)             with_lock "$id" cmd_is_closed             "$id";;
@@ -913,6 +1090,10 @@ main(){
     executor-family)       with_lock "$id" cmd_executor_family       "$id";;
     question-route)        with_lock "$id" cmd_question_route        "$id";;
     terminal-route)        with_lock "$id" cmd_terminal_route        "$id";;
+    look-again)             with_lock "$id" cmd_look_again           "$id";;
+    # verify-bootstrap deliberately does NOT take the lock: it polls over a bounded timeout, and holding
+    # the flock across that whole poll would deadlock the executor's own concurrent start/checkpoint calls.
+    verify-bootstrap)      cmd_verify_bootstrap "$id" "$@";;
     status)                with_lock "$id" cmd_status           "$id";;
     show)                  with_lock "$id" cmd_show             "$id";;
     list)                  cmd_list;;

@@ -11,7 +11,9 @@
 # question/answer inbox (ask-question/answer-question/consume-question/has-question/has-answer) —
 # refusing a second ask while one is unanswered, refusing to answer nothing, the --question-id mismatch
 # guard, refusing to consume before an answer exists, idempotent consume, and the same terminal/missing/
-# corrupt fail-closed guards as the rest of the record.
+# corrupt fail-closed guards as the rest of the record. Also covers the #628 supervision-bootstrap
+# receipt: the look-again-by getter, and verify-bootstrap's successful-bootstrap / missing-record /
+# wrong-field / bootstrap-timeout paths (small --timeout-sec/--poll-interval-sec values keep this smoke fast).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -444,5 +446,98 @@ printf '%s\n' "$status" | grep -qx 'answer=' && ok status-answer-empty-line || n
 if hasq legacy; then no legacy-no-question; else ok legacy-no-question; fi
 if run supervision-mode legacy >/dev/null 2>&1; then no legacy-no-supervision-mode; else ok legacy-no-supervision-mode; fi
 if run executor-family legacy >/dev/null 2>&1; then no legacy-no-executor-family; else ok legacy-no-executor-family; fi
+
+# ===== #628: supervision-bootstrap receipt (look-again-by field + verify-bootstrap gate) =====
+lookagain(){ run look-again "$1"; }
+
+# --- look-again: opaque, set on create, readable, overridable on update; absent -> fail-closed ---
+run create la1 --handoff /art/la1/TEMP.md --look-again "1234567890" >/dev/null
+[ "$(lookagain la1)" = "1234567890" ] && ok lookagain-create || no lookagain-create
+run update la1 --look-again "1234567999" >/dev/null
+[ "$(lookagain la1)" = "1234567999" ] && ok lookagain-update || no lookagain-update
+run create la2 >/dev/null
+if run look-again la2 >/dev/null 2>&1; then no lookagain-absent-failclosed; else ok lookagain-absent-failclosed; fi
+if run look-again nonesuch >/dev/null 2>&1; then no lookagain-missing-failclosed; else ok lookagain-missing-failclosed; fi
+if run update la1 --look-again "" >/dev/null 2>&1; then no empty-lookagain-rejected; else ok empty-lookagain-rejected; fi
+if run look-again la1 oops >/dev/null 2>&1; then no surplus-lookagain-rejected; else ok surplus-lookagain-rejected; fi
+
+# --- verify-bootstrap: successful bootstrap (all fields match + look-again bound) ---
+run create vb1 --handoff /art/vb1/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb1 --question-route record --terminal-route record --look-again "111" >/dev/null
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb1 --question-route record --terminal-route record \
+     --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb1.out" 2>&1; then ok verify-bootstrap-success; else no verify-bootstrap-success; fi
+grep -q "supervision-bootstrap receipt PASSED" "$TMP/vb1.out" && ok verify-bootstrap-receipt-line || no verify-bootstrap-receipt-line
+
+# --- verify-bootstrap: missing record — never appears, fails at the timeout deadline (not fail-fast) ---
+if run verify-bootstrap vb_nonesuch --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb_nonesuch --question-route record --terminal-route record \
+     --timeout-sec 1 --poll-interval-sec 1 >"$TMP/vb_missing.out" 2>&1; then no verify-bootstrap-missing-record; else ok verify-bootstrap-missing-record; fi
+grep -q "no supervision record ever appeared" "$TMP/vb_missing.out" && ok verify-bootstrap-missing-message || no verify-bootstrap-missing-message
+
+# --- verify-bootstrap: wrong worktree/mode/route — fails IMMEDIATELY, not at the (long) timeout deadline ---
+run create vb2 --handoff /art/vb2/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb2 --question-route record --terminal-route record --look-again "222" >/dev/null
+VB2_START=$(date +%s)
+if run verify-bootstrap vb2 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/WRONG --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb2.out" 2>&1; then no verify-bootstrap-wrong-worktree; else ok verify-bootstrap-wrong-worktree; fi
+VB2_ELAPSED=$(( $(date +%s) - VB2_START ))
+[ "$VB2_ELAPSED" -lt 10 ] && ok verify-bootstrap-wrong-worktree-failfast || no "verify-bootstrap-wrong-worktree-failfast (took ${VB2_ELAPSED}s)"
+grep -q "worktree_path mismatch" "$TMP/vb2.out" && ok verify-bootstrap-wrong-worktree-message || no verify-bootstrap-wrong-worktree-message
+
+run create vb3 --handoff /art/vb3/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb3 --question-route record --terminal-route record --look-again "333" >/dev/null
+if run verify-bootstrap vb3 --executor-family codex --supervision-mode autonomous-detached \
+     --worktree /ws/run/vb3 --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb3.out" 2>&1; then no verify-bootstrap-wrong-mode; else ok verify-bootstrap-wrong-mode; fi
+grep -q "supervision_mode mismatch" "$TMP/vb3.out" && ok verify-bootstrap-wrong-mode-message || no verify-bootstrap-wrong-mode-message
+
+run create vb4 --handoff /art/vb4/TEMP.md --executor-family claude --supervision-mode controller-supervised \
+  --worktree /ws/run/vb4 --question-route record --terminal-route record --look-again "444" >/dev/null
+if run verify-bootstrap vb4 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb4 --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb4.out" 2>&1; then no verify-bootstrap-wrong-family; else ok verify-bootstrap-wrong-family; fi
+grep -q "executor_family mismatch" "$TMP/vb4.out" && ok verify-bootstrap-wrong-family-message || no verify-bootstrap-wrong-family-message
+
+run create vb5 --handoff /art/vb5/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb5 --question-route "chan:#other" --terminal-route record --look-again "555" >/dev/null
+if run verify-bootstrap vb5 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb5 --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb5.out" 2>&1; then no verify-bootstrap-wrong-qroute; else ok verify-bootstrap-wrong-qroute; fi
+grep -q "question_route mismatch" "$TMP/vb5.out" && ok verify-bootstrap-wrong-qroute-message || no verify-bootstrap-wrong-qroute-message
+
+# --- verify-bootstrap: bootstrap timeout — record active + all fields match, but no look-again receipt yet ---
+run create vb6 --handoff /art/vb6/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb6 --question-route record --terminal-route record >/dev/null
+if run verify-bootstrap vb6 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb6 --question-route record --terminal-route record \
+     --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb6.out" 2>&1; then no verify-bootstrap-timeout; else ok verify-bootstrap-timeout; fi
+grep -q "never reached the full expected state" "$TMP/vb6.out" && ok verify-bootstrap-timeout-message || no verify-bootstrap-timeout-message
+
+# --- verify-bootstrap: a coarse --poll-interval-sec must never let the wait overshoot --timeout-sec by
+# the full interval (round-1 review P0: the deadline used to be checked only before sleeping the whole
+# poll_sec, so --timeout-sec 1 --poll-interval-sec 30 could block ~30s instead of failing near 1s) ---
+VB8_START=$(date +%s)
+if run verify-bootstrap vb_overshoot --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb_overshoot --question-route record --terminal-route record \
+     --timeout-sec 1 --poll-interval-sec 30 >/dev/null 2>&1; then no verify-bootstrap-no-overshoot; else ok verify-bootstrap-no-overshoot; fi
+VB8_ELAPSED=$(( $(date +%s) - VB8_START ))
+[ "$VB8_ELAPSED" -lt 10 ] && ok verify-bootstrap-no-overshoot-timing || no "verify-bootstrap-no-overshoot-timing (took ${VB8_ELAPSED}s)"
+
+# --- verify-bootstrap: terminal (stopped/closed/invalid) records refused immediately, never treated as a healthy wait ---
+run create vb7 --handoff /art/vb7/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb7 --question-route record --terminal-route record --look-again "777" >/dev/null
+run stop vb7 >/dev/null
+if run verify-bootstrap vb7 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb7 --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >/dev/null 2>&1; then no verify-bootstrap-stopped-refused; else ok verify-bootstrap-stopped-refused; fi
+if run verify-bootstrap broken --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/broken --question-route record --terminal-route record \
+     --timeout-sec 30 --poll-interval-sec 1 >/dev/null 2>&1; then no verify-bootstrap-corrupt-refused; else ok verify-bootstrap-corrupt-refused; fi
+
+# --- verify-bootstrap: required-arg / malformed-timeout validation ---
+if run verify-bootstrap vb1 --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record >/dev/null 2>&1; then no verify-bootstrap-missing-family-arg-rejected; else ok verify-bootstrap-missing-family-arg-rejected; fi
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record --timeout-sec abc >/dev/null 2>&1; then no verify-bootstrap-bad-timeout-rejected; else ok verify-bootstrap-bad-timeout-rejected; fi
 
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }

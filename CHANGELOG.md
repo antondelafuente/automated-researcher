@@ -1,3 +1,29 @@
+- experiment-lifecycle 0.3.81 (2026-07-25): fixes two round-1 review P0s in #628's `verify-bootstrap` gate.
+  `classify_record` + six separate `get_field` calls each opened and re-parsed the record file independently,
+  so a concurrent `stop`/`close` landing between them could be observed as "active" alongside stale
+  terminal-adjacent field values, letting a race falsely PASS the receipt; replaced with a single
+  `snapshot_verify_fields` read (one `json.load()`, state + all six fields together) so classification and
+  field values can never straddle a mutation. Separately, the poll loop checked the deadline only before
+  sleeping the full `--poll-interval-sec`, so a coarse interval (e.g. `--timeout-sec 1 --poll-interval-sec
+  30`) could overshoot the requested timeout by up to that interval; the sleep is now clamped to whatever is
+  left of the deadline. Added smoke coverage for the overshoot case.
+- experiment-lifecycle 0.3.80 (2026-07-25): hardens Codex-native dispatch with a deterministic
+  supervision-bootstrap receipt (#628) — a successful `create_thread` only proved a thread exists, not that
+  the executor's supervision record was ever written, bound to the right worktree/routes/mode, or backed by
+  an armed watcher. `run_supervision_record.sh` gains a `look_again_by` field (the executor's positive
+  liveness receipt, set via `--look-again` on `start`/`checkpoint`, readable via the new `look-again` getter)
+  and a `verify-bootstrap` subcommand: the designer-side gate that polls the record (bounded by
+  `--timeout-sec`) until it is active/desired-active AND `executor_family`/`supervision_mode`/`worktree_path`/
+  `question_route`/`terminal_state_route` all match exactly AND a look-again receipt is bound — failing fast
+  on an actual field mismatch (never self-corrects by waiting longer) and failing at the deadline on a
+  record that never appears or never completes; it deliberately never takes the per-record lock across its
+  poll, so it can never deadlock the executor's own concurrent writes. `CODEX_SUPERVISION.md` gains a new §2
+  documenting the executor-side (start-record-first, then bind the receipt) and designer-side
+  (`verify-bootstrap` before treating dispatch complete, `needs-attention` on any non-zero exit, otherwise
+  fall through to the existing §4 zero-turn `wait_threads` loop) halves of the contract; `design-experiment`
+  Step 4 and `run-experiment`'s self-wake section point Codex dispatch at it. `run_supervision_record_smoke.sh`
+  gains coverage for the look-again getter and `verify-bootstrap`'s successful/missing-record/wrong-field/
+  timeout paths. No changes to the Claude-to-Claude dispatch path.
 - experiment-lifecycle 0.3.79 (2026-07-25): defines the Codex-native dispatch and supervision contract
   (#223) — same-family fresh-executor default with an explicit, never-silent operator override; a
   validated `supervision_mode` enum (`autonomous-detached`/`controller-supervised`) so a
