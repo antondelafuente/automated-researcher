@@ -251,17 +251,33 @@ jobs:
 
           if [ "$MODE" = single ]; then
             if ! gh issue view "$ISSUE_NUMBER" --repo "$REPO" \
-                --json number,title,body,labels,createdAt,comments,author > /tmp/raw_issue.json; then
+                --json number,title,body,labels,createdAt,author > /tmp/raw_issue.json; then
               echo "::error::gh issue view $ISSUE_NUMBER failed"
+              exit 1
+            fi
+            # automated-researcher#625 (Codex round-1 P0): comment BODIES (embedded in the packet) and
+            # comment AUTHORS (trust classification below) must come from one and the same read of the
+            # comment thread — two separate API calls, even reconciled by a matching count, can never prove
+            # they describe the same comment set (a comment deleted and another added between the two reads
+            # can leave counts equal while the body/author correspondence is now wrong, letting an
+            # untrusted comment's text ride into the trusted-path packet under a since-changed, all-trusted
+            # author set). Fetch comments via the REST endpoint exactly once and derive both fields from
+            # that single response. REST's `.user.login` already carries the `<slug>[bot]` suffix for a bot
+            # comment (unlike the GraphQL packet's bare-slug rendering that caused the original #625
+            # misclassification, observed on automated-researcher#223), so this single fetch also serves the
+            # original bug fix without a second, separately-timed read.
+            if ! gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" --paginate > /tmp/raw_comments.json; then
+              echo "::error::gh api repos/${REPO}/issues/${ISSUE_NUMBER}/comments failed"
               exit 1
             fi
             jq -s '.' /tmp/raw_issue.json > /tmp/candidates.json
 
-            jq --arg now "$NOW" '
+            jq --arg now "$NOW" --slurpfile comments /tmp/raw_comments.json '
               def age_days(created):
                 (($now | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) - (created | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime)) / 86400 | floor;
               def refs(text; self):
                 ([text | scan("#[0-9]+")] | map(ltrimstr("#") | tonumber) | unique) - [self];
+              ($comments[0]) as $rest_comments |
               {
                 generated_at: $now,
                 tickets: [ .[] | {
@@ -271,8 +287,8 @@ jobs:
                   labels: [.labels[].name],
                   created_at: .createdAt,
                   age_days: age_days(.createdAt),
-                  comments: [ .comments[] | {author: .author.login, created_at: .createdAt, body: (.body // "")} ],
-                  referenced_issues: refs( ((.body // "") + "\n" + ([.comments[].body // ""] | join("\n"))); .number ),
+                  comments: [ $rest_comments[] | {author: (.user.login // "null"), created_at: .created_at, body: (.body // "")} ],
+                  referenced_issues: refs( ((.body // "") + "\n" + ([$rest_comments[].body // ""] | join("\n"))); .number ),
                   author: (.author.login // "")
                 } ]
               }
@@ -311,22 +327,14 @@ jobs:
             # non-allowlisted login anywhere in the set forces the whole ticket down the capability-reduced
             # path (fail-closed, per AGENTS.md's scale principle) rather than trying to filter per-comment.
             #
-            # automated-researcher#625: comment authors must NOT come from the GraphQL packet above —
-            # `gh issue view --json comments` (`.comments[].author.login`) renders a bot-authored comment's
-            # login as the BARE slug (e.g. `codex-engineer`), not `app/<slug>`, so canonical_login() (correctly)
-            # refuses to trust it, forcing every ticket with an engineer-bot comment down the untrusted path
-            # (observed on automated-researcher#223). The REST comments endpoint's `.user.login` carries the
-            # `<slug>[bot]` suffix for a bot comment already, so fetch comment logins from there instead — the
-            # issue-author login above is unaffected (GraphQL's `--json author` already returns `app/<slug>`
-            # correctly) and is left as-is.
-            mapfile -t comment_logins < <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" --paginate --jq '.[].user.login // "null"')
-            # A REST fetch that silently dropped or duplicated comments would classify trust against the wrong
-            # comment set — fail closed instead of proceeding on a mismatched count against the GraphQL packet.
-            packet_comment_count=$(jq '.tickets[0].comments | length' triage-packets.json)
-            if [ "${#comment_logins[@]}" -ne "$packet_comment_count" ]; then
-              echo "::error::REST comment-author fetch returned ${#comment_logins[@]} login(s) but the GraphQL packet has $packet_comment_count comment(s) — refusing to classify trust against a mismatched comment set"
-              exit 1
-            fi
+            # automated-researcher#625: comment authors come from the same /tmp/raw_comments.json REST
+            # snapshot the packet's comment bodies above were built from (not a separate GraphQL read) — its
+            # `.user.login` carries the `<slug>[bot]` suffix for a bot comment already, unlike the GraphQL
+            # packet's bare-slug rendering that caused the original misclassification (observed on
+            # automated-researcher#223) — and, being the same single read, cannot race against the bodies.
+            # The issue-author login above is unaffected (GraphQL's `--json author` already returns
+            # `app/<slug>` correctly) and is left as-is.
+            mapfile -t comment_logins < <(jq -r '.[].user.login // "null"' /tmp/raw_comments.json)
             author_login=$(jq -r '.tickets[0].author' triage-packets.json)
             trusted_author=$("$GITHUB_WORKSPACE/.github/scripts/classify-ticket-trust.sh" "$ALLOWLIST" "$author_login" "${comment_logins[@]}")
             echo "ticket #$ISSUE_NUMBER trusted_author=$trusted_author"
