@@ -518,4 +518,19 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/gpu-job/skills/gpu-job/scrip
   fi
 fi
 
+# 18. classify-ticket-trust smoke (#625): the ticket trust-classification helper that decides
+#     `trusted_author` for triage-assess.yml's capability reduction, exercised against the actual
+#     gh/GraphQL-vs-REST identity shapes that caused the bug (app/<slug>, <slug>[bot], and a bare <slug> —
+#     the GraphQL comments-endpoint shape that must NOT be trusted). Runs when the helper, its smoke, or
+#     triage-assess.yml changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/classify(-ticket-trust|_ticket_trust_smoke)\.sh|\.github/workflows/triage-assess\.yml)$'; then
+  CTT_SMOKE="$ROOT/.github/scripts/classify_ticket_trust_smoke.sh"
+  if [ -f "$CTT_SMOKE" ]; then
+    echo "[checks] classify-ticket-trust smoke" >&2
+    bash "$CTT_SMOKE" >&2 && ok "classify-ticket-trust smoke" || err "classify-ticket-trust smoke FAILED"
+  else
+    err "classify-ticket-trust.sh or triage-assess.yml changed but classify_ticket_trust_smoke.sh missing — cannot verify ticket trust classification"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
