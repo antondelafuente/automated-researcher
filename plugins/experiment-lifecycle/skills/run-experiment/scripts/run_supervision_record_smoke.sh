@@ -316,6 +316,14 @@ run create cx1 --handoff /art/cx1/TEMP.md --executor-family codex --supervision-
 
 # --- update can change them; absent fields on a plain record are fail-closed (exit 1, no output) ---
 run create cx2 >/dev/null
+
+# --- question_route / terminal_state_route default to "record" on a flagless create, per
+#     CODEX_SUPERVISION.md's documented default; an explicit flag still overrides it ---
+[ "$(qroute cx2)" = record ] && ok codex-question-route-default || no codex-question-route-default
+[ "$(troute cx2)" = record ] && ok codex-terminal-route-default || no codex-terminal-route-default
+run update cx2 --question-route "chan:#runs" >/dev/null
+[ "$(qroute cx2)" = "chan:#runs" ] && ok codex-question-route-override || no codex-question-route-override
+
 if run supervision-mode cx2 >/dev/null 2>&1; then no supervision-mode-absent-failclosed; else ok supervision-mode-absent-failclosed; fi
 if run executor-family cx2 >/dev/null 2>&1; then no executor-family-absent-failclosed; else ok executor-family-absent-failclosed; fi
 run update cx2 --executor-family claude --supervision-mode autonomous-detached >/dev/null

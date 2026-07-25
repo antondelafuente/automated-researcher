@@ -26,8 +26,8 @@
 #   whether an independent scheduled wake is available (never claim autonomous-detached for a
 #   controller-held blocking watcher). `question_route` / `terminal_state_route` are opaque pointers
 #   naming HOW the executor's load-bearing questions and DONE/BLOCKED/failed terminal state reach the
-#   designer-of-record (commonly "record" — poll this same file — but instance-defined, e.g. a chat
-#   channel id). The question/answer fields are a single-in-flight file-based inbox: `ask-question` (the
+#   designer-of-record — default `record`, poll this same file — but instance-overridable to a chat
+#   channel, pager, etc. The question/answer fields are a single-in-flight file-based inbox: `ask-question` (the
 #   executor) and `answer-question` (the designer) let the executor ask without idling and the designer
 #   answer without taking over the run — the durable two-way control channel #223 asks for, reusing this
 #   record's existing atomic-write + fail-closed machinery instead of a new parallel file format.
@@ -276,8 +276,8 @@ if creating:
         "worktree_path": None,
         "executor_family": None,
         "supervision_mode": None,
-        "question_route": None,
-        "terminal_state_route": None,
+        "question_route": "record",
+        "terminal_state_route": "record",
         "question": None,
         "question_id": None,
         "question_seq": 0,
@@ -296,8 +296,8 @@ rec.setdefault("relaunch_reason", None)
 rec.setdefault("worktree_path", None)
 rec.setdefault("executor_family", None)
 rec.setdefault("supervision_mode", None)
-rec.setdefault("question_route", None)
-rec.setdefault("terminal_state_route", None)
+rec.setdefault("question_route", "record")
+rec.setdefault("terminal_state_route", "record")
 rec.setdefault("question", None)
 rec.setdefault("question_id", None)
 rec.setdefault("question_seq", 0)
