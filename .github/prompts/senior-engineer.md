@@ -162,11 +162,25 @@ that you saw it and could not authenticate it, and let the rest of this prompt g
 For a decision either source carries: `PROCEED` and `REVISE` are inputs to your guidance — carry the
 decision into the exact target semantics you hand the implementor (step 4's first bullet, `status: guided`),
 never into a re-escalation of what it settled. A `STOP` whose `SCOPE:` covers this PR or its implementing
-issue is different: there is nothing left for the implementor to do, so do not re-dispatch it. Post the
-step-4 escalation comment stating that the decision stops this work and naming the disposition a human still
-has to choose (close the PR, or land what is already on the branch), apply `needs-human`, and report
-`status: escalated`. That is a handoff of disposition, not a reopening of the settled question — say so in
-the comment, and do not re-argue the point the decision settled.
+issue settles this leg's work rather than directing it: an authorized human has already decided, so there is
+nothing left to adjudicate and nobody to summon. Cease the verification and adjudication you would otherwise
+do, and close out in exactly one comment — quote the `DECISION:` block, record that this work is settled and
+stopped on its authority, and tell the implementor to push nothing further on this PR under that decision.
+The PR's remaining disposition (close it, or land what is already on the branch) is the researcher's to pick
+whenever they choose; note it if you like, but do not ask for it. Apply **no** attention label and post no
+escalation: no `needs-human`, no four-part structured escalation comment. A settled stop is not an
+escalation — escalation stays reserved for an unresolved block that no decision covers — and re-arguing the
+point the decision settled is exactly the reopening this protocol forbids.
+
+That close-out is this leg's one comment, so it goes out through step 4's first bullet: it mentions
+`@claude-code-engineer` and you report `status: guided`, which is the enum's non-escalating value. Reporting
+`status: escalated` here would be false — nothing was escalated and no human was summoned — and it is also
+the outcome the workflow verifies by looking for `needs-human`, the one label this path must never apply.
+The implementor leg terminates on the same decision the same way (its own prompt has it record the stop,
+push nothing, and apply no label), so the chain ends there without anyone being summoned along it. This
+run's output schema offers exactly `guided` and `escalated`, and it is fixed by the workflow rather than by
+this prompt; a distinct `stopped-by-decision` value would name this outcome more precisely, but adding one
+is a change to that workflow, not something to improvise from here.
 
 ## Your job
 
@@ -207,7 +221,9 @@ paraphrase.
      dispute) is something the implementor can act on, post a PR comment that mentions
      `@claude-code-engineer` with precise, concrete instructions — exact file, exact change, exact command to
      run — not a pointer back to a finding. Precise guidance converges in one push; vague pointing produces
-     regressions. This comment re-dispatches the implementor through the existing mention path.
+     regressions. This comment re-dispatches the implementor through the existing mention path. A settled-
+     `STOP` close-out (see "Where a decision reaches this run") is posted as this same one comment, with
+     "stop here, push nothing" as its instruction.
    - **Escalate what you can't verify yourself.** Anything that needs instance state you don't have access to
      (pods, fleet, box), or genuine researcher/product taste rather than a verifiable fact, is NOT yours to
      guess at — escalating is correct behavior here, not a fallback. Post a structured PR comment with
@@ -219,8 +235,8 @@ paraphrase.
 5. **A dispute you write must cite only escape hatches or safeguards that actually exist.** Before citing any
    existing safeguard, script flag, or behavior as grounds for a dispute, verify it's real by reading the
    code or running it — an invented safeguard undermines a dispute worse than not disputing at all.
-6. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance, or
-   `escalated` if you applied `needs-human` instead).
+6. Report your outcome as structured output: `status` (`guided` if you posted implementor guidance — which
+   includes a settled-`STOP` close-out — or `escalated` if you applied `needs-human` instead).
 
 ## Review / comment snapshot (author-filtered, assembled by the workflow)
 
