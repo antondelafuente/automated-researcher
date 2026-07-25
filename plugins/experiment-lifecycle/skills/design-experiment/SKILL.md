@@ -401,9 +401,14 @@ point. *How* you spawn it is the instance's implementation of the contract:
   watcher is the controller-supervised implementation today (Codex has no periodic-reinvocation primitive yet): it
   keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies this dispatch
   contract without claiming autonomous-detached status — but it must re-verify its own held handle on every wake, not
-  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). See
-  **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default, the durable
-  question/answer inbox, and the hardened wait pattern.
+  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). **A successful
+  `create_thread` alone does NOT make dispatch complete** (automated-researcher#628): before falling into the
+  healthy `wait_threads` loop below, run `run_supervision_record.sh verify-bootstrap <run-id> --executor-family
+  codex --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
+  --terminal-route <expected route>` and treat a non-zero exit (missing record, a mismatched field, or a timeout)
+  as `needs-attention`, not a normal wait. See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the
+  full contract: same-family default, the supervision-bootstrap receipt (§2), the durable question/answer inbox,
+  and the hardened wait pattern.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
 Why fresh-context dispatch is the default:

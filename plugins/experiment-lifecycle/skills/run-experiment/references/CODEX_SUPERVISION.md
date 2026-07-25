@@ -28,7 +28,7 @@ run-supervision record at `start`/`checkpoint`:
 
 ```
 run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque> \
-  --worktree <path> --executor-family codex --supervision-mode <mode, see §3>
+  --worktree <path> --executor-family codex --supervision-mode <mode, see §4>
 ```
 
 `executor_family` is opaque (the product never branches on its value — it is provenance, read by a human
@@ -36,7 +36,51 @@ or a future audit asking "who actually ran this"), and it is set once at dispatc
 fact. A brief dispatched to a *different* family than its designer's must say so explicitly in `START.md`'s
 executor-disposition section — the override, not the default, is the thing that needs a paper trail.
 
-## 2. The durable two-way control channel — questions without idling, answers without taking over
+## 2. The supervision-bootstrap receipt — dispatch is not complete until this passes (automated-researcher#628)
+
+A successful `create_thread` (or the Claude-path fresh-session spawn) proves only that the thread/session
+exists — nothing more. If the executor wedges before writing its own supervision record, binds the wrong
+worktree/routes/mode, or begins paid work without its own watcher armed, the designer can fall straight into
+§4's healthy `wait_threads` loop with **no durable recovery/control channel behind it** — the exact gap the
+prior Claude dispatch closed only by a human habit (babysitting until the executor had actually created its
+record, armed its wake, and begun the first real phase, before treating kickoff as complete). This section
+makes that check explicit and deterministic instead of a habit a designer might skip under load.
+
+**The executor's side — before any experiment work and before any GPU/API spend:**
+
+1. Immediately after its own thread/session creation succeeds, start the record — the same
+   `run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque> --worktree
+   <path> --executor-family codex --supervision-mode <mode> --question-route <route> --terminal-route
+   <route>` call §1 already requires, just moved to the FIRST thing the executor does, not something
+   deferred until after provisioning.
+2. Arm its own watcher/liveness mechanism (§4's controller-supervised blocking wait, or a real
+   autonomous-detached wake if the host actually has one) and bind the bootstrap receipt in the same or a
+   following call: `run_supervision_record.sh checkpoint <run-id> --look-again <opaque deadline/receipt>`
+   — a positive "I am alive and I will check again by this" signal, not a bare "I started." This is the one
+   bounded `SUPERVISION_READY` signal the contract asks for: a single deterministic write delivered through
+   the record, exactly the way `question_route`/`terminal_state_route` already deliver the Q&A channel
+   (default `record`; an instance may route the same signal elsewhere without the product interpreting it).
+
+**The designer's side — before treating dispatch as complete:** run `run_supervision_record.sh
+verify-bootstrap <run-id> --executor-family codex --supervision-mode <expected mode> --worktree <expected
+path> --question-route <expected route> --terminal-route <expected route> [--timeout-sec N]
+[--poll-interval-sec N]`. This polls the record (bounded by `--timeout-sec`, default 300s) until it is
+active/desired-active AND every named field matches EXACTLY AND a look-again receipt is bound — the full
+bootstrap contract, not merely "a thread exists." A record whose bound fields actively mismatch what the
+designer expected (wrong worktree, wrong family, wrong mode, wrong route) fails **immediately**, not after
+the timeout — a mismatch never self-corrects by waiting longer. A record that never appears, or never
+completes, within `--timeout-sec` fails **at the deadline** instead, with a message distinguishing "never
+appeared" from "appeared but never finished."
+
+**Missing, malformed, or timed-out bootstrap is `needs-attention` — not a normal healthy wait.** Treat a
+non-zero exit from `verify-bootstrap` as a dispatch failure requiring diagnosis (a wedged executor, a wrong
+worktree bound, a stale/reused run-id) with the same seriousness as any other `CHECKLIST.md` `[BLOCK]` gate
+FAIL — never silently re-issue `create_thread` again, and never fall into §4's wait loop on a bootstrap that
+hasn't actually passed. Once `verify-bootstrap` exits 0, dispatch IS complete, and healthy supervision
+returns to the existing §4 zero-turn `wait_threads` loop — this receipt is a one-time gate at kickoff, not a
+recurring poll layered on top of it.
+
+## 3. The durable two-way control channel — questions without idling, answers without taking over
 
 `run-experiment`'s own disposition already says a load-bearing gap gets flagged to the designer-of-record,
 not guessed at, and the executor keeps working on everything the gap doesn't block. What Codex lacked was
@@ -60,7 +104,7 @@ question/answer inbox:
 **`question_route`** and **`terminal_state_route`** (set at `start`/`checkpoint` via `--question-route` /
 `--terminal-route`, read back via the `question-route`/`terminal-route` getters) are opaque pointers naming
 **how** these signals actually reach a human or a delegated watcher — the default is `record` (poll this
-same file, per §5's cadence), but an instance may route through a chat channel, a paging system, or
+same file, per §6's cadence), but an instance may route through a chat channel, a paging system, or
 whatever it already has; the product does not interpret the value, only carries it so the binding is
 durable and inspectable rather than living only in someone's memory of "how this run's questions get
 answered."
@@ -69,7 +113,7 @@ This channel is deliberately not a general-purpose message queue (see Non-goals)
 single load-bearing question/answer/terminal-state seam `design-experiment`'s dispatch contract already
 promises, made durable enough to survive a lost local process handle.
 
-## 3. Cheap healthy waiting — capability-detected, honestly classified
+## 4. Cheap healthy waiting — capability-detected, honestly classified
 
 Healthy supervision must consume **zero model turns between meaningful events** wherever the substrate
 allows it. The rule is a capability check, not a substrate-specific mandate:
@@ -102,10 +146,10 @@ uses — must, on EVERY wake (not only after a suspected failure):
    signal in either mode: stop re-waiting, diagnose, escalate.
 
 If step 1 ever finds the recorded handle gone or unrecognized, that is a **wedge**, not a reason to
-silently re-issue a fresh wait and hope — surface it (see §4) rather than re-creating the exact silent gap
+silently re-issue a fresh wait and hope — surface it (see §5) rather than re-creating the exact silent gap
 this document exists to close.
 
-## 4. Recovery does not depend on one in-memory exec handle
+## 5. Recovery does not depend on one in-memory exec handle
 
 This is not a new mechanism — `run_supervision_record.sh` and `RELAUNCH_SUPERVISOR.md` are already
 substrate-neutral (the whole point of `session_handle` being an opaque, instance-owned value the product
@@ -121,10 +165,10 @@ mechanism in itself, on Codex exactly as on Claude. The model-free idle-cost tea
 lease's own expiry) remains the money backstop regardless of supervision mode; it is not a substitute for
 the continuity contract above.
 
-## 5. Bounded designer supervision — wedge detection without recaching the world
+## 6. Bounded designer supervision — wedge detection without recaching the world
 
 The two-layer split `design-experiment` Step 4 already defines is substrate-neutral: the executor's own
-tick (§3) owns ordinary idle/progress detection; the designer owns only **session-wedge** detection — the
+tick (§4) owns ordinary idle/progress detection; the designer owns only **session-wedge** detection — the
 executor's session stuck mid-turn, alive but making no progress, the one failure the executor's own tick
 cannot self-diagnose because its own wake queues behind the stuck turn. For a Codex designer specifically,
 absent a periodic-reinvocation primitive, run this at a **45-60 min cadence** as an ad hoc/manual check (or
@@ -132,7 +176,7 @@ a delegated small watcher session, per Step 4 item 3) reading only the executor'
 run-supervision record's `status` — never the full design conversation on every tick, which is exactly the
 $150-250/run-day regression a prior full-history `/loop` watchdog caused. Do not block dispatch on this gap
 being fully automated away — note it, fall back to the manual cadence, and keep supervising; a Codex host
-gaining a real scheduled-wake primitive later is a §3 capability upgrade, not a blocker to shipping this
+gaining a real scheduled-wake primitive later is a §4 capability upgrade, not a blocker to shipping this
 contract today.
 
 ## What is INSTANCE, not product (do not put it here)
@@ -147,6 +191,9 @@ Per the same boundary `RELAUNCH_SUPERVISOR.md` draws:
   channel id, a paging integration).
 - The 45-60 min designer-heartbeat cadence's concrete scheduling (a cron entry, a manual habit, a
   delegated watcher session's own wake) for a Codex designer.
+- The concrete `--timeout-sec`/`--poll-interval-sec` values a designer uses for `verify-bootstrap`, and the
+  concrete meaning of the opaque `--look-again` receipt value (an epoch timestamp, a monotonic counter —
+  whatever the executor's host can actually produce and re-check).
 
 ## Non-goals (unchanged from the issue)
 
