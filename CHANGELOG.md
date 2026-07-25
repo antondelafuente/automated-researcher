@@ -1,3 +1,21 @@
+- experiment-lifecycle 0.3.82 (2026-07-25): makes the Codex-native coordination surface capability-detected and
+  the dispatched executor visible to the researcher (#637). A real dispatch created an app-visible child task
+  (Codex Desktop **Subagents**, chattable, full executor context preserved) but never told the researcher its
+  nickname or where to look, so the researcher believed the executor was hidden and asked why the visible
+  top-level thread tools were missing; guidance also read as if `create_thread`/`wait_threads` were the only
+  dispatch path, so their absence looked like a blocked dispatch. `CODEX_SUPERVISION.md` gains §7: probe the
+  session's actual surface before dispatch (top-level thread wrappers vs. only a native `spawn_agent`-style
+  child), treat the native child path as first-class provided the child starts zero-context on the brief,
+  announce the returned handle/nickname plus its inspection location the moment the dispatch call returns it —
+  strictly before #628's `verify-bootstrap` receipt and before any wait, since that poll can run to its full
+  300s default or fail outright, which is exactly when an unannounced child is worst (bound as the record's
+  existing opaque `--session-handle`, so it outlives the turn), keep the child's human-inspection
+  window distinct from §3's durable question/answer inbox for anything load-bearing, keep a completed executor
+  available through human review instead of closing it at DONE, and record the click-away/back refresh
+  behavior as a host-UI caveat rather than expected product behavior. §1/§2's `create_thread`-specific wording
+  is now surface-neutral, `design-experiment` Step 4's Codex bullet and `run-experiment`'s Codex self-wake note
+  carry the detect-and-announce duty at point of need, and the concrete probe plus the app's own inspection
+  surface are named as instance concerns. No script or record-format changes.
 - experiment-lifecycle 0.3.81 (2026-07-25): fixes two round-1 review P0s in #628's `verify-bootstrap` gate.
   `classify_record` + six separate `get_field` calls each opened and re-parsed the record file independently,
   so a concurrent `stop`/`close` landing between them could be observed as "active" alongside stale
