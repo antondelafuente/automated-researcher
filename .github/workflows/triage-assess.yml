@@ -120,6 +120,19 @@ name: triage-assess
 #   automated-researcher#502 precedent) before it enters an App-authored comment -- an App-authored comment
 #   passes exactly the author filters other actuators in this pipeline trust by author
 #   (agentic-engineering#56's escalation-mention sanitization precedent).
+#
+# Comment-author identity source for trust classification (automated-researcher#625): `gather`'s
+# single-ticket packet build fetches comment logins for `trusted_author` from the REST comments endpoint
+# (`.user.login`), never from the GraphQL `--json comments` packet used for the ticket's actual content —
+# GraphQL renders a bot-authored comment's login as the bare App slug (`codex-engineer`), which
+# `canonical-login.sh` correctly refuses to trust (a same-named plain user is a different, untrusted
+# identity), so every engineer-bot comment forced the whole ticket down the untrusted path until this fix
+# (observed on automated-researcher#223). REST's `.user.login` already carries the `<slug>[bot]` suffix for
+# a bot comment, closing the gap without loosening canonical-login.sh's own boundary. Classification itself
+# is delegated to `.github/scripts/classify-ticket-trust.sh` (regression-covered by
+# `classify_ticket_trust_smoke.sh`), fed a REST-fetched comment-login list whose count is checked against
+# the GraphQL packet's own comment count first — a silent REST pagination gap must fail the run closed
+# rather than classify trust against a mismatched comment set.
 
 on:
   issues:
@@ -297,28 +310,26 @@ jobs:
             # Read/Grep/Glob-capable trusted path exactly like an untrusted issue body would. One
             # non-allowlisted login anywhere in the set forces the whole ticket down the capability-reduced
             # path (fail-closed, per AGENTS.md's scale principle) rather than trying to filter per-comment.
-            source "$GITHUB_WORKSPACE/.github/scripts/canonical-login.sh"
+            #
+            # automated-researcher#625: comment authors must NOT come from the GraphQL packet above —
+            # `gh issue view --json comments` (`.comments[].author.login`) renders a bot-authored comment's
+            # login as the BARE slug (e.g. `codex-engineer`), not `app/<slug>`, so canonical_login() (correctly)
+            # refuses to trust it, forcing every ticket with an engineer-bot comment down the untrusted path
+            # (observed on automated-researcher#223). The REST comments endpoint's `.user.login` carries the
+            # `<slug>[bot]` suffix for a bot comment already, so fetch comment logins from there instead — the
+            # issue-author login above is unaffected (GraphQL's `--json author` already returns `app/<slug>`
+            # correctly) and is left as-is.
+            mapfile -t comment_logins < <(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}/comments" --paginate --jq '.[].user.login // "null"')
+            # A REST fetch that silently dropped or duplicated comments would classify trust against the wrong
+            # comment set — fail closed instead of proceeding on a mismatched count against the GraphQL packet.
+            packet_comment_count=$(jq '.tickets[0].comments | length' triage-packets.json)
+            if [ "${#comment_logins[@]}" -ne "$packet_comment_count" ]; then
+              echo "::error::REST comment-author fetch returned ${#comment_logins[@]} login(s) but the GraphQL packet has $packet_comment_count comment(s) — refusing to classify trust against a mismatched comment set"
+              exit 1
+            fi
             author_login=$(jq -r '.tickets[0].author' triage-packets.json)
-            mapfile -t comment_logins < <(jq -r '.tickets[0].comments[].author' triage-packets.json)
-            trusted_author=true
-            for login in "$author_login" "${comment_logins[@]}"; do
-              login_canon=$(canonical_login "$login" 2>/dev/null || echo "")
-              matched=false
-              # Explicit if/then (not a `&&`-chained one-liner): under `set -e`, a bare failing `[ ... ]` in a
-              # `&&` list that never reaches `matched=true` would abort this whole step, not just skip the
-              # loop body.
-              if [ -n "$login_canon" ]; then
-                for a in $ALLOWLIST; do
-                  if [ "$(canonical_login "$a")" = "$login_canon" ]; then
-                    matched=true
-                  fi
-                done
-              fi
-              if [ "$matched" != true ]; then
-                trusted_author=false
-              fi
-            done
-            echo "ticket #$ISSUE_NUMBER author=$author_login comment_authors=${comment_logins[*]:-none} trusted_author=$trusted_author"
+            trusted_author=$("$GITHUB_WORKSPACE/.github/scripts/classify-ticket-trust.sh" "$ALLOWLIST" "$author_login" "${comment_logins[@]}")
+            echo "ticket #$ISSUE_NUMBER trusted_author=$trusted_author"
             echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
 
             ticket_count=$(jq '.tickets | length' triage-packets.json)
