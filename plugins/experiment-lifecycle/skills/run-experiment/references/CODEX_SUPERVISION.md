@@ -78,9 +78,11 @@ appeared" from "appeared but never finished."
 non-zero exit from `verify-bootstrap` as a dispatch failure requiring diagnosis (a wedged executor, a wrong
 worktree bound, a stale/reused run-id) with the same seriousness as any other `CHECKLIST.md` `[BLOCK]` gate
 FAIL — never silently re-issue the dispatch call again, and never fall into §4's wait loop on a bootstrap that
-hasn't actually passed. Once `verify-bootstrap` exits 0, dispatch IS complete (announce the executor per §7 in
-that same turn), and healthy supervision returns to the existing §4 zero-turn wait loop — this receipt is a
-one-time gate at kickoff, not a recurring poll layered on top of it.
+hasn't actually passed. Report that failure against the executor handle §7 already announced, rather than
+leaving a created-but-wedged executor unnamed. Once `verify-bootstrap` exits 0, dispatch IS complete, and
+healthy supervision returns to the existing §4 zero-turn wait loop — this receipt is a one-time gate at
+kickoff, not a recurring poll layered on top of it. **This gate never defers §7's announcement:** the executor
+is announced when the dispatch call returns its handle, which is strictly before this poll begins.
 
 ## 3. The durable two-way control channel — questions without idling, answers without taking over
 
@@ -210,11 +212,21 @@ the researcher may open it and read or chat with it directly. That window is for
 flow: anything load-bearing the executor needs answered still travels through §3's durable question/answer
 inbox, so it survives session churn and lands somewhere the record can prove.
 
-**Announce the executor in the same turn you dispatch it** — before falling into any wait, in the
-researcher-facing conversation and not only on the record: the handle/nickname the dispatch returned, plus
-where to inspect it. Worked example: "Executor **Erdos** is running; open **Subagents** to inspect or chat
-with it." Bind that same handle as the record's opaque `--session-handle` at `start` (§1, §5) so it stays
-durable and re-probable instead of living only in one conversation turn. A dispatch whose handle exists but was
+**Announce the executor the moment the dispatch call returns a handle** — before §2's `verify-bootstrap`,
+before any wait, in the researcher-facing conversation and not only on the record: the handle/nickname the
+dispatch returned, plus where to inspect it. Worked example: "Executor **Erdos** is running; open
+**Subagents** to inspect or chat with it." Bind that same handle as the record's opaque `--session-handle` at
+`start` (§1, §5) so it stays durable and re-probable instead of living only in one conversation turn.
+
+**Announcement is never sequenced behind verification.** The two duties are independent and must stay that
+way: §2's receipt gates the claim *dispatch is complete*, while this announcement gates the claim *the
+researcher can see the executor*. Ordering them the other way round quietly reintroduces the defect — a
+bootstrap poll can occupy its full `--timeout-sec` (default 300s) or fail outright, and that is exactly the
+case where an unannounced child is worst: a real executor exists, the researcher believes nothing was created,
+and the one surface that would show the wedge sits unnamed. So announce first, then verify; and when
+`verify-bootstrap` comes back non-zero, report the `needs-attention` *against the handle you already named*
+("Executor **Erdos** was created but its bootstrap receipt never appeared — it is under **Subagents** if you
+want to look"), never by withholding the name until the receipt passes. A dispatch whose handle exists but was
 never announced is exactly the defect this section names, even when the run underneath it is perfectly healthy.
 
 **Keep a completed executor available through human review.** When the executor reports DONE, do not close or

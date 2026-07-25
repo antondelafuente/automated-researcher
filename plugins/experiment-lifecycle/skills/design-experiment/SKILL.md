@@ -406,16 +406,18 @@ point. *How* you spawn it is the instance's implementation of the contract:
   a session may expose `create_thread`/`wait_threads`, or only the native multi-agent primitives (a
   `spawn_agent`-shaped child task with a nickname). Either satisfies this contract as long as the child starts
   zero-context on the brief; a missing wrapper is **not** a blocked dispatch and never a reason to fall back to
-  a different family or to run the design here. **A successful dispatch call alone does NOT make dispatch
-  complete** (automated-researcher#628): before falling into the healthy zero-turn wait loop below, run
-  `run_supervision_record.sh verify-bootstrap <run-id> --executor-family codex
+  a different family or to run the design here. **Announce the executor the moment the dispatch call returns
+  a handle** — before verifying anything, before any wait: the handle/nickname it returned and where to
+  inspect it ("Executor **Erdos** is running; open **Subagents** to inspect or chat with it"), bound as the
+  record's `--session-handle` so it outlives the turn. An app-visible child is a first-class executor surface
+  the researcher may read or chat with directly, while supervision and integration stay yours; keep it around
+  through human review rather than closing it at DONE. **Separately — a successful dispatch call alone does
+  NOT make dispatch complete** (automated-researcher#628): before falling into the healthy zero-turn wait loop
+  below, run `run_supervision_record.sh verify-bootstrap <run-id> --executor-family codex
   --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
   --terminal-route <expected route>` and treat a non-zero exit (missing record, a mismatched field, or a timeout)
-  as `needs-attention`, not a normal wait. Then **announce the executor to the researcher in that same turn** —
-  the handle/nickname the dispatch returned and where to inspect it ("Executor **Erdos** is running; open
-  **Subagents** to inspect or chat with it"), bound as the record's `--session-handle` so it outlives the turn.
-  An app-visible child is a first-class executor surface the researcher may read or chat with directly, while
-  supervision and integration stay yours; keep it around through human review rather than closing it at DONE.
+  as `needs-attention`, not a normal wait — reported against the executor you already named. That poll is
+  bounded but can run to its full default 300s or fail, so it must never be what the announcement waits on.
   See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default,
   the supervision-bootstrap receipt (§2), the durable question/answer inbox,
   the hardened wait pattern, and the coordination-surface/visibility contract (§7).

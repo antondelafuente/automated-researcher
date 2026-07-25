@@ -6,8 +6,10 @@
   dispatch path, so their absence looked like a blocked dispatch. `CODEX_SUPERVISION.md` gains §7: probe the
   session's actual surface before dispatch (top-level thread wrappers vs. only a native `spawn_agent`-style
   child), treat the native child path as first-class provided the child starts zero-context on the brief,
-  announce the returned handle/nickname plus its inspection location in the same turn as dispatch (bound as the
-  record's existing opaque `--session-handle`, so it outlives the turn), keep the child's human-inspection
+  announce the returned handle/nickname plus its inspection location the moment the dispatch call returns it —
+  strictly before #628's `verify-bootstrap` receipt and before any wait, since that poll can run to its full
+  300s default or fail outright, which is exactly when an unannounced child is worst (bound as the record's
+  existing opaque `--session-handle`, so it outlives the turn), keep the child's human-inspection
   window distinct from §3's durable question/answer inbox for anything load-bearing, keep a completed executor
   available through human review instead of closing it at DONE, and record the click-away/back refresh
   behavior as a host-UI caveat rather than expected product behavior. §1/§2's `create_thread`-specific wording
