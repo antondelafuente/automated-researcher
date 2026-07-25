@@ -1,3 +1,20 @@
+- experiment-lifecycle 0.3.79 (2026-07-25): defines the Codex-native dispatch and supervision contract
+  (#223) — same-family fresh-executor default with an explicit, never-silent operator override; a
+  validated `supervision_mode` enum (`autonomous-detached`/`controller-supervised`) so a
+  controller-held blocking watcher can never be mislabeled autonomous-detached; a durable, file-based
+  question/answer inbox (`ask-question`/`answer-question`/`has-question`/`has-answer`/
+  `consume-question` on `run_supervision_record.sh`) letting an executor flag a load-bearing gap to the
+  designer-of-record without idling and without the designer taking over the run; and
+  `executor_family`/`question_route`/`terminal_state_route` fields recording provenance and routing.
+  Closes the 2026-06-29 stale-`exec_command`-handle incident's operational gap by hardening the
+  controller-supervised wait to re-verify its own handle on every wake instead of trusting a long
+  `write_stdin` yield blindly. New reference `run-experiment/references/CODEX_SUPERVISION.md` is the
+  full substrate-neutral contract (product/instance split mirroring `RELAUNCH_SUPERVISOR.md`);
+  `design-experiment` Step 4 + `run-experiment`'s self-wake section now point Codex dispatch/supervision
+  at it instead of a bare "open gap" note. `run_supervision_record_smoke.sh` gains coverage for the new
+  fields, the enum validation, and the single-in-flight question/answer round trip (including the
+  refuse-consume-before-answer and question-id-mismatch guards). No changes to the Claude-to-Claude
+  dispatch path or the cross-family scientific audit.
 - verify-claims 0.7.27 (2026-07-21): `audit_experiment.sh` fixes from the 2026-07-10 csp1-scrub-ladder-1
   close-audit incident (built-in codex auditor hit its ChatGPT usage limit; recovery needed undocumented
   moves), #373. (1) The built-in codex auditor now retries a usage-limit failure via an ephemeral,

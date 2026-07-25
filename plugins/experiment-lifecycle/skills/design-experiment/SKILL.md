@@ -394,9 +394,16 @@ point. *How* you spawn it is the instance's implementation of the contract:
 - **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
   A tool-spawned Agent subagent is fine for short controller-supervised probes, but not as the autonomous detached
   executor: it cannot arm the independent recurring wake this contract requires.
-- **Codex:** a fresh thread / watcher-driven local execution. A blocking watcher is the controller-supervised
-  implementation: it keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies
-  this dispatch contract without claiming autonomous-detached status.
+- **Codex:** a fresh, zero-context Codex thread by default — same-family, never a silent fallback to a different
+  family (an explicit operator override is fine; a quiet substitution is not). Record `--executor-family codex` and
+  the capability-detected `--supervision-mode` (`autonomous-detached` if the host actually exposes an independent
+  scheduled wake, else the honest `controller-supervised`) on the run-supervision record at dispatch. A blocking
+  watcher is the controller-supervised implementation today (Codex has no periodic-reinvocation primitive yet): it
+  keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies this dispatch
+  contract without claiming autonomous-detached status — but it must re-verify its own held handle on every wake, not
+  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). See
+  **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default, the durable
+  question/answer inbox, and the hardened wait pattern.
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
 Why fresh-context dispatch is the default:
@@ -470,8 +477,12 @@ For the session-wedge duty, arm at dispatch, in this order:
    it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
    unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several
    executors → ONE merged heartbeat over all their panes, never one loop per run.** (Claude Code: `/loop 45m`; a
-   **Codex** designer has no periodic-reinvocation primitive today — the open gap tracked at #223, not something to
-   invent here: note the gap, fall back to ad hoc / manual checks at the same cadence, and do NOT block dispatch.)
+   **Codex** designer still has no periodic-reinvocation primitive today, so run this heartbeat as an ad hoc / manual
+   check at the same 45-60 min cadence — read the executor's pane/log tail and the run-supervision record's `status`
+   only, never the full design conversation, and do NOT block dispatch on this being automated away. A real
+   load-bearing question from the executor arrives through the durable question/answer inbox on the run-supervision
+   record — `has-question`/`answer-question` — not only through pane text, so this cadence check should also poll
+   that. See `references/CODEX_SUPERVISION.md` in `run-experiment` for the full contract, #223.)
 3. **Designer context known-large → dispatch the heartbeat to a separate small session (optional).** The heartbeat
    needs ~2k tokens (pane text + the rubric above) but a loop in the designer session executes with the whole
    designer history, re-cached cold on every tick. The dispatched watchdog is spawned at kickoff with the list of

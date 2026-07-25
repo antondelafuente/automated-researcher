@@ -131,8 +131,22 @@ arm the idle-cost teardown backstop.
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
 > creating session; auto-expires ~7 days — re-arm for longer runs). A tool-spawned Agent subagent cannot use this
 > independent wake path, so it is not a valid autonomous detached executor. A `run_in_background` Bash/Monitor
-> waiter is not a substitute for this either — see "Long-running process discipline" below. Other substrates: the
-> equivalent recurring wake.
+> waiter is not a substitute for this either — see "Long-running process discipline" below.
+>
+> **Codex implementation (automated-researcher#223):** Codex has no independent recurring wake today — do NOT
+> substitute an in-process monitor and call it autonomous detached. Record `--supervision-mode
+> controller-supervised` on `run_supervision_record.sh` and keep a blocking/event-driven wait alive instead (an
+> `exec_command`/`write_stdin` long-yield wait, or an equivalent detached-shell-plus-poll). The one hardening this
+> mode needs beyond the Claude path: **re-verify the wait's own underlying handle is still alive on every wake**,
+> before trusting the tick's other signals — a real incident (`019f11bb-93ee-7410-afb8-c7fec87642dd`) had a
+> `write_stdin` wait never return while its pod-side run failed unnoticed for ~15 min, because nothing re-checked
+> whether the local wait itself was still the one thing it assumed it was. If a Codex host later exposes a real
+> scheduled-wake primitive, capability-detect it and record `--supervision-mode autonomous-detached` instead — never
+> the reverse. See `references/CODEX_SUPERVISION.md` for the full contract, including the durable question/answer
+> inbox (`ask-question`/`answer-question`/`has-question`/`has-answer`/`consume-question` on the same record) that
+> lets you flag a load-bearing gap to the designer-of-record without idling and without them taking over the run.
+>
+> Other substrates: the equivalent recurring wake.
 
 ## The resume contract — be resumable by a model-free supervisor (do this as you go)
 
