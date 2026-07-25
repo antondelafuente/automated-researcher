@@ -133,7 +133,15 @@ agentic-engineering#43).
   `block-reason` / `blocked-run` inside `<!-- IMPLEMENTATION-STATE -->` markers, with the implementor's own
   explanation comment just above it), the routed state is then VERIFIED against live GitHub state rather
   than trusted, and only after that does the job fail the run DELIBERATELY — a red conclusion is what lets
-  run-level observers tell "PR opened" from "blocked awaiting a human". `needs-human` is the routing target
+  run-level observers tell "PR opened" from "blocked awaiting a human". **Pre-PR and post-PR blocks route to
+  different surfaces**, and `route-blocked` resolves which before mutating anything: the Issue-side terminal
+  state above is for a block with no PR (nothing else exists to carry it), while a block the implementor
+  discovers *after* opening a PR routes to that PR's `needs-senior-engineer` — the summons senior-engineer.yml
+  actually watches — verified present there, with the Issue left alone (its PR is in flight, so `ready` stays
+  until the PR merges) and auto-merge deliberately not enabled on a PR its own author reported incomplete.
+  The reported PR number is model-authored, so it is verified to be an open PR in this repo first and falls
+  back to Issue-side routing when it isn't: a block is never lost to a mis-reported surface. Whichever
+  surface carries it, the run still concludes red. `needs-human` is the routing target
   rather than issue-level senior-engineer summoning because restoring an Issue's dispatchable state is an
   authority question carved out to #632, and it also stops the triager from re-proposing a flip on a ticket
   that now carries no disposition. **Loop protection:** while `implementation-blocked` is present, a bare

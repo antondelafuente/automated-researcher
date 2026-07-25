@@ -9,8 +9,9 @@
 #     particular the implementor bot itself) unblocking with its own `DECISION: PROCEED`;
 #   - static assertions on implement-on-ready.yml that the routing actuator is actually wired: blocked ⇒
 #     `ready` removed + blocked-state label + `needs-human` + machine-readable record + a non-success run
-#     conclusion, a bare-ready re-add refused before any implementor run is spent, and the `opened` path
-#     left exactly as it was (enable-automerge still gated only on `pr_number`).
+#     conclusion, a bare-ready re-add refused before any implementor run is spent, the pre-PR and post-PR
+#     blocks routed to their distinct escalation surfaces, every restore path clearing BOTH blocked labels,
+#     and the `opened` path left exactly as it was (enable-automerge still gated only on `pr_number`).
 # Fully offline: no network, no gh, no tokens.
 set -uo pipefail
 
@@ -265,6 +266,31 @@ else
   assert_step_guarded "Run pinned Claude Code CLI (implementor)"
   assert_step_guarded "Resolve job outputs"
 
+  # The `if:` line of a named step (steps declare it within the first few lines of their block).
+  step_if() {
+    local step="$1" line
+    line=$(grep -n -m1 -F -- "- name: $step" "$WORKFLOW" | cut -d: -f1)
+    [ -n "$line" ] || return 1
+    sed -n "$((line + 1)),$((line + 3))p" "$WORKFLOW" | grep -m1 -E '^[[:space:]]+if:' || true
+  }
+
+  # Releasing the block must clear BOTH labels on EVERY restore path (round-1 review P0). Removing
+  # `implementation-blocked` by hand — one of the three documented restores — makes the guard report
+  # `not-blocked`, so gating the clear on the guard's `why` would leave `needs-human` stranded on an issue
+  # the implementor is actively working, contradicting the documented restore.
+  clear_if=$(step_if "Clear released blocked state")
+  if [ -z "$clear_if" ]; then
+    fail "the 'Clear released blocked state' step has no if: condition (or the step is gone)"
+  elif printf '%s' "$clear_if" | grep -qF "not-blocked"; then
+    fail "the release-clear step is gated on the guard's why ($clear_if) — the label-removal restore reports 'not-blocked', so needs-human would be stranded"
+  elif printf '%s' "$clear_if" | grep -qF "verdict != 'inert'"; then
+    pass "the release-clear step runs on every proceeding dispatch, so a label-removal restore clears needs-human too"
+  else
+    fail "unexpected gate on the release-clear step: $clear_if"
+  fi
+  assert_yaml "the release-clear step clears the blocked-state label AND needs-human" \
+    "present-labels .*needs-human"
+
   # blocked ⇒ routed: ready removed, blocked-state label + needs-human applied, record recorded, run red.
   assert_yaml "a route-blocked job exists" "^  route-blocked:"
   assert_yaml "route-blocked fires only on a blocked outcome" \
@@ -290,6 +316,40 @@ else
   else
     fail "could not confirm record-before-label ordering (comment=$comment_line label=$label_line)"
   fi
+
+  # Pre-PR and post-PR blocks are DIFFERENT escalation paths (round-1 review P0): the issue-side terminal
+  # state is for a block with no PR; a block found after a PR was opened belongs on that PR's
+  # `needs-senior-engineer`, the summons senior-engineer.yml actually watches. Applying the issue-side state
+  # to a post-PR block marks an issue blocked while its PR is in flight.
+  assert_yaml "the implement job publishes the blocked run's PR separately from pr_number" \
+    "^      blocked_pr:"
+  if grep -qE '^\s+pr_number=""$' "$WORKFLOW"; then
+    pass "a non-opened status still clears pr_number, so a blocked result can never reach enable-automerge"
+  else
+    fail "the non-opened pr_number clearing is gone — a blocked result could reach enable-automerge's gate"
+  fi
+  assert_yaml "route-blocked resolves which surface carries the escalation" "id: surface"
+  assert_yaml "the reported blocked PR is verified against GitHub, not trusted" \
+    'gh pr view "\$BLOCKED_PR" --repo "\$REPO" --json state'
+  assert_yaml "only an OPEN pull request takes the PR route (anything else falls back to the issue)" \
+    '\[ "\$state" = "OPEN" \]'
+  assert_surface_gated() {
+    local step="$1" want="$2" cond
+    cond=$(step_if "$step")
+    if [ -z "$cond" ]; then fail "step '$step' is not gated on the escalation surface (no if:)"; return; fi
+    if printf '%s' "$cond" | grep -qF "steps.surface.outputs.target == '$want'"; then
+      pass "step '$step' runs only for the '$want' surface"
+    else
+      fail "step '$step' is not gated on the '$want' surface (if: $cond)"
+    fi
+  }
+  assert_surface_gated "Route the blocked outcome onto the issue" issue
+  assert_surface_gated "Verify routed blocked state" issue
+  assert_surface_gated "Route the blocked outcome onto the PR" pr
+  assert_yaml "a post-PR block is routed to the PR's senior-engineer summons" \
+    "--add-label needs-senior-engineer"
+  assert_yaml "the PR-side summons is verified present, not self-reported" \
+    "should carry needs-senior-engineer after routing"
 
   # A refused re-dispatch is loud and self-correcting, never a silent green no-op.
   assert_yaml "a reject-redispatch job exists" "^  reject-redispatch:"
