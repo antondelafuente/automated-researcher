@@ -16,25 +16,46 @@
 # who may dispatch (that stays in implement-on-ready.yml's own authorize step) — the caller fetches the
 # inputs and passes them in, which is what makes this logic exercisable offline by blocked_state_smoke.sh.
 #
+# THE INVARIANT this file exists to hold: releasing a blocked issue is an AUTHORIZATION ACT by an
+# IDENTIFIED restore-authority principal. Every transition from inert to dispatchable must be attributable
+# to a principal, and that principal must be in the restore authority; a signal whose author this script
+# cannot name is not a weak signal, it is NO signal (it neither releases the block nor supersedes an
+# earlier authority decision). The restore authority deliberately excludes the engineer bots themselves: an
+# agent that blocked must not be able to release itself, by ANY route (the authority inversion #620 and
+# #632 are about).
+#
 # Restore authority — the material state transitions that release a blocked issue for re-dispatch (issue
 # #629: "Only that consumer or a human restores the dispatchable state"):
-#   1. Removing the blocked-state label: a write-access human's explicit act, nothing for this script to
-#      decide (with the label gone, `decide` reports `not-blocked`).
+#   1. Removing the blocked-state label: a write-access maintainer's explicit act, nothing for this script
+#      to decide (with the label gone, `decide` reports `not-blocked`). See the note below on why this one
+#      is not editor-attributed the way 2 and 3 are.
 #   2. A `DECISION: PROCEED` / `DECISION: REVISE` comment (issue #632's binding-decision form; this ticket
 #      consumes the verb line as an unblock trigger and NOTHING more) authored by one of the restore
 #      authority logins the caller passes in, posted AFTER the most recent blocked-state record.
 #      `DECISION: STOP` is honored as a decision NOT to re-dispatch.
-#   3. An issue-BODY edit after the most recent blocked-state record — the block-reason being addressed in
-#      the contract a zero-context implementor actually reads. Only the author or a write-access
-#      collaborator can edit an issue body, so this is a privileged act too.
+#   3. An issue-BODY edit after the most recent blocked-state record, made BY a restore-authority login —
+#      the block-reason being addressed in the contract a zero-context implementor actually reads. The
+#      EDITOR is identified (GraphQL `issue.editor`), never assumed from the fact that an edit happened:
+#      on this repo a body edit is an ordinary CONTENT act, not an authorization one — the triager holds
+#      explicit shaping rights over ticket bodies (AGENTS.md, "Shaping rights"), and an agent-filed issue's
+#      author IS an engineer bot, which can always edit its own body. Treating any edit as a release would
+#      therefore hand both engineer bots a self-unblock route straight around rule 2's author filter.
 # Anything else — a bare `ready` re-add, a `DECISION:` line from a non-authority login, a stale pre-record
-# decision — is INERT: it must not spend another implementor run re-deriving the same block.
+# decision, a body edit by anyone but the restore authority — is INERT: it must not spend another
+# implementor run re-deriving the same block.
+#
+# Why rule 1 is not editor-attributed: removing `implementation-blocked` is not an act any agent performs
+# in the course of its normal job — no prompt or workflow touches that label except this pipeline's own
+# post-release clear — so, unlike a body edit, it carries unambiguous "I am authorizing re-dispatch"
+# semantics on its own, and repo write access is the boundary GitHub already enforces on it. Attributing it
+# would mean walking the issue timeline and telling a maintainer's restore apart from the pipeline's own
+# clear, whose failure mode (an issue that was once blocked becoming permanently undispatchable) is worse
+# than what it would prevent. `implement.md` tells the implementor not to touch that label, and the record
+# names label removal as a MAINTAINER action.
 #
 # Fail-closed direction: while the blocked-state label is present, a MISSING or untrusted-authored state
 # record is inert, never dispatchable. The label is the visible state; removing it is the documented
-# restore. The restore authority deliberately excludes the implementor bot itself: an agent that blocked
-# must not be able to write its own `DECISION: PROCEED` and re-dispatch itself (the authority inversion
-# #620 and #632 are about).
+# restore.
 #
 # Usage:
 #   blocked-state.sh label                     # print the blocked-state label name (single source of truth)
@@ -42,7 +63,7 @@
 #   blocked-state.sh normalize-reason <raw>    # print a machine-readable block-reason slug
 #   blocked-state.sh render-record <reason> <run-url>
 #   blocked-state.sh present-labels <labels-json-file> <label>...   # echo only the ones actually present
-#   blocked-state.sh decide <authority-logins> <record-author> <labels-json-file> <comments-json-file> [last-edited-at]
+#   blocked-state.sh decide <authority-logins> <record-author> <labels-json-file> <comments-json-file> [edit-json-file]
 #
 # `decide` prints exactly one line, "<dispatchable|inert> <why>", to stdout and its reasoning to stderr:
 #   dispatchable not-blocked | dispatchable decision-proceed | dispatchable decision-revise
@@ -51,6 +72,12 @@
 # <comments-json-file> is the REST issues/<n>/comments array — REST, not GraphQL: `.user.login` there
 # already carries the `<slug>[bot]` suffix for a bot comment, the identity-shape trap automated-researcher
 # #625 was about.
+# <edit-json-file> is the GraphQL `repository.issue` object holding the body-edit attribution —
+# `{ lastEditedAt, editor { __typename, login } }`. Both halves are needed and both come from GraphQL:
+# REST exposes no `lastEditedAt` at all, and a GraphQL `Bot` actor's `login` is the BARE app slug (no
+# `[bot]` suffix), so `__typename` is what makes the canonical identity derivable instead of guessed —
+# the same #625 identity-shape trap from the other direction. Omit the argument (or pass a file with a
+# null `lastEditedAt`) when the body was never edited.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -113,7 +140,10 @@ four runs in the #620 incident. One of these must happen first:
 - **Record a binding decision** — a comment from the researcher or the senior-engineer adjudicator whose
   body carries a \`DECISION:\` line with verb \`PROCEED\` or \`REVISE\` (automated-researcher#632's protocol;
   \`STOP\` is honored as a decision not to re-dispatch) — then re-add \`ready\`.
-- **Edit this issue's body** so the \`block-reason\` above is addressed, then re-add \`ready\`.
+- **Edit this issue's body** so the \`block-reason\` above is addressed, then re-add \`ready\`. The edit must
+  be made by the researcher or the senior-engineer adjudicator — the same restore authority a
+  \`DECISION:\` requires. A body edit by anyone else (the triager's shaping pass, or an engineer bot editing
+  an issue it filed) is a content change, not a release, and leaves this state standing.
 EOF
 }
 
@@ -131,8 +161,8 @@ present_labels() {
 }
 
 decide() {
-  [ "$#" -ge 4 ] || die "decide needs <authority-logins> <record-author> <labels-json-file> <comments-json-file> [last-edited-at]"
-  local authority="$1" record_author="$2" labels_file="$3" comments_file="$4" last_edited="${5-}"
+  [ "$#" -ge 4 ] || die "decide needs <authority-logins> <record-author> <labels-json-file> <comments-json-file> [edit-json-file]"
+  local authority="$1" record_author="$2" labels_file="$3" comments_file="$4" edit_file="${5-}"
   [ -f "$labels_file" ] || die "labels file not found: $labels_file"
   [ -f "$comments_file" ] || die "comments file not found: $comments_file"
 
@@ -196,14 +226,41 @@ decide() {
     decision_verb="${decision_line##* }"
   fi
 
-  # A body edit only counts if it happened after the record. GitHub timestamps are same-format ISO-8601
-  # UTC, so a lexicographic comparison is a valid time comparison (same idiom as senior-engineer.yml).
-  local edit_ts=""
-  if [ -n "$last_edited" ] && [ "$last_edited" != "null" ] && [[ "$last_edited" > "$record_ts" ]]; then
-    edit_ts="$last_edited"
+  # A body edit counts only if it happened after the record AND the restore authority is the one who made
+  # it. GitHub timestamps are same-format ISO-8601 UTC, so a lexicographic comparison is a valid time
+  # comparison (same idiom as senior-engineer.yml). An edit that fails EITHER test is discarded outright
+  # rather than downgraded: an unattributable or unauthorized edit must not release the block, and it must
+  # not supersede an earlier authority decision in the latest-wins comparison below either — it is not the
+  # authority's act, so it can neither grant nor revoke.
+  local edit_ts="" edit_note="none"
+  if [ -n "$edit_file" ]; then
+    [ -f "$edit_file" ] || die "edit-state file not found: $edit_file"
+    local raw_edit_ts raw_editor
+    raw_edit_ts=$(jq -r '.lastEditedAt // "" | tostring' "$edit_file")
+    # `Bot` -> `<slug>[bot]`; every other actor type keeps its login verbatim. A null/absent editor (a
+    # deleted account, or a field the caller failed to request) yields "", which is unattributable.
+    raw_editor=$(jq -r '
+      if (.editor // null) == null or ((.editor.login // "") | tostring) == "" then ""
+      elif .editor.__typename == "Bot" then (.editor.login + "[bot]")
+      else (.editor.login | tostring) end
+    ' "$edit_file")
+    if [ -n "$raw_edit_ts" ] && [ "$raw_edit_ts" != "null" ] && [[ "$raw_edit_ts" > "$record_ts" ]]; then
+      if [ -z "$raw_editor" ]; then
+        edit_note="$raw_edit_ts by an unidentifiable editor (DISCARDED — attribution is required)"
+      else
+        local editor_canon
+        editor_canon=$(canonical_login "$raw_editor") || die "invalid body editor login"
+        if jq -e -n --argjson auth "$authority_json" --arg l "$editor_canon" '($auth | index($l)) != null' >/dev/null; then
+          edit_ts="$raw_edit_ts"
+          edit_note="$raw_edit_ts by $editor_canon"
+        else
+          edit_note="$raw_edit_ts by non-authority '$editor_canon' (DISCARDED — a body edit is a content act, not an authorization one)"
+        fi
+      fi
+    fi
   fi
 
-  echo "state record at $record_ts; latest authority decision: ${decision_line:-none}; body edit after record: ${edit_ts:-none}" >&2
+  echo "state record at $record_ts; latest authority decision: ${decision_line:-none}; body edit after record: $edit_note" >&2
 
   # Whichever material signal is LATEST decides — so a `STOP` vetoes an earlier `PROCEED`, and a later body
   # edit (or a later decision) supersedes a `STOP`.

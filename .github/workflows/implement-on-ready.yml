@@ -30,11 +30,14 @@ env:
   # deliberately (per the issue's explicit trust model) rather than sourced from repo config, so a
   # compromised in-repo file can't widen who can trigger a privileged run.
   ALLOWLIST: "antondelafuente claude-code-engineer[bot] codex-engineer[bot]"
-  # Restore authority for a BLOCKED issue (automated-researcher#629): who may release it for re-dispatch by
-  # recording a `DECISION:` (#632's protocol). Deliberately NARROWER than ALLOWLIST — the researcher (the
-  # human owner) and the senior-engineer adjudicator only. The two engineer bots are excluded on purpose:
-  # an agent that blocked must not be able to write its own `DECISION: PROCEED` and re-dispatch itself,
-  # which is the authority inversion #620 ran into.
+  # Restore authority for a BLOCKED issue (automated-researcher#629): who may release it for re-dispatch —
+  # by recording a `DECISION:` (#632's protocol) or by editing the issue body to address the block-reason.
+  # BOTH routes are author-attributed against this list, not just the comment one: an unattributed body
+  # edit would be a self-unblock route straight around this gate, since the triager edits ticket bodies as
+  # its normal job and an agent-filed issue's author is an engineer bot (round-2 review P0).
+  # Deliberately NARROWER than ALLOWLIST — the researcher (the human owner) and the senior-engineer
+  # adjudicator only. The two engineer bots are excluded on purpose: an agent that blocked must not be able
+  # to release itself, which is the authority inversion #620 ran into.
   RESTORE_AUTHORITY: "antondelafuente senior-engineer-agent[bot]"
   # Author of the machine-readable blocked-state record (this workflow's own App identity). The guard only
   # honors records from this login, so a forged record from any other commenter on this public repo can
@@ -152,15 +155,20 @@ jobs:
 
           # Body-edit detection needs GraphQL: `gh issue view --json` exposes no lastEditedAt at all, and
           # REST's `updated_at` also moves on comment/label activity, so it cannot distinguish a body edit
-          # (the transition we actually want to honor) from unrelated thread noise.
-          last_edited=$(gh api graphql \
+          # (the transition we actually want to honor) from unrelated thread noise. `editor` comes along
+          # with it because WHO edited decides whether the edit releases the block at all: a body edit is an
+          # ordinary content act here (the triager has shaping rights; an agent-filed issue's author is an
+          # engineer bot), so an unattributed edit would be a self-unblock route around RESTORE_AUTHORITY
+          # (round-2 review P0). `__typename` disambiguates a Bot actor, whose GraphQL login is the bare app
+          # slug rather than `<slug>[bot]` (#625's identity-shape trap).
+          gh api graphql \
             -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$ISSUE_NUMBER" \
-            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){lastEditedAt}}}' \
-            --jq '.data.repository.issue.lastEditedAt // ""')
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){lastEditedAt editor{__typename login}}}}' \
+            --jq '.data.repository.issue // {}' > "$RUNNER_TEMP/issue_edit.json"
 
           decision=$(.github/scripts/blocked-state.sh decide \
             "$RESTORE_AUTHORITY" "$STATE_RECORD_AUTHOR" \
-            "$RUNNER_TEMP/issue_labels.json" "$RUNNER_TEMP/issue_comments.json" "$last_edited")
+            "$RUNNER_TEMP/issue_labels.json" "$RUNNER_TEMP/issue_comments.json" "$RUNNER_TEMP/issue_edit.json")
           verdict="${decision%% *}"
           why="${decision##* }"
           echo "blocked-state decision for issue #$ISSUE_NUMBER: $verdict ($why)"

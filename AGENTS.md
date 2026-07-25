@@ -148,10 +148,20 @@ agentic-engineering#43).
   `ready` re-add (or a `workflow_dispatch`) is refused before any token is minted or CLI run is spent, and
   the inert `ready` is taken back off with a loud non-success conclusion. Re-dispatch requires a material
   transition: removing `implementation-blocked` (a maintainer's explicit restore), a `DECISION: PROCEED` /
-  `REVISE` comment per #632's protocol from the **restore authority** — the researcher or
-  `senior-engineer-agent[bot]`, deliberately NARROWER than the dispatch allowlist so an agent can never
-  unblock itself — or an Issue-body edit addressing the recorded `block-reason`; whichever material signal
-  is latest decides, so a `DECISION: STOP` vetoes an earlier `PROCEED`. The state machine lives in
+  `REVISE` comment per #632's protocol, or an Issue-body edit addressing the recorded `block-reason` — the
+  latter two both from the **restore authority** (the researcher or `senior-engineer-agent[bot]`,
+  deliberately NARROWER than the dispatch allowlist so an agent can never unblock itself); whichever
+  material signal is latest decides, so a `DECISION: STOP` vetoes an earlier `PROCEED`. **Releasing the
+  state is an authorization act by an identified principal**, so the body-edit route is attributed
+  (GraphQL `issue.editor`) rather than inferred from the fact that an edit happened: on this repo a body
+  edit is an ordinary *content* act — the triager holds shaping rights over ticket bodies and an agent-filed
+  Issue's author is an engineer bot — so an unattributed edit would hand both engineer bots a self-unblock
+  route around that narrower authority. An edit by anyone else, or one GitHub can't attribute, is no signal
+  at all: it neither releases the block nor supersedes an earlier authority `DECISION:`. Label removal is
+  deliberately *not* attributed the same way — unlike a body edit it is no agent's normal-job act (nothing
+  but the pipeline's own post-release clear touches that label), repo write access is the boundary GitHub
+  already enforces on it, and telling a maintainer's restore apart from the pipeline's own clear in the
+  timeline would risk permanently undispatchable Issues. The state machine lives in
   `.github/scripts/blocked-state.sh` (no network, so it is deterministically testable), fails closed when
   the label is present without a trustworthy record, author-filters records and decisions on this PUBLIC
   repo so no outsider can forge either, and is covered by `.github/scripts/blocked_state_smoke.sh` in

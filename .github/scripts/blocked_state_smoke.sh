@@ -4,9 +4,11 @@
 #
 # This is the deterministic check issue #629's acceptance asks for. It covers both halves of the fix:
 #   - blocked-state.sh's decision logic, driven with the real fetched-JSON shapes the workflow passes it
-#     (REST comments array + a label-name array + GraphQL lastEditedAt), including the two ways the loop
-#     protection could fail OPEN — a bare `ready` re-add re-dispatching anyway, or a non-authority (in
-#     particular the implementor bot itself) unblocking with its own `DECISION: PROCEED`;
+#     (REST comments array + a label-name array + the GraphQL lastEditedAt/editor pair), including the
+#     three ways the loop protection could fail OPEN — a bare `ready` re-add re-dispatching anyway, a
+#     non-authority (in particular the implementor bot itself) unblocking with its own `DECISION: PROCEED`,
+#     or that same bot unblocking itself by EDITING the issue body, which is an ordinary content act here
+#     and so must be author-attributed exactly like the comment route;
 #   - static assertions on implement-on-ready.yml that the routing actuator is actually wired: blocked ⇒
 #     `ready` removed + blocked-state label + `needs-human` + machine-readable record + a non-success run
 #     conclusion, a bare-ready re-add refused before any implementor run is spent, the pre-PR and post-PR
@@ -56,14 +58,24 @@ PY
 }
 spec() { local IFS=$'\x1f'; printf '%s' "$*"; }
 
+# The GraphQL `repository.issue` packet the workflow hands the guard: when the body was edited, and by
+# whom. `edit_state <file> <lastEditedAt> [<__typename> <login>]` — omit the editor pair for the
+# unattributable case (a deleted account, or a caller that failed to request the field).
+edit_state() {
+  local out="$1" ts="$2" typename="${3-}" login="${4-}"
+  jq -n --arg ts "$ts" --arg t "$typename" --arg l "$login" '
+    { lastEditedAt: (if $ts == "" then null else $ts end),
+      editor: (if $l == "" then null else { __typename: $t, login: $l } end) }' > "$out"
+}
+
 RECORD_BODY="$MARKER\\nimplementation-status: blocked\\nblock-reason: external-verification-unavailable\\n<!-- IMPLEMENTATION-STATE:END -->"
 REC="$RECORD_AUTHOR|2026-07-25T10:00:05Z|$RECORD_BODY"
 EXPLANATION="$RECORD_AUTHOR|2026-07-25T10:00:00Z|I cannot verify the acceptance step from inside this runner."
 
 assert_decide() {
-  local desc="$1" expected="$2" labels="$3" comments_file="$4" last_edited="${5-}"
+  local desc="$1" expected="$2" labels="$3" comments_file="$4" edit_file="${5-}"
   local got
-  got=$("$SCRIPT" decide "$AUTHORITY" "$RECORD_AUTHOR" "$labels" "$comments_file" "$last_edited" 2>/dev/null)
+  got=$("$SCRIPT" decide "$AUTHORITY" "$RECORD_AUTHOR" "$labels" "$comments_file" "$edit_file" 2>/dev/null)
   if [ "$got" = "$expected" ]; then pass "$desc -> $got"
   else fail "$desc -> '$got', expected '$expected'"; fi
 }
@@ -122,16 +134,47 @@ comments "$TMP/c_prose.json" "$(spec "$REC" \
 assert_decide "blocked + a mid-sentence mention of the protocol -> inert (only a line-anchored verb counts)" \
   "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_prose.json"
 
-assert_decide "blocked + a body edit after the record -> dispatchable" \
-  "dispatchable body-edited" "$TMP/labels_blocked.json" "$TMP/c_record.json" "2026-07-25T12:00:00Z"
-assert_decide "blocked + a body edit from BEFORE the record -> inert" \
-  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "2026-07-25T09:00:00Z"
-assert_decide "blocked + a body edit after a STOP -> dispatchable (latest material signal wins)" \
-  "dispatchable body-edited" "$TMP/labels_blocked.json" "$TMP/c_stop.json" "2026-07-25T13:00:00Z"
-assert_decide "blocked + lastEditedAt absent (never-edited body renders as empty) -> inert, not an error" \
+# The body-edit route is an AUTHORIZATION act, so it is author-attributed exactly like the DECISION route
+# (round-2 review P0). Without attribution, editing the body is a self-unblock hole wide open to both
+# engineer bots: the triager edits ticket bodies as its normal job (AGENTS.md "Shaping rights"), and an
+# agent-filed issue's author is an engineer bot, which can always edit its own body.
+edit_state "$TMP/e_researcher.json" "2026-07-25T12:00:00Z" User antondelafuente
+edit_state "$TMP/e_senior.json" "2026-07-25T12:00:00Z" Bot senior-engineer-agent
+edit_state "$TMP/e_implementor.json" "2026-07-25T12:00:00Z" Bot claude-code-engineer
+edit_state "$TMP/e_triager.json" "2026-07-25T12:00:00Z" Bot codex-engineer
+edit_state "$TMP/e_outsider.json" "2026-07-25T12:00:00Z" User some-outsider
+edit_state "$TMP/e_lookalike.json" "2026-07-25T12:00:00Z" User senior-engineer-agent
+edit_state "$TMP/e_unattributed.json" "2026-07-25T12:00:00Z"
+edit_state "$TMP/e_stale.json" "2026-07-25T09:00:00Z" User antondelafuente
+edit_state "$TMP/e_late.json" "2026-07-25T13:00:00Z" User antondelafuente
+edit_state "$TMP/e_never.json" ""
+
+assert_decide "blocked + a researcher body edit after the record -> dispatchable" \
+  "dispatchable body-edited" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_researcher.json"
+assert_decide "blocked + a senior-engineer body edit (GraphQL Bot login is the BARE slug) -> dispatchable" \
+  "dispatchable body-edited" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_senior.json"
+assert_decide "blocked + the implementor bot editing the issue IT filed -> inert (no self-unblock by body edit)" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_implementor.json"
+assert_decide "blocked + the codex engineer bot's body edit -> inert (dispatch allowlist != restore authority)" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_triager.json"
+assert_decide "blocked + an outside collaborator's body edit -> inert" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_outsider.json"
+assert_decide "blocked + a USER account whose name matches the authority BOT's slug -> inert (identity shape is load-bearing)" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_lookalike.json"
+assert_decide "blocked + an edit GitHub cannot attribute (deleted account / absent editor) -> inert (fail closed)" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_unattributed.json"
+assert_decide "blocked + a researcher body edit from BEFORE the record -> inert" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_stale.json"
+assert_decide "blocked + a researcher body edit after a STOP -> dispatchable (latest material signal wins)" \
+  "dispatchable body-edited" "$TMP/labels_blocked.json" "$TMP/c_stop.json" "$TMP/e_late.json"
+# A discarded edit is NO signal, not a late one: it must not release the block, and it must not revoke an
+# authority PROCEED it happens to postdate either.
+assert_decide "blocked + PROCEED, then a non-authority body edit after it -> still dispatchable (an unauthorized act neither grants nor revokes)" \
+  "dispatchable decision-proceed" "$TMP/labels_blocked.json" "$TMP/c_proceed.json" "$TMP/e_implementor.json"
+assert_decide "blocked + lastEditedAt null (never-edited body) -> inert, not an error" \
+  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "$TMP/e_never.json"
+assert_decide "blocked + no edit packet passed at all -> inert, not an error" \
   "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" ""
-assert_decide "blocked + lastEditedAt literal 'null' (jq -r's null rendering) -> inert, not an error" \
-  "inert blocked" "$TMP/labels_blocked.json" "$TMP/c_record.json" "null"
 
 # Fail-closed direction: the label is the visible state, so a missing/forged record never opens the gate.
 comments "$TMP/c_none.json" "$(spec "$EXPLANATION")"
@@ -206,8 +249,10 @@ if printf '%s' "$record" | grep -qE '^[[:space:]]*DECISION:[[:space:]]*(PROCEED|
 else
   pass "the rendered record carries no line-anchored DECISION verb"
 fi
-# It must tell a reader how to get out of the state — the record is the researcher-facing half of the fix.
-for needle in "$BLOCKED_LABEL" "Re-dispatch is INERT" "Edit this issue's body"; do
+# It must tell a reader how to get out of the state — the record is the researcher-facing half of the fix,
+# including WHO the body-edit route is open to, so nobody reads it as "any edit releases this".
+for needle in "$BLOCKED_LABEL" "Re-dispatch is INERT" "Edit this issue's body" \
+              "The edit must" "restore authority"; do
   if printf '%s' "$record" | grep -qF -- "$needle"; then pass "record explains '$needle'"
   else fail "record does not mention '$needle'"; fi
 done
@@ -227,6 +272,13 @@ else
   assert_yaml "the guard calls blocked-state.sh decide" "blocked-state\.sh decide"
   assert_yaml "the guard is handed the restore authority + record author" \
     "\"\\\$RESTORE_AUTHORITY\" \"\\\$STATE_RECORD_AUTHOR\""
+  # The body-edit route only holds if the guard is told WHO edited: fetching lastEditedAt without `editor`
+  # would silently reopen the self-unblock hole (round-2 review P0), since the script then sees an
+  # unattributable edit and — correctly, but uselessly — discards every body edit.
+  assert_yaml "the guard's GraphQL query fetches the body EDITOR, not just lastEditedAt" \
+    "lastEditedAt editor\{__typename login\}"
+  assert_yaml "the guard passes the edit-attribution packet to the state machine" \
+    "issue_comments\.json\" \"\\\$RUNNER_TEMP/issue_edit\.json\""
   guard_line=$(grep -n "id: loop_guard" "$WORKFLOW" | head -1 | cut -d: -f1)
   checkout_line=$(grep -n "name: Checkout base branch" "$WORKFLOW" | head -1 | cut -d: -f1)
   if [ -n "$guard_line" ] && [ -n "$checkout_line" ] && [ "$guard_line" -gt "$checkout_line" ]; then

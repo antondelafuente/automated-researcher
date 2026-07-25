@@ -41,8 +41,13 @@ below in it, not in this prompt's paraphrase.
      issue is not blocked-with-no-PR. It does not enable auto-merge on a PR you reported incomplete.
    - Either way, do not spend the run re-litigating a block you have already established — a clear
      `block_reason` and a precise explanation comment are the whole value you add on this path. On the
-     pre-PR path in particular, once you report it, re-dispatch of the issue is deliberately inert until a
-     maintainer removes the blocked-state label, records a binding `DECISION:`, or edits the issue body.
+     pre-PR path in particular, once you report it, re-dispatch of the issue is deliberately inert until
+     the restore authority (the researcher or the senior-engineer adjudicator) removes the blocked-state
+     label, records a binding `DECISION:`, or edits the issue body. **Releasing that state is never yours
+     to do**: on a blocked issue, do not remove the blocked-state label and do not edit the issue body —
+     both are release levers, and an agent that unblocks itself is the authority inversion this state
+     exists to prevent (the `DECISION:` and body-edit routes are author-checked and will simply ignore you;
+     the label is not, so leaving it alone is on you).
 6. Once the implementation is complete and checks pass locally, open a pull request:
    - Title derived from the issue title.
    - Body includes `Closes #{{ISSUE_NUMBER}}` (exact keyword, so the PR's merge closes the issue) plus a
