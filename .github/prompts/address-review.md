@@ -104,27 +104,45 @@ already stamps them with — a comment's `createdAt` / `created_at`, a review's 
 an exact tie, or when your inputs do not give you a timestamp for both blocks, the **more conservative
 verdict** governs instead: `STOP` over `REVISE`, `REVISE` over `PROCEED`.
 
+**This section is the single source of truth.** Everything in it above the next subsection — call it the
+*shared protocol* — is reproduced verbatim in all three pipeline prompts, and it is the only place
+authorization, precedence, settledness, and escalation semantics are defined. Every other site in this
+prompt that reads, authorizes, ranks, or acts on a `DECISION:` block or an authority tier adds at most the
+two things the shared protocol cannot know: which of the recognized surfaces *this* leg can see, and which
+value of *this* leg's output enum a verb comes out as. Nothing outside it restates, narrows, or widens it;
+where some other instruction here reads as though it does, the shared protocol governs and that instruction
+is the defect.
+
 ### Where a decision reaches this run, and how it lands in your output
 
-*(Everything above this subsection is shared verbatim across the three pipeline prompts; the visibility and
-output mapping below are necessarily per-prompt, because each leg sees different inputs and reports a
-different outcome enum.)*
+*(This subsection is per-leg. It adds only the two things the shared protocol cannot know: which of the
+recognized surfaces this leg can see, and which value of this leg's output enum a verb comes out as. It
+does not restate the shared protocol — authorization, precedence, settledness, and escalation are governed
+there and only there.)*
 
-Three surfaces can carry a decision that binds this run: this PR's own comment thread, the bodies of this
-PR's reviews, and the implementing issue's thread — a decision predating the PR lives in the last. Step 1
-already fetches all three (the reviews and comment thread directly, the issue **with its comments**), so
-look in all of them before you declare a block, and run the permission check above on the author login of
-any block you find (`user.login` on a review or comment object) before you act on it. Those same objects
-carry the timestamps the precedence rule compares — `created_at` on a REST comment, `submitted_at` on a
-REST review, `createdAt` on `gh issue view --json comments` — so ordering two conflicting blocks needs no
-further fetch. Nothing else in this run supplies decisions.
+**Visibility.** This leg can see all three recognized surfaces, and step 1 already fetches every one of
+them: this PR's comment thread and this PR's reviews directly, and the implementing issue **with its
+comments** (a decision issued before this PR existed lives only there). Look in all three before you declare
+a block. Being fetched by step 1 is not authorization: authorize each block you find under the shared
+protocol, run on the author login those same objects already carry — `user.login` on a REST comment or
+review object, `.comments[].author.login` on `gh issue view --json comments`. Those objects also carry the
+timestamps the precedence rule compares — `created_at` on a REST comment, `submitted_at` on a REST review,
+`createdAt` on `gh issue view --json comments` — so ordering two conflicting blocks needs no further fetch.
+Nothing else in this run supplies decisions.
 
-`PROCEED` and `REVISE` fold into the normal path — you address whatever the decision leaves standing, push,
-and step 7's `status` is `addressed`; say in your PR comment which decision you acted on and note any
-residual risk. A `STOP` whose `SCOPE:` covers this PR or its implementing issue ends the run instead:
-comment on the PR recording that you stopped on that decision (quote it), push nothing, do **not** apply
-`needs-senior-engineer` — nothing here needs adjudicating, an authorized human already decided — and report
-`status: blocked`, which is the only value the output schema has for "no fix was pushed".
+**Output mapping.** The shared protocol decides what a decision requires of you. This paragraph adds only
+which value of this leg's output enum that comes out as.
+
+- **`PROCEED` / `REVISE`** — fold into the normal path: address whatever the decision leaves standing, push,
+  and report `status: addressed`. Say in your PR comment which decision you acted on, and note any residual
+  risk.
+- **`STOP` whose `SCOPE:` covers this PR or its implementing issue** — the shared protocol has already
+  settled this work, so do what it requires and this run ends there. For this leg that means: one PR comment
+  quoting the `DECISION:` block and recording that you stopped on its authority, nothing pushed. The
+  attention label this leg could otherwise reach for is `needs-senior-engineer`; the shared protocol's
+  settled-outcome rule means it is not applied here. Report `status: blocked` — that is simply the only
+  value this leg's output schema has for "no fix was pushed", the name of an enum slot rather than a claim
+  that anything is unresolved or awaiting a human.
 
 ## Your job
 
@@ -142,9 +160,9 @@ below in it, not in this prompt's paraphrase.
      included**: `gh issue view <n> --repo {{REPO}} --json title,body,comments`. Its body's declared
      scope/non-goals is the contract step 3 adjudicates findings against; if the PR body names no issue, use
      the PR description's own stated scope instead. Its comments are the other half: they carry any
-     `DECISION:` block issued before this PR existed, which the authority order above makes binding on this
-     run. `.comments[].author.login` identifies each author; authorize it with that section's live
-     permission check, not with `authorAssociation` (an association is not a permission level).
+     `DECISION:` block issued before this PR existed. Fetching them is all this bullet does: whether any
+     block they carry binds this run is settled by the shared protocol above and by "Where a decision
+     reaches this run", not here.
    Treat the latest review round plus the triggering comment as the **complete spec for what this run must
    address** — the comment may narrow, clarify, or add to what the review already said; the implementing
    issue's body is the scope contract those findings are adjudicated against (step 3).
@@ -174,16 +192,18 @@ below in it, not in this prompt's paraphrase.
 5. **If you are fully blocked** — every finding is unaddressable as specified, or acting on the feedback
    would contradict something the issue this PR implements explicitly says — do NOT guess and do NOT force
    a partial/wrong fix just to have something to show. First, if the block rests on a fact you cannot verify
-   from inside this sandbox, settle it with the authority order above rather than escalating: a valid
-   `DECISION:` block from an authorized human on this PR or its implementing issue is binding — proceed on
-   that authority (noting any residual risk) instead. Otherwise: comment on the PR explaining exactly what's
-   blocking you, add the `needs-senior-engineer` label to the PR, and stop.
+   from inside this sandbox, consult "Where a decision reaches this run" above before declaring it: if an
+   authorized `DECISION:` block reaches the requirement you cannot satisfy, the shared protocol governs what
+   happens next and that subsection maps it to an outcome — escalating it anyway is the reopening the shared
+   protocol forbids. Otherwise: comment on the PR explaining exactly what's blocking you, add the
+   `needs-senior-engineer` label to the PR, and stop.
 6. Once you've addressed what's genuinely right, commit and push to `{{HEAD_REF}}` using the GitHub token
    you were given — every git and `gh` operation you perform must run as that identity, never a different
    credential. Do **NOT** invoke a review yourself: pushing fires `synchronize`, which re-runs
    `review-on-pr.yml` automatically (its own `cancel-in-progress` handles any stale in-flight round).
 7. Report your outcome as structured output: `status` (`addressed` if you pushed a fix, or `blocked` if you
-   escalated to `needs-senior-engineer` without pushing).
+   pushed none — the step-5 escalation is the usual reason, and a run settled by a `DECISION:` block reports
+   whatever "Where a decision reaches this run" maps that verb to, not a separate judgment here).
 
 ## Constraints
 
