@@ -23,7 +23,8 @@ A Codex designer dispatches the locked `DESIGN.md` / `START.md` / `CHECKLIST.md`
 Codex executor** by default — the same same-family default `design-experiment` Step 4 already states for
 Claude. If the substrate genuinely cannot spin up a fresh same-family executor, an operator may explicitly
 choose a different one — but that choice must be a **visible, deliberate act**, never a quiet substitution
-made because the same-family path was inconvenient. Record which family actually ran the experiment on the
+made because the same-family path was inconvenient. *Which* Codex primitive creates that fresh executor is
+capability-detected, not assumed — see §7. Record which family actually ran the experiment on the
 run-supervision record at `start`/`checkpoint`:
 
 ```
@@ -38,10 +39,11 @@ executor-disposition section — the override, not the default, is the thing tha
 
 ## 2. The supervision-bootstrap receipt — dispatch is not complete until this passes (automated-researcher#628)
 
-A successful `create_thread` (or the Claude-path fresh-session spawn) proves only that the thread/session
-exists — nothing more. If the executor wedges before writing its own supervision record, binds the wrong
-worktree/routes/mode, or begins paid work without its own watcher armed, the designer can fall straight into
-§4's healthy `wait_threads` loop with **no durable recovery/control channel behind it** — the exact gap the
+A successful dispatch call — `create_thread`, a native child-task spawn (§7), or the Claude-path
+fresh-session spawn — proves only that the thread/session/child exists, nothing more. If the executor wedges
+before writing its own supervision record, binds the wrong worktree/routes/mode, or begins paid work without
+its own watcher armed, the designer can fall straight into
+§4's healthy zero-turn wait loop with **no durable recovery/control channel behind it** — the exact gap the
 prior Claude dispatch closed only by a human habit (babysitting until the executor had actually created its
 record, armed its wake, and begun the first real phase, before treating kickoff as complete). This section
 makes that check explicit and deterministic instead of a habit a designer might skip under load.
@@ -75,10 +77,10 @@ appeared" from "appeared but never finished."
 **Missing, malformed, or timed-out bootstrap is `needs-attention` — not a normal healthy wait.** Treat a
 non-zero exit from `verify-bootstrap` as a dispatch failure requiring diagnosis (a wedged executor, a wrong
 worktree bound, a stale/reused run-id) with the same seriousness as any other `CHECKLIST.md` `[BLOCK]` gate
-FAIL — never silently re-issue `create_thread` again, and never fall into §4's wait loop on a bootstrap that
-hasn't actually passed. Once `verify-bootstrap` exits 0, dispatch IS complete, and healthy supervision
-returns to the existing §4 zero-turn `wait_threads` loop — this receipt is a one-time gate at kickoff, not a
-recurring poll layered on top of it.
+FAIL — never silently re-issue the dispatch call again, and never fall into §4's wait loop on a bootstrap that
+hasn't actually passed. Once `verify-bootstrap` exits 0, dispatch IS complete (announce the executor per §7 in
+that same turn), and healthy supervision returns to the existing §4 zero-turn wait loop — this receipt is a
+one-time gate at kickoff, not a recurring poll layered on top of it.
 
 ## 3. The durable two-way control channel — questions without idling, answers without taking over
 
@@ -179,12 +181,63 @@ being fully automated away — note it, fall back to the manual cadence, and kee
 gaining a real scheduled-wake primitive later is a §4 capability upgrade, not a blocker to shipping this
 contract today.
 
+## 7. The coordination surface is capability-detected, and the executor is announced (automated-researcher#637)
+
+§4 capability-detects the *wake*; this section capability-detects the *dispatch and coordination surface*, and
+requires the designer to hand the researcher a way to actually see the executor it just created. The gap this
+closes was observed 2026-07-25: a Codex-native dispatch created a real child task with the correct parent
+relationship — inspectable in Codex Desktop under **Subagents**, chattable, the executor's full context
+preserved — but the parent never said so, so the researcher believed the executor was hidden and spent
+attention asking why visible top-level thread tools were unavailable. The experiment itself completed
+correctly; the defect was the missing visibility handoff between dispatch machinery and researcher-facing
+conversation.
+
+**Detect the surface; never assume the top-level thread wrappers exist.** Some Codex sessions expose visible
+top-level thread tools (`create_thread` / `wait_threads` and relatives); others expose only the native
+multi-agent primitives — a `spawn_agent`-shaped call that returns a child task with a nickname — with no
+top-level wrappers at all. Probe what the session in front of you actually has *before* dispatch, and use
+whichever surface is present. **A missing `create_thread` wrapper is not a blocked dispatch:** the native
+child-subagent path satisfies §1's fresh-executor contract as long as the child starts **zero-context**
+(pointed at `DESIGN.md` / `START.md` / `CHECKLIST.md`, never handed this design conversation's history —
+inheriting the designer's context is the one thing that would defeat the point of dispatching at all).
+Falling back to a non-Codex or non-fresh executor is warranted only when *neither* surface exists, not when
+one of two working surfaces happens to be absent.
+
+**An app-visible child subagent is a first-class executor surface, not a degraded one.** Supervision and
+integration stay with the parent: §2's bootstrap receipt, §4's tick, §6's wedge check, and the closeout are
+unchanged and still the designer's job. What the child adds is a second, *human* window onto the same run —
+the researcher may open it and read or chat with it directly. That window is for inspection, not for control
+flow: anything load-bearing the executor needs answered still travels through §3's durable question/answer
+inbox, so it survives session churn and lands somewhere the record can prove.
+
+**Announce the executor in the same turn you dispatch it** — before falling into any wait, in the
+researcher-facing conversation and not only on the record: the handle/nickname the dispatch returned, plus
+where to inspect it. Worked example: "Executor **Erdos** is running; open **Subagents** to inspect or chat
+with it." Bind that same handle as the record's opaque `--session-handle` at `start` (§1, §5) so it stays
+durable and re-probable instead of living only in one conversation turn. A dispatch whose handle exists but was
+never announced is exactly the defect this section names, even when the run underneath it is perfectly healthy.
+
+**Keep a completed executor available through human review.** When the executor reports DONE, do not close or
+discard the child as a tidy-up step: its preserved context is part of the review surface until the closeout
+(and any cross-family audit) has actually been accepted. Reap it with the rest of the run, not the moment it
+finishes.
+
+**UI caveat, not product behavior:** in Codex Desktop as observed 2026-07-25, a newly completed child did not
+appear under **Subagents** until the researcher clicked away and back to force the list to refresh. Say so when
+it applies — but treat it as a host-UI quirk to be fixed there, never as the expected product shape and never
+as something the contract above is allowed to depend on.
+
 ## What is INSTANCE, not product (do not put it here)
 
 Per the same boundary `RELAUNCH_SUPERVISOR.md` draws:
 
 - The concrete Codex host API (if any) for arming a scheduled wake, and the exact capability-detection
   probe that decides `autonomous-detached` vs `controller-supervised` for a given Codex host/version.
+- The concrete §7 coordination-surface probe: which tool names a given Codex host/version actually exposes
+  (top-level `create_thread`/`wait_threads` wrappers vs. only a native `spawn_agent`-style child task), and
+  the app surface a child is inspectable under (Codex Desktop's **Subagents** list is one host's answer, and
+  its refresh quirk one host's bug — neither is the product's contract; the product requires only that
+  whatever the surface turns out to be, it gets detected and then announced).
 - The concrete blocking-wait mechanics (`exec_command`/`write_stdin` parameters, a detached-shell-plus-poll
   script, tmux/pane layout) used for the controller-supervised tick.
 - Where `question_route`/`terminal_state_route` actually deliver to when they are not `record` (a chat

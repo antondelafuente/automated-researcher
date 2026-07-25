@@ -401,14 +401,24 @@ point. *How* you spawn it is the instance's implementation of the contract:
   watcher is the controller-supervised implementation today (Codex has no periodic-reinvocation primitive yet): it
   keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies this dispatch
   contract without claiming autonomous-detached status — but it must re-verify its own held handle on every wake, not
-  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). **A successful
-  `create_thread` alone does NOT make dispatch complete** (automated-researcher#628): before falling into the
-  healthy `wait_threads` loop below, run `run_supervision_record.sh verify-bootstrap <run-id> --executor-family
-  codex --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
+  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). **Capability-detect the
+  coordination surface — do not assume the visible top-level thread wrappers exist** (automated-researcher#637):
+  a session may expose `create_thread`/`wait_threads`, or only the native multi-agent primitives (a
+  `spawn_agent`-shaped child task with a nickname). Either satisfies this contract as long as the child starts
+  zero-context on the brief; a missing wrapper is **not** a blocked dispatch and never a reason to fall back to
+  a different family or to run the design here. **A successful dispatch call alone does NOT make dispatch
+  complete** (automated-researcher#628): before falling into the healthy zero-turn wait loop below, run
+  `run_supervision_record.sh verify-bootstrap <run-id> --executor-family codex
+  --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
   --terminal-route <expected route>` and treat a non-zero exit (missing record, a mismatched field, or a timeout)
-  as `needs-attention`, not a normal wait. See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the
-  full contract: same-family default, the supervision-bootstrap receipt (§2), the durable question/answer inbox,
-  and the hardened wait pattern.
+  as `needs-attention`, not a normal wait. Then **announce the executor to the researcher in that same turn** —
+  the handle/nickname the dispatch returned and where to inspect it ("Executor **Erdos** is running; open
+  **Subagents** to inspect or chat with it"), bound as the record's `--session-handle` so it outlives the turn.
+  An app-visible child is a first-class executor surface the researcher may read or chat with directly, while
+  supervision and integration stay yours; keep it around through human review rather than closing it at DONE.
+  See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default,
+  the supervision-bootstrap receipt (§2), the durable question/answer inbox,
+  the hardened wait pattern, and the coordination-surface/visibility contract (§7).
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
 
 Why fresh-context dispatch is the default:
