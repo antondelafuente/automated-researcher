@@ -122,18 +122,72 @@ agentic-engineering#43).
   workflow run, not just a contributor's first. Outside *contributions* (fork PRs opened by non-collaborators)
   are consequently not yet a supported path on this basis alone: before accepting them, re-audit which
   secrets a green fork-PR run could reach and revisit this note.
+- **Blocked implement outcome = a terminal ROUTED state, not a dead letter (automated-researcher#629):** a
+  fail-closed block is correct behavior, but until #629 nothing consumed it — `needs-senior-engineer` on an
+  Issue summons nothing (the senior-engineer leg and the reconciler are PR-scoped), `ready` stayed applied
+  while label events never re-fire on their own, and the run concluded SUCCESS, so a blocked #620 sat
+  silently ~14h and then burned three more stateless runs that each re-derived the identical block. A run
+  ending `status: blocked` is now routed by `implement-on-ready.yml`'s `route-blocked` job: `ready` (and any
+  Issue-level `needs-senior-engineer`) comes off, `implementation-blocked` + `needs-human` go on, a
+  workflow-authored machine-readable record is posted on the Issue (`implementation-status` /
+  `block-reason` / `blocked-run` inside `<!-- IMPLEMENTATION-STATE -->` markers, with the implementor's own
+  explanation comment just above it), the routed state is then VERIFIED against live GitHub state rather
+  than trusted, and only after that does the job fail the run DELIBERATELY — a red conclusion is what lets
+  run-level observers tell "PR opened" from "blocked awaiting a human". **Pre-PR and post-PR blocks route to
+  different surfaces**, and `route-blocked` resolves which before mutating anything: the Issue-side terminal
+  state above is for a block with no PR (nothing else exists to carry it), while a block the implementor
+  discovers *after* opening a PR routes to that PR's `needs-senior-engineer` — the summons senior-engineer.yml
+  actually watches — verified present there, with the Issue left alone (its PR is in flight, so `ready` stays
+  until the PR merges) and auto-merge deliberately not enabled on a PR its own author reported incomplete.
+  The reported PR number is model-authored, so the PR route is taken only for a PR that demonstrably belongs
+  to THIS issue and THIS implementor — open, same-repo, head branch `agent/issue-<n>` (deterministic per
+  `implement.md`), and authored by the claude engineer bot under the same canonicalized author predicate
+  `address-review.yml` and `review-on-pr.yml` use. "Open PR in this repo" alone is too weak: a wrong-but-open
+  number would hand `needs-senior-engineer` to an unrelated PR and leave the real Issue `ready` with the block
+  recorded nowhere. Any predicate failing falls back to Issue-side routing: a block is never lost to a
+  mis-reported surface. Whichever
+  surface carries it, the run still concludes red. `needs-human` is the routing target
+  rather than issue-level senior-engineer summoning because restoring an Issue's dispatchable state is an
+  authority question carved out to #632, and it also stops the triager from re-proposing a flip on a ticket
+  that now carries no disposition. **Loop protection:** while `implementation-blocked` is present, a bare
+  `ready` re-add (or a `workflow_dispatch`) is refused before any token is minted or CLI run is spent, and
+  the inert `ready` is taken back off with a loud non-success conclusion. Re-dispatch requires a material
+  transition: removing `implementation-blocked` (a maintainer's explicit restore), a `DECISION: PROCEED` /
+  `REVISE` comment per #632's protocol, or an Issue-body edit addressing the recorded `block-reason` — the
+  latter two both from the **restore authority** (the researcher or `senior-engineer-agent[bot]`,
+  deliberately NARROWER than the dispatch allowlist so an agent can never unblock itself); whichever
+  material signal is latest decides, so a `DECISION: STOP` vetoes an earlier `PROCEED`. **Releasing the
+  state is an authorization act by an identified principal**, so the body-edit route is attributed
+  (GraphQL `issue.editor`) rather than inferred from the fact that an edit happened: on this repo a body
+  edit is an ordinary *content* act — the triager holds shaping rights over ticket bodies and an agent-filed
+  Issue's author is an engineer bot — so an unattributed edit would hand both engineer bots a self-unblock
+  route around that narrower authority. An edit by anyone else, or one GitHub can't attribute, is no signal
+  at all: it neither releases the block nor supersedes an earlier authority `DECISION:`. Label removal is
+  deliberately *not* attributed the same way — unlike a body edit it is no agent's normal-job act (nothing
+  but the pipeline's own post-release clear touches that label), repo write access is the boundary GitHub
+  already enforces on it, and telling a maintainer's restore apart from the pipeline's own clear in the
+  timeline would risk permanently undispatchable Issues. The state machine lives in
+  `.github/scripts/blocked-state.sh` (no network, so it is deterministically testable), fails closed when
+  the label is present without a trustworthy record, author-filters records and decisions on this PUBLIC
+  repo so no outsider can forge either, and is covered by `.github/scripts/blocked_state_smoke.sh` in
+  `.aar-ci/checks.sh`.
 - **Re-entry / retry:** re-dispatch an issue by removing and re-adding `ready`, or via
-  `workflow_dispatch`. Post-review fixes ride `address-review.yml`'s mention flow instead: an allowlisted
+  `workflow_dispatch` — except while it carries `implementation-blocked`, where both paths are deliberately
+  inert until one of the material transitions above happens (see the blocked-state bullet). Post-review
+  fixes ride `address-review.yml`'s mention flow instead: an allowlisted
   `@claude-code-engineer` comment on the PR re-dispatches the pinned CLI onto the same PR branch
   (`.github/prompts/address-review.md`), gated to the researcher + the two engineer bots, same as
   implement-on-ready's allowlist. It never invokes the review itself — pushing a fix fires `synchronize`,
   which `review-on-pr.yml`'s own `cancel-in-progress` already handles.
 - **Escalation (`needs-senior-engineer`):** if the implementor is blocked, or a review finding conflicts with
-  what the issue specifies, it labels the PR (or the issue, if no PR yet) `needs-senior-engineer` and comments
-  what's needed, then stops that thread of work. This defines only the label convention — the notifier
-  that surfaces `needs-senior-engineer` to a session or the researcher is instance wiring, not part of this
-  product capability. A `ready` label's flip by an allowlisted human/bot is itself the "explicit dispatch"
-  the `ready` disposition (below) requires — there is no separate per-run naming step once the label lands.
+  what the issue specifies, it labels the PR `needs-senior-engineer` and comments what's needed, then stops
+  that thread of work. On an ISSUE with no PR open yet it comments and reports `status: blocked` instead of
+  self-labeling — the workflow owns that routing (see the blocked-state bullet below), because
+  `needs-senior-engineer` on an Issue advertises a summons that never fires. This defines only the label
+  convention — the notifier that surfaces `needs-senior-engineer` to a session or the researcher is instance
+  wiring, not part of this product capability. A `ready` label's flip by an allowlisted human/bot is itself
+  the "explicit dispatch" the `ready` disposition (below) requires — there is no separate per-run naming
+  step once the label lands.
   `address-review.yml` runs use the same escalation convention on the PR it's already working.
 - **Senior-engineer leg (in-flight PR adjudication, automated-researcher#438; parent design #414's
   "Shepherd"):** `senior-engineer.yml` is summoned by the `needs-senior-engineer` label landing on a PR — by
@@ -197,8 +251,10 @@ agentic-engineering#43).
   autonomous-flip class below) → a `ready` flip carries a citation of the shaping conversation (the
   assessment comment, when the triager already produced one) plus, when the triager edited the body, a
   one-line delta summary of what changed → once implementation opens a PR, `needs-senior-engineer`
-  summons the senior engineer (#438) for in-flight adjudication → `needs-human` parks an escalation the
-  senior engineer (or any lane) can't resolve itself, for interactive researcher review. `needs-human` is
+  summons the senior engineer (#438) for in-flight adjudication → an implement run that ends blocked before
+  a PR exists leaves the Issue non-`ready` and carrying `implementation-blocked` + `needs-human` instead
+  (#629's routed terminal state) → `needs-human` parks an escalation the senior engineer (or any lane)
+  can't resolve itself, for interactive researcher review. `needs-human` is
   pull-based — no reminders: an unanswered ASK degrades to SKIP, and SKIP is a legitimate outcome, not a stall.
 - **Shaping rights:** the triager (v1 proposes, v2 acts — see above) edits ticket bodies freely; the body is
   the contract a zero-context implementor reads, and comment-as-spec (design drifting into a comment thread
@@ -232,6 +288,11 @@ agentic-engineering#43).
     minutes; this is the manual equivalent for when you don't want to wait.
   - Unblock a `needs-senior-engineer` Issue or PR: answer the blocking question in a comment, remove
     `needs-senior-engineer`, then re-flip `ready` (issue) or re-trigger addressing (PR) per the two bullets above.
+  - **Unblock an `implementation-blocked` Issue (#629):** read the blocked-state record comment for the
+    `block-reason`, then do ONE of — remove `implementation-blocked`, post a `DECISION: PROCEED` (or
+    `REVISE`) comment, or edit the body to address the reason — and re-add `ready`. Re-adding `ready` alone
+    is refused on purpose: a stateless re-run would just re-derive the same block. The dispatch itself
+    clears `implementation-blocked` + `needs-human` once a transition released it.
   - Trigger a manual in-flight adjudication on a PR: `gh workflow run senior-engineer.yml -f pr_number=<n>`
     (works with or without `needs-senior-engineer` present — the manual lever doesn't require the label).
   - Unblock a `needs-human` PR: answer the structured question the senior engineer posted, remove

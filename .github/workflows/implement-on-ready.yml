@@ -30,6 +30,19 @@ env:
   # deliberately (per the issue's explicit trust model) rather than sourced from repo config, so a
   # compromised in-repo file can't widen who can trigger a privileged run.
   ALLOWLIST: "antondelafuente claude-code-engineer[bot] codex-engineer[bot]"
+  # Restore authority for a BLOCKED issue (automated-researcher#629): who may release it for re-dispatch —
+  # by recording a `DECISION:` (#632's protocol) or by editing the issue body to address the block-reason.
+  # BOTH routes are author-attributed against this list, not just the comment one: an unattributed body
+  # edit would be a self-unblock route straight around this gate, since the triager edits ticket bodies as
+  # its normal job and an agent-filed issue's author is an engineer bot (round-2 review P0).
+  # Deliberately NARROWER than ALLOWLIST — the researcher (the human owner) and the senior-engineer
+  # adjudicator only. The two engineer bots are excluded on purpose: an agent that blocked must not be able
+  # to release itself, which is the authority inversion #620 ran into.
+  RESTORE_AUTHORITY: "antondelafuente senior-engineer-agent[bot]"
+  # Author of the machine-readable blocked-state record (this workflow's own App identity). The guard only
+  # honors records from this login, so a forged record from any other commenter on this public repo can
+  # neither freeze re-dispatch nor shift the material-transition cutoff.
+  STATE_RECORD_AUTHOR: "claude-code-engineer[bot]"
 
 jobs:
   implement:
@@ -47,6 +60,10 @@ jobs:
     outputs:
       pr_number: ${{ steps.resolve_outputs.outputs.pr_number }}
       status: ${{ steps.resolve_outputs.outputs.status }}
+      issue_number: ${{ steps.resolve_issue.outputs.issue_number }}
+      blocked_pr: ${{ steps.resolve_outputs.outputs.blocked_pr }}
+      block_reason: ${{ steps.resolve_outputs.outputs.block_reason }}
+      guard_verdict: ${{ steps.loop_guard.outputs.verdict }}
     steps:
       # Checkout runs FIRST (automated-researcher#381/#382 design-review F1): the authorize step below
       # sources a helper script from the working tree, which must exist before it's sourced. Checkout has
@@ -104,8 +121,66 @@ jobs:
 
           echo "issue_number=$ISSUE_NUMBER" >> "$GITHUB_OUTPUT"
 
+          # automated-researcher#629: hand the blocked-state guard below the exact label list this step
+          # already fetched and authorized against (steps don't share shell variables; $RUNNER_TEMP is
+          # shared within the job), so the guard can't race a label change against the `ready` check.
+          printf '%s' "$LABELS_JSON" > "$RUNNER_TEMP/issue_labels.json"
+
+      # Blocked-state loop guard (automated-researcher#629, the #620 incident): while the issue carries the
+      # blocked-state label, a bare `ready` re-add must NOT spend another implementor run — a fresh
+      # stateless run re-derives the same block from the same priors, which is exactly how #620 burned four
+      # runs. Re-dispatch requires a material state transition: a restore-authority `DECISION:` comment
+      # (#632's form), an issue-body edit addressing the block-reason, or the label's removal. The decision
+      # logic lives in .github/scripts/blocked-state.sh (offline smoke: blocked_state_smoke.sh); this step
+      # only fetches its inputs, so the state machine itself is deterministically testable.
+      #
+      # This guard covers workflow_dispatch too, not just the label path: an inert re-dispatch is inert
+      # however it was triggered, and the documented escape hatch (remove the label) is one action either
+      # way. No token is minted on this path — the guard runs on the ambient read-only GITHUB_TOKEN.
+      - name: Blocked-state loop guard
+        id: loop_guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.resolve_issue.outputs.issue_number }}
+        run: |
+          set -euo pipefail
+          # REST (not the GraphQL packet `gh issue view --json comments` returns): REST's `.user.login`
+          # already carries the `<slug>[bot]` suffix for a bot comment, the identity-shape trap
+          # automated-researcher#625 was about. Same defensive non-array check as the other legs.
+          gh api "repos/$REPO/issues/$ISSUE_NUMBER/comments" --paginate | jq -s '
+            (add // []) as $all
+              | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+          ' > "$RUNNER_TEMP/issue_comments.json"
+
+          # Body-edit detection needs GraphQL: `gh issue view --json` exposes no lastEditedAt at all, and
+          # REST's `updated_at` also moves on comment/label activity, so it cannot distinguish a body edit
+          # (the transition we actually want to honor) from unrelated thread noise. `editor` comes along
+          # with it because WHO edited decides whether the edit releases the block at all: a body edit is an
+          # ordinary content act here (the triager has shaping rights; an agent-filed issue's author is an
+          # engineer bot), so an unattributed edit would be a self-unblock route around RESTORE_AUTHORITY
+          # (round-2 review P0). `__typename` disambiguates a Bot actor, whose GraphQL login is the bare app
+          # slug rather than `<slug>[bot]` (#625's identity-shape trap).
+          gh api graphql \
+            -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$ISSUE_NUMBER" \
+            -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){lastEditedAt editor{__typename login}}}}' \
+            --jq '.data.repository.issue // {}' > "$RUNNER_TEMP/issue_edit.json"
+
+          decision=$(.github/scripts/blocked-state.sh decide \
+            "$RESTORE_AUTHORITY" "$STATE_RECORD_AUTHOR" \
+            "$RUNNER_TEMP/issue_labels.json" "$RUNNER_TEMP/issue_comments.json" "$RUNNER_TEMP/issue_edit.json")
+          verdict="${decision%% *}"
+          why="${decision##* }"
+          echo "blocked-state decision for issue #$ISSUE_NUMBER: $verdict ($why)"
+          echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          echo "why=$why" >> "$GITHUB_OUTPUT"
+          if [ "$verdict" = "inert" ]; then
+            echo "::warning::issue #$ISSUE_NUMBER is in the blocked state ($why) — this dispatch is inert by design; the reject-redispatch job below explains what a re-dispatch requires"
+          fi
+
       - name: Render implementor prompt
         id: render_prompt
+        if: steps.loop_guard.outputs.verdict != 'inert'
         env:
           ISSUE_NUMBER: ${{ steps.resolve_issue.outputs.issue_number }}
           REPO: ${{ github.repository }}
@@ -125,12 +200,55 @@ jobs:
 
       - name: Mint claude engineer App token
         id: mint_claude_token
+        if: steps.loop_guard.outputs.verdict != 'inert'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
         with:
           app-id: ${{ secrets.CLAUDE_APP_ID }}
           private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+
+      # automated-researcher#629: a dispatch that reaches this point means the blocked state is over — a
+      # restore-authority DECISION, a body edit, or a maintainer removing the blocked-state label by hand
+      # released it — so neither that label nor the `needs-human` escalation it parked is true any more, and
+      # leaving either on an issue that is back in flight is the same misleading-stale-label failure #629
+      # exists to remove. The label-removal restore is exactly why this is NOT gated on the guard's `why`
+      # (round-1 review P0): that path reports `not-blocked` (the label is already gone) while `needs-human`
+      # is still applied, so a `why != 'not-blocked'` gate would strand the escalation on an issue the
+      # implementor is actively working — contradicting the documented restore in AGENTS.md's dispatcher
+      # playbook ("the dispatch itself clears `implementation-blocked` + `needs-human`"). Nothing is removed
+      # that isn't actually present, so on the ordinary never-blocked dispatch this step makes no API call
+      # at all. If this run blocks again, route-blocked re-applies both against a fresh state record.
+      - name: Clear released blocked state
+        if: steps.loop_guard.outputs.verdict != 'inert'
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ steps.resolve_issue.outputs.issue_number }}
+          WHY: ${{ steps.loop_guard.outputs.why }}
+        run: |
+          set -euo pipefail
+          BLOCKED_LABEL=$(.github/scripts/blocked-state.sh label)
+          # Removals are filtered to labels actually present (see present-labels): either label may already
+          # have been cleared by hand, and naming an absent label can fail the whole mutation. Reuses the
+          # exact label snapshot the authorize step fetched and the guard decided on — same job, so no extra
+          # API call and no race against a label change in between.
+          remove_args=()
+          while IFS= read -r label; do
+            remove_args+=(--remove-label "$label")
+          done < <(.github/scripts/blocked-state.sh present-labels "$RUNNER_TEMP/issue_labels.json" "$BLOCKED_LABEL" needs-human)
+          if [ "${#remove_args[@]}" -eq 0 ]; then
+            echo "issue #$ISSUE_NUMBER carries no blocked-state residue (guard: $WHY); nothing to clear"
+            exit 0
+          fi
+          echo "clearing blocked-state residue on issue #$ISSUE_NUMBER (released by: $WHY): ${remove_args[*]}"
+          # No `|| true`: leaving the blocked-state label on an issue this run is actively implementing
+          # would make the next dispatch inert against a stale record, and a stranded `needs-human` re-parks
+          # an escalation that has already been answered — so a failed mutation must be seen.
+          if ! gh issue edit "$ISSUE_NUMBER" --repo "$REPO" "${remove_args[@]}"; then
+            echo "::error::failed to clear '$BLOCKED_LABEL'/needs-human on issue #$ISSUE_NUMBER after a material transition released it"
+            exit 1
+          fi
 
       # automated-researcher#384: claude-code-action auto-installs Claude Code on the runner with no
       # version pin, and that auto-install has landed on versions that crash at SDK launch before any API
@@ -143,6 +261,7 @@ jobs:
       # version string below.
       - name: Install pinned Claude Code
         id: install_claude
+        if: steps.loop_guard.outputs.verdict != 'inert'
         run: |
           set -euo pipefail
           npm install -g @anthropic-ai/claude-code@2.1.207
@@ -155,6 +274,7 @@ jobs:
       # the CLI directly instead, doing explicitly what the wrapper did implicitly. The wrapper can be
       # re-adopted later, in one step, once upstream fixes its startup crash.
       - name: Configure implementor git identity
+        if: steps.loop_guard.outputs.verdict != 'inert'
         env:
           CLAUDE_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           REPO: ${{ github.repository }}
@@ -171,6 +291,7 @@ jobs:
 
       - name: Run pinned Claude Code CLI (implementor)
         id: run_claude
+        if: steps.loop_guard.outputs.verdict != 'inert'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # So `gh` calls the agent makes from its own Bash tool are authorized as the engineer App.
@@ -195,7 +316,7 @@ jobs:
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
                 --model claude-opus-5 \
                 --allowedTools Bash,Edit,Write,Read,Grep,Glob \
-                --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]}}}' \
+                --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]},"block_reason":{"type":["string","null"]}}}' \
             | tee /tmp/claude_stream.jsonl
 
           # design-review finding 1 (#387 doc): don't let a CLI run that exited 0 but produced no result
@@ -210,6 +331,7 @@ jobs:
 
       - name: Resolve job outputs
         id: resolve_outputs
+        if: steps.loop_guard.outputs.verdict != 'inert'
         env:
           STRUCTURED: ${{ steps.run_claude.outputs.structured_output }}
         run: |
@@ -223,15 +345,37 @@ jobs:
           # enable-automerge's `pr_number != ''` gate (code-review finding).
           pr_number=$(echo "$STRUCTURED" | jq -r '.pr_number // empty')
           status=$(echo "$STRUCTURED" | jq -r '.status // "blocked"')
+          # automated-researcher#629 (round-1 review P0): a block the implementor discovered AFTER it had
+          # already opened a PR is a DIFFERENT escalation path from a pre-PR block — implement.md directs it
+          # to that PR's own `needs-senior-engineer` summons (senior-engineer.yml watches PR labels; nothing
+          # watches an issue-level one), and the issue is NOT in the "blocked with no PR" state route-blocked
+          # records. Carry the reported PR in its own output so route-blocked can tell the two apart.
+          # `pr_number` itself is still cleared unconditionally for any non-opened status, so a stray integer
+          # on a blocked result can never reach enable-automerge's gate — the reason that clearing exists.
+          blocked_pr=""
           if [ "$status" = "opened" ]; then
             case "$pr_number" in
               ''|*[!0-9]*) echo "::error::structured_output has status=opened but pr_number ('$pr_number') is not a valid integer"; exit 1 ;;
             esac
           else
+            case "$pr_number" in
+              ''|0|*[!0-9]*) ;;
+              *) blocked_pr="$pr_number" ;;
+            esac
             pr_number=""
+          fi
+          # automated-researcher#629: the block-reason rides along as a machine-readable slug for the state
+          # record route-blocked posts. It is model-authored text, so it is normalized (never trusted raw)
+          # and falls back to `unspecified` rather than failing — routing the block matters more than the
+          # reason's precision, and an unroutable block is the dead letter this issue exists to remove.
+          block_reason=""
+          if [ "$status" != "opened" ]; then
+            block_reason=$(.github/scripts/blocked-state.sh normalize-reason "$(echo "$STRUCTURED" | jq -r '.block_reason // ""')")
           fi
           echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
           echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "block_reason=$block_reason" >> "$GITHUB_OUTPUT"
+          echo "blocked_pr=$blocked_pr" >> "$GITHUB_OUTPUT"
 
   enable-automerge:
     name: enable-automerge
@@ -263,3 +407,296 @@ jobs:
             echo "::warning::could not enable auto-merge on PR #$PR_NUMBER (disabled repo-wide, or missing permission) — commenting instead of failing"
             gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Auto-merge could not be enabled automatically (repo setting or permissions). Enable it manually, or merge once the codex review approves." || true
           fi
+
+  # automated-researcher#629: a blocked outcome used to be a DEAD LETTER — `needs-senior-engineer` on an
+  # ISSUE summons nothing (senior-engineer.yml / reconcile-prs.yml are PR-scoped), `ready` stayed applied
+  # while never re-firing, and the run concluded SUCCESS, so the #620 ticket sat silently ~14h. This job
+  # makes `blocked` a first-class TERMINAL routed state instead:
+  #   - the issue is left visibly blocked and NON-ready (a stale `ready` must not imply work is coming),
+  #   - the block-reason is recorded machine-readably (a fenced state record, workflow-authored),
+  #   - the escalation is routed to a watched surface: `needs-human`, the pipeline's canonical
+  #     researcher-review park (AGENTS.md "Label lifecycle"), plus a deliberately RED run conclusion so
+  #     run-level observers can tell "PR opened" from "blocked awaiting a human" (root cause 3).
+  # Why `needs-human` and not issue-level senior-engineer summoning: the senior-engineer leg adjudicates a
+  # PR's diff and re-dispatches the implementor through address-review.yml's PR-comment mention path, which
+  # has no issue-side equivalent; giving it authority to restore an issue's dispatchable state is exactly
+  # the authority-semantics question issue #629 declares a non-goal and carves out to #632. The issue's Ask
+  # allows either routing target, so this takes the one that needs no new authority grant. It also stops the
+  # triager from re-proposing a flip on the now-dispositionless issue (triage-assess.yml skips tickets
+  # carrying `needs-human`/`needs-senior-engineer`).
+  #
+  # Which surface (round-1 review P0): the issue-side terminal state above is for a PRE-PR block — the case
+  # where nothing else exists to carry the escalation. implement.md also supports discovering a block AFTER
+  # a PR is already open, and directs that one to the PR's `needs-senior-engineer`, which senior-engineer.yml
+  # genuinely watches. Those two are not interchangeable, so this job resolves the surface first and applies
+  # exactly one of them; the run concludes red either way.
+  route-blocked:
+    name: route-blocked
+    needs: implement
+    if: needs.implement.outputs.status == 'blocked'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Recorded before anything else so the verification step below can tell THIS run's state record apart
+      # from one left by an earlier blocked run (same principle as senior-engineer.yml's start timestamp).
+      - name: Record routing start time
+        id: run_started
+        run: echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Fresh runner, no exposure to whatever the implementor job's host state ended up as. The checkout is
+      # the trusted base branch (never the agent's branch): this job runs blocked-state.sh from it, so it
+      # must be control-plane content, not content the implementor could have rewritten mid-run.
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      # Route to the surface that actually watches the escalation. Applying the issue-side terminal state to
+      # a block that happened after a PR was opened would mark the issue blocked while its PR is in flight,
+      # strand `implementation-blocked` + `needs-human` on it through the merge that closes it, and point a
+      # maintainer at a restore procedure for a state that is not the real one (round-1 review P0).
+      # The reported number is VERIFIED, never trusted: `blocked_pr` is model-authored, so the PR route is
+      # taken only for a PR that demonstrably belongs to THIS issue and THIS implementor. "Open PR in this
+      # repo" alone is too weak — a wrong-but-open number (reporting the issue number when an unrelated PR
+      # happens to carry it) would put `needs-senior-engineer` on a stranger's PR and leave the real issue
+      # `ready` with the block recorded nowhere (round-3 review P0). Any predicate failing falls back to
+      # issue-side routing, which is the correct fail-closed surface: the block still lands, on the issue.
+      - name: Resolve the escalation surface
+        id: surface
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BLOCKED_PR: ${{ needs.implement.outputs.blocked_pr }}
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
+        run: |
+          set -uo pipefail
+          # Same spoof-resistant author predicate address-review.yml and review-on-pr.yml use: `gh pr view
+          # --json author` reports an App-authored PR as `app/<slug>`, so a raw string compare against
+          # `<slug>[bot]` would reject every real implementor PR. Sourcing the helper is safe here — this
+          # job's checkout is the trusted base branch, never the agent's.
+          source .github/scripts/canonical-login.sh
+          target=issue
+          if [ -n "$BLOCKED_PR" ]; then
+            pr_json=$(gh pr view "$BLOCKED_PR" --repo "$REPO" --json state,isCrossRepository,headRefName,author 2>/dev/null || echo "")
+            state=$(printf '%s' "$pr_json" | jq -r '.state // ""' 2>/dev/null || echo "")
+            # `tostring`, not `// ""`: jq's alternative operator treats `false` as empty, so `// ""` would
+            # turn the same-repo answer we are looking for into "" and reject every legitimate PR.
+            is_cross=$(printf '%s' "$pr_json" | jq -r '.isCrossRepository | tostring' 2>/dev/null || echo "")
+            head_ref=$(printf '%s' "$pr_json" | jq -r '.headRefName // ""' 2>/dev/null || echo "")
+            author=$(printf '%s' "$pr_json" | jq -r '.author.login // ""' 2>/dev/null || echo "")
+            author_canon=$(canonical_login "$author" 2>/dev/null || echo "")
+            why=""
+            if [ "$state" != "OPEN" ]; then
+              why="it is not an open pull request in $REPO (state: ${state:-not-found})"
+            elif [ "$is_cross" != "false" ]; then
+              why="it is a cross-repository (fork) pull request"
+            elif [ "$head_ref" != "agent/issue-$ISSUE_NUMBER" ]; then
+              # implement.md step 2 makes the implementor's branch name deterministic, so this ties the
+              # reported PR to THIS issue by construction rather than by trusting the reported number.
+              why="its head branch '${head_ref:-unknown}' is not this issue's implementor branch agent/issue-$ISSUE_NUMBER"
+            elif [ "$author_canon" != "claude-code-engineer[bot]" ]; then
+              why="its author '${author:-unknown}' is not the claude engineer bot"
+            else
+              target=pr
+            fi
+            if [ "$target" != "pr" ]; then
+              echo "::warning::the implementor reported blocking against PR #$BLOCKED_PR, but $why — falling back to issue-side routing so the block is still recorded"
+            fi
+          fi
+          echo "escalation surface for this blocked run: $target"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Route the blocked outcome onto the issue
+        if: steps.surface.outputs.target == 'issue'
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
+          BLOCK_REASON: ${{ needs.implement.outputs.block_reason }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          BLOCKED_LABEL=$(.github/scripts/blocked-state.sh label)
+
+          # Idempotent label ensure: a fresh deployment of this pipeline may never have created either
+          # label, and `gh issue edit --add-label` fails outright on a label the repo doesn't define — which
+          # would turn the routing of a block into its own dead letter on exactly the deployments that have
+          # no operator watching. Already-exists is the normal case, hence `|| true`; an existing label keeps
+          # its own color/description (create just fails), so this never clobbers an instance's own setup.
+          gh label create "$BLOCKED_LABEL" --repo "$REPO" --color B60205 \
+            --description "Implement leg ended blocked; re-dispatch is inert until restored (automated-researcher#629)" \
+            2>/dev/null || true
+          gh label create needs-human --repo "$REPO" --color B60205 \
+            --description "Escalation parked for a person's judgment, not automation" \
+            2>/dev/null || true
+
+          # Comment BEFORE labeling, deliberately: the guard fails closed on label-present-without-record
+          # (it reports `inert no-record`), so this order can never leave a window where a concurrent
+          # dispatch sees the label without the record that explains it.
+          .github/scripts/blocked-state.sh render-record "${BLOCK_REASON:-unspecified}" "$RUN_URL" \
+            > "$RUNNER_TEMP/state_record.md"
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file "$RUNNER_TEMP/state_record.md"
+
+          # `needs-senior-engineer` comes off with `ready`: the implementor may have applied it (that is the
+          # documented escalation on a PR), but on an ISSUE it advertises a summons that never happens —
+          # leaving it is part of what made #620 look handled. Both removals go through present-labels so a
+          # label that isn't on the issue is never named in the mutation (see that helper: `--remove-label`
+          # on an absent label is not reliably a no-op, and this mutation must not fail on it).
+          gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name]' \
+            > "$RUNNER_TEMP/current_labels.json"
+          edit_args=(--add-label "$BLOCKED_LABEL" --add-label needs-human)
+          while IFS= read -r stale; do
+            edit_args+=(--remove-label "$stale")
+          done < <(.github/scripts/blocked-state.sh present-labels "$RUNNER_TEMP/current_labels.json" ready needs-senior-engineer)
+
+          if ! gh issue edit "$ISSUE_NUMBER" --repo "$REPO" "${edit_args[@]}"; then
+            echo "::error::failed to route the blocked state onto issue #$ISSUE_NUMBER (ready removed, $BLOCKED_LABEL + needs-human applied) — the block is not routed until this mutation succeeds"
+            exit 1
+          fi
+
+      # Outcomes are VERIFIED, never self-reported (the principle senior-engineer.yml's verify step
+      # establishes): re-read the issue and confirm the routed state actually exists on GitHub before this
+      # run's conclusion claims a routed block. A partially-applied route (e.g. the comment landed, the
+      # labels didn't) must fail here rather than look handled.
+      - name: Verify routed blocked state
+        if: steps.surface.outputs.target == 'issue'
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
+          STARTED_AT: ${{ steps.run_started.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          BLOCKED_LABEL=$(.github/scripts/blocked-state.sh label)
+          RECORD_MARKER=$(.github/scripts/blocked-state.sh record-marker)
+
+          labels=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name]')
+          for expected in "$BLOCKED_LABEL" needs-human; do
+            jq -e --arg l "$expected" 'any(.[]; . == $l)' <<<"$labels" >/dev/null \
+              || { echo "::error::issue #$ISSUE_NUMBER should carry '$expected' after routing but does not (labels: $labels)"; exit 1; }
+          done
+          if jq -e 'any(.[]; . == "ready")' <<<"$labels" >/dev/null; then
+            echo "::error::issue #$ISSUE_NUMBER still carries 'ready' after routing a blocked outcome — a stale ready label is exactly what made #620 look dispatchable"
+            exit 1
+          fi
+
+          found=$(gh api "repos/$REPO/issues/$ISSUE_NUMBER/comments" --paginate | jq -s \
+            --arg started "$STARTED_AT" --arg marker "$RECORD_MARKER" --arg author "$STATE_RECORD_AUTHOR" '
+            (add // []) as $all
+              | if ($all | type) != "array" then error("comments fetch returned non-array (API error body?): " + ($all | tostring)) else $all end
+              | any(.[]; ((.user.login // "") == $author) and .created_at > $started and ((.body // "") | contains($marker)))
+          ')
+          if [ "$found" != "true" ]; then
+            echo "::error::no $STATE_RECORD_AUTHOR-authored blocked-state record created after $STARTED_AT was found on issue #$ISSUE_NUMBER — without it the guard fails closed and only a label removal can restore dispatchability"
+            exit 1
+          fi
+          echo "verified routed blocked state on issue #$ISSUE_NUMBER"
+
+      # The PR-side half of the same invariant (round-1 review P0): the escalation must exist on GitHub, not
+      # merely be self-reported. implement.md tells the implementor to comment on the PR and apply
+      # `needs-senior-engineer` itself; if that add never landed, the summons never fires and the block is a
+      # dead letter again — the exact #620 failure — so this applies it when absent and re-reads the PR to
+      # confirm it. The ISSUE is deliberately left untouched here: its PR is in flight, so `ready` stays on
+      # until that PR merges, exactly as on the unblocked path. Auto-merge is deliberately NOT enabled for
+      # this PR either (enable-automerge keys off `pr_number`, which a blocked status clears): the
+      # implementor itself declared the implementation incomplete, so what happens to the PR next is the
+      # senior engineer's adjudication, not a race between the codex review and a merge.
+      - name: Route the blocked outcome onto the PR
+        if: steps.surface.outputs.target == 'pr'
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          BLOCKED_PR: ${{ needs.implement.outputs.blocked_pr }}
+        run: |
+          set -euo pipefail
+          # Same idempotent ensure as the issue-side labels: a fresh deployment may never have created it,
+          # and `--add-label` fails outright on a label the repo doesn't define.
+          gh label create needs-senior-engineer --repo "$REPO" --color B60205 \
+            --description "In-flight PR adjudication requested (automated-researcher#438)" \
+            2>/dev/null || true
+
+          labels=$(gh pr view "$BLOCKED_PR" --repo "$REPO" --json labels --jq '[.labels[].name]')
+          if jq -e 'any(.[]; . == "needs-senior-engineer")' <<<"$labels" >/dev/null; then
+            echo "PR #$BLOCKED_PR already carries needs-senior-engineer (the implementor applied it)"
+          elif ! gh pr edit "$BLOCKED_PR" --repo "$REPO" --add-label needs-senior-engineer; then
+            echo "::error::failed to apply needs-senior-engineer to PR #$BLOCKED_PR — a post-PR block is not routed until that summons label lands"
+            exit 1
+          fi
+
+          labels=$(gh pr view "$BLOCKED_PR" --repo "$REPO" --json labels --jq '[.labels[].name]')
+          jq -e 'any(.[]; . == "needs-senior-engineer")' <<<"$labels" >/dev/null \
+            || { echo "::error::PR #$BLOCKED_PR should carry needs-senior-engineer after routing but does not (labels: $labels)"; exit 1; }
+          echo "verified routed blocked state on PR #$BLOCKED_PR"
+
+      # Root cause 3 (#629): the run concluded SUCCESS on `status: blocked`, so run-level observers —
+      # including the researcher's own monitors — could not distinguish "PR opened" from "blocked awaiting a
+      # human". That was the 14h silence. The routing above is the durable state; THIS step is the push
+      # signal, and it runs only after that routing has been verified, so a red run always means a
+      # *recorded* block, never a lost one — on whichever surface carries it.
+      - name: Signal blocked outcome (deliberate non-success conclusion)
+        env:
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
+          BLOCK_REASON: ${{ needs.implement.outputs.block_reason }}
+          TARGET: ${{ steps.surface.outputs.target }}
+          BLOCKED_PR: ${{ needs.implement.outputs.blocked_pr }}
+        run: |
+          if [ "$TARGET" = "pr" ]; then
+            echo "::error::issue #$ISSUE_NUMBER: implementation ended BLOCKED after PR #$BLOCKED_PR was already open (block-reason: ${BLOCK_REASON:-unspecified}). The escalation is routed and verified on that PR (needs-senior-engineer, which senior-engineer.yml watches); the issue's own state is deliberately untouched because its PR is in flight. This run is failed DELIBERATELY so the blocked outcome is visible at run level — it is not a pipeline malfunction."
+          else
+            echo "::error::issue #$ISSUE_NUMBER: implementation ended BLOCKED (block-reason: ${BLOCK_REASON:-unspecified}). The state is routed and verified on the issue (ready removed, blocked-state + needs-human applied, machine-readable record posted). This run is failed DELIBERATELY so the blocked outcome is visible at run level — it is not a pipeline malfunction, and re-adding 'ready' alone will not retry it."
+          fi
+          exit 1
+
+  # automated-researcher#629 loop protection: the dispatch was refused because the issue is in the blocked
+  # state and nothing material changed since the block was recorded. Runs in its own job for the same reason
+  # enable-automerge does (fresh runner, own token, control-plane only, no exposure to the implement job's
+  # host state) — and it must be LOUD: a silent green no-op run is what let #620's re-cycles look like work
+  # in progress for hours.
+  reject-redispatch:
+    name: reject-redispatch
+    needs: implement
+    if: needs.implement.outputs.guard_verdict == 'inert'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # actions/checkout v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Mint claude engineer App token
+        id: mint_claude_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # actions/create-github-app-token v3.2.0
+        with:
+          app-id: ${{ secrets.CLAUDE_APP_ID }}
+          private-key: ${{ secrets.CLAUDE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Revert the inert `ready` and explain what a re-dispatch requires
+        env:
+          GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ needs.implement.outputs.issue_number }}
+        run: |
+          set -uo pipefail
+          BLOCKED_LABEL=$(.github/scripts/blocked-state.sh label)
+          # Take `ready` back off: it was just (re-)added, produced nothing, and leaving it on a blocked
+          # issue restores the misleading "dispatchable" appearance this issue exists to remove. A warning,
+          # not a hard failure — the authoritative refusal signal is this job's non-zero exit below, and the
+          # blocked state itself is already recorded on the issue.
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label ready \
+            || echo "::warning::could not remove the inert 'ready' label from issue #$ISSUE_NUMBER"
+          echo "::error::issue #$ISSUE_NUMBER is in the blocked state ('$BLOCKED_LABEL'); this dispatch was refused before spending an implementor run. A bare 'ready' re-add is inert by design (#629) — a fresh stateless run would re-derive the same block. Re-dispatch requires one of: removing the '$BLOCKED_LABEL' label, a restore-authority 'DECISION: PROCEED'/'REVISE' comment (#632's protocol), or an edit to the issue body addressing the recorded block-reason. See the blocked-state record comment on the issue."
+          exit 1

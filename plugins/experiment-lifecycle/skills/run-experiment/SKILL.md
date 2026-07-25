@@ -147,10 +147,14 @@ arm the idle-cost teardown backstop.
 > own thread is created, and arming your watcher immediately after is your SECOND — bind that as a positive
 > liveness receipt with `run_supervision_record.sh checkpoint <run-id> --look-again <opaque deadline>` so the
 > designer's dispatch-completion check (`verify-bootstrap`) has something durable to find, not just a bare
-> "started" flag. See `references/CODEX_SUPERVISION.md` for the full contract, including that receipt (§2) and the
+> "started" flag. **If you are running as an app-visible child subagent** (the native `spawn_agent`-shaped
+> dispatch path — automated-researcher#637), bind the host-visible handle/nickname you were given as your
+> `--session-handle` so the designer can announce where the researcher inspects you, and do **not** treat DONE as
+> a cue to close yourself down: stay available through human review, and get reaped with the rest of the run. See
+> `references/CODEX_SUPERVISION.md` for the full contract, including that receipt (§2), the
 > durable question/answer inbox (`ask-question`/`answer-question`/`has-question`/`has-answer`/`consume-question`
 > on the same record) that lets you flag a load-bearing gap to the designer-of-record without idling and without
-> them taking over the run.
+> them taking over the run, and the coordination-surface/visibility contract (§7).
 >
 > Other substrates: the equivalent recurring wake.
 

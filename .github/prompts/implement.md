@@ -137,11 +137,17 @@ which values of this leg's output enum that comes out as.
   is `opened` as usual. Say in the PR body which decision you acted on, and note any residual risk.
 - **`STOP` whose `SCOPE:` covers this issue** — the shared protocol has already settled this work, so do
   what it requires and this run ends there. For this leg that means: one comment on the issue quoting the
-  `DECISION:` block and recording that you stopped on its authority, and no PR opened. The attention label
-  this leg could otherwise reach for is `needs-senior-engineer`; the shared protocol's settled-outcome rule
-  means it is not applied here. Report `status: blocked` with `pr_number: null` — those are simply the only
-  values this leg's output schema has for "no PR was opened", the names of enum slots rather than a claim
-  that anything is unresolved or awaiting a human.
+  `DECISION:` block and recording that you stopped on its authority, and no PR opened. Apply no label
+  yourself: step 5's rule holds on this path too — this workflow owns the terminal state and routes it for
+  you. Report `status: blocked`, `pr_number: null`, and `block_reason: settled-by-decision`. `blocked` is
+  the only slot this leg's output enum has for "no PR was opened", so reporting it names that slot rather
+  than judging the question unresolved — but be clear-eyed about what naming it does: the workflow will
+  record the blocked state on the issue, apply the blocked-state label plus `needs-human`, and conclude the
+  run red (automated-researcher#629). The shared protocol's bar on escalating a settled stop binds *you*,
+  not that routing, and the routing is coherent with the stop — the state record the workflow posts honors
+  a `STOP` as a decision not to re-dispatch, which is exactly the outcome a stop wants. Your
+  `block_reason` and your comment are what tell a maintainer this state is a settled stop rather than an
+  unresolved block.
 
 ## Your job
 
@@ -168,20 +174,43 @@ below in it, not in this prompt's paraphrase.
    cannot satisfy, the shared protocol governs what happens next and that subsection maps it to an outcome —
    escalating it anyway is the reopening the shared protocol forbids. Otherwise:
    - If you have not yet opened a PR: comment on the issue explaining exactly what's blocking you or what
-     seems contradictory, add the `needs-senior-engineer` label to the issue, and stop.
+     seems contradictory, then stop and report `status: "blocked"` with a `block_reason` (step 7). Do **not**
+     apply any label yourself: this workflow owns the blocked state and routes it for you the moment you
+     report `blocked` — it removes `ready`, applies the blocked-state label, posts a machine-readable
+     record of your `block_reason`, escalates to `needs-human`, and makes the run's conclusion non-success
+     so the block is visible (automated-researcher#629). A self-applied `needs-senior-engineer` on an
+     *issue* summons nothing, which is precisely the dead letter that fix removed.
    - If you have already opened a PR and discover the block partway through: comment on the PR with the
-     same explanation, add `needs-senior-engineer` to the PR, and stop. Do not force a partial/wrong
-     implementation just to have something to show.
+     same explanation, add `needs-senior-engineer` to the PR (on a *PR* that label does summon the
+     senior-engineer adjudicator), and stop. Do not force a partial/wrong implementation just to have
+     something to show. Report `status: "blocked"` **with `pr_number` set to that PR** (step 7): the
+     workflow routes a blocked run that has a PR to the PR's escalation path instead — it verifies
+     `needs-senior-engineer` actually landed there and leaves the issue's own state alone, because the
+     issue is not blocked-with-no-PR. It does not enable auto-merge on a PR you reported incomplete.
+   - Either way, do not spend the run re-litigating a block you have already established — a clear
+     `block_reason` and a precise explanation comment are the whole value you add on this path. On the
+     pre-PR path in particular, once you report it, re-dispatch of the issue is deliberately inert until
+     the restore authority (the researcher or the senior-engineer adjudicator) removes the blocked-state
+     label, records a binding `DECISION:`, or edits the issue body. **Releasing that state is never yours
+     to do**: on a blocked issue, do not remove the blocked-state label and do not edit the issue body —
+     both are release levers, and an agent that unblocks itself is the authority inversion this state
+     exists to prevent (the `DECISION:` and body-edit routes are author-checked and will simply ignore you;
+     the label is not, so leaving it alone is on you).
 6. Once the implementation is complete and checks pass locally, open a pull request:
    - Title derived from the issue title.
    - Body includes `Closes #{{ISSUE_NUMBER}}` (exact keyword, so the PR's merge closes the issue) plus a
      short summary of what you built and any notable decisions.
    - Push the branch and open the PR using the GitHub token you were given — every git and `gh` operation
      you perform must run as that identity, never a different credential.
-7. Report your outcome as structured output: `pr_number` (the PR number you opened, or `null` if you opened
-   none) and `status` (`opened` or `blocked`). The step-5 escalation is the usual reason for `blocked`; a run
-   settled by a `DECISION:` block reports whatever "Where a decision reaches this run" maps that verb to, not
-   a separate judgment here.
+7. Report your outcome as structured output: `status` (`opened` or `blocked`), `pr_number` (the PR number
+   you opened — always report it if you opened one, including when you then blocked; `null` only if you
+   blocked without ever opening a PR), and — when `status` is `blocked` —
+   `block_reason`: a short kebab-case slug naming the CLASS of block, machine-readable rather than prose
+   (e.g. `external-verification-unavailable`, `spec-contradiction`, `missing-credential`,
+   `prerequisite-not-merged`). The workflow normalizes it and records it on the issue; your explanation
+   comment carries the detail. The step-5 escalation is the usual reason for `blocked`; a run settled by a
+   `DECISION:` block reports whatever "Where a decision reaches this run" maps that verb to, not a separate
+   judgment here.
 
 ## Constraints
 
