@@ -18,9 +18,12 @@
 #     ☑ PASS ev: <artifact path + numbers>     e.g. ev: training_data_audit.json open_think=0/8316 drops={}
 #     ☑ N.A. ev: <why it doesn't apply>         CONDITIONAL gates only; DATA AUDIT has no N.A. loophole
 #     ☒ FAIL ev: <what failed>                  → BLOCKS continuation; a FAIL is a LOAD-BEARING flag:
-#                                                  notify the researcher, work around, proceed only if they
-#                                                  clear a changed method. (Record the FAIL — don't delete it; the
-#                                                  FAIL→fix→PASS history is the validity trail.)
+#                                                  notify the DESIGNER-OF-RECORD — your questions terminate
+#                                                  there, not at the researcher (#664) — work around, and
+#                                                  proceed only once they clear it; a *changed method* changes
+#                                                  what the numbers mean, so THAT clearance is the researcher's
+#                                                  to give, not the designer's. (Record the FAIL — don't delete
+#                                                  it; the FAIL→fix→PASS history is the validity trail.)
 #   Evidence is a number / output / path, NEVER a bare ✓. Tick in place. Commit at close; the cross-family
 #   close audit verifies the checklist against the artifacts (which is what stops cargo-cult ticking).
 #   A checklist FAIL is a VALIDITY-TRAIL term, distinct from ledger `technical-failure` (run-experiment

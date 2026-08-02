@@ -100,7 +100,7 @@ teardown backstop before you detach. The autonomous self-wake must, each tick: c
 **liveness** signal (compute busy = alive; idle AND not-done = hung), AND a **positive-progress** signal (a stage
 advancing / bytes growing — liveness alone can't tell working from a wedged hot-loop), plus the driver log for
 BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
-the signal you parked, so STOP re-waiting, diagnose, and notify the human.
+the signal you parked, so STOP re-waiting, diagnose, and notify the designer-of-record.
 
 **The same tick also owns the pod-lease heartbeat — refresh is not something to remember by hand.** The `gpu-job`
 lease's `expiry` is the SOLE deletion trigger the standing reaper enforces (the per-pod watchdog is retired, #266/
@@ -131,8 +131,8 @@ then:
   case below: do NOT refresh, surface loudly on the next wake.
 - **neither** (busy-but-not-progressing, hung, BLOCKED, or simply quiet with no active marker) → do **NOT**
   refresh. Don't let this pass silently: treat it like a look-again-deadline miss — surface it loudly on the
-  next wake (diagnose, notify the human) instead of quietly trusting the lease's existing expiry to eventually
-  reap it unattended.
+  next wake (diagnose, notify the designer-of-record) instead of quietly trusting the lease's existing expiry to
+  eventually reap it unattended.
 
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
@@ -514,9 +514,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Tear-down-on-block:** a BLOCKED / errored run, OR a run stopped by an instrument/data/validity gate,
   tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it per
   the ledger-status definition above (a gate stop is not automatically `technical-failure`; teardown urgency
-  never depends on which) → **tear down (stop billing)** → notify the human → *then* discuss redesign. Do NOT
-  leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the agent asked what
-  to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
+  never depends on which) → **tear down (stop billing)** → notify the designer-of-record → *then* discuss
+  redesign. Do NOT leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the
+  agent asked what to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
   for a concrete, named debugging reason.
 - **The completion boundary (the safety gate):** tear down only once the upload is **verified** — *every artifact unique
   to this run* (adapter, eval summaries, rollout/sample logs, **raw per-pod driver console logs**, not just their
