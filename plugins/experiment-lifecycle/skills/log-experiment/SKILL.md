@@ -60,8 +60,11 @@ Staging into that worktree copies **only what could actually be committed**: bot
 the research repo's `.gitignore` are applied *before* any bytes move, so a gitignored multi-GB tree living in
 the dir (a `dashboard/build/`) never costs a copy of itself in `/tmp`. It used to, and a landing failed with
 `No space left on device` whenever free disk was smaller than the whole input dir — even when `--only` named
-three small source files (#666). The ignored-file guard below still reports every excluded file by name; it
-just no longer needs them copied in to see them.
+three small source files (#666). The rules applied are exactly the ones the `git add` will apply — the base
+tree's, plus any `.gitignore` the dir itself carries (materialized in the worktree first, so the pre-copy
+decision and the later `git add` cannot disagree; a dir shipping its own `.gitignore` for its own artifacts is
+the common case). The ignored-file guard below still reports every excluded file by name; it just no longer
+needs them copied in to see them.
 
 The driver **classifies by the registry convention** (no label needed):
 
