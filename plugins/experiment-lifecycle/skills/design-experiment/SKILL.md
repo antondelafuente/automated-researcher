@@ -314,7 +314,9 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   blocks the whole run stops you, and then you notify + arm your self-wake — NEVER park silently. Your questions go to
   the designer-of-record, not the researcher — they answer them, and escalate only what changes the cleared budget or
   what is being measured; a question whose answer is checkable from the records or the live state is not a question,
-  so verify it yourself instead of routing it anywhere. Never dispatch
+  so verify it yourself instead of routing it anywhere. That routing governs every escalation in this brief however
+  the individual line is worded — anything telling you to notify, gate on, or get clearance from "the human" or "the
+  researcher" means the designer-of-record unless it is a budget or meaning change. Never dispatch
   `Agent(subagent_type: "fork")` for a narrow research question — the fork inherits this whole disposition and can
   silently take on the executor role itself; do narrow research inline or via a read-only, non-fork subagent
   instead (see `run-experiment`'s executor-disposition section for the incident and the full guardrail)."*

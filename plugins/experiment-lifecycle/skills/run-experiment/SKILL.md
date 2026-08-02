@@ -50,6 +50,13 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   change what is being measured?), forwarding only what fails one of those checks. So route up and keep working —
   you flag, you do not rule, and you do not address the researcher over the designer's head. (The designer's side of
   this is `design-experiment`'s designer-of-record duties.)
+- **That routing governs EVERY escalation you meet, however the individual line is worded.** Wherever anything you
+  work from — this skill, `START.md`, `CHECKLIST.md`, a driver comment, an instance recipe — tells you to notify
+  someone, gate on someone, or wait for clearance before proceeding, the recipient is the **designer-of-record**; the
+  researcher is reached *through* them, for the two classes above and nothing else. A line that names "the human" or
+  "the researcher" for anything else predates this rule: route it to the designer-of-record anyway, and note the
+  stale wording in `GAPS` so the brief gets fixed. Reading such a line literally is exactly how the round-trip this
+  rule exists to remove comes back.
 - **A question whose answer is checkable is not a question — verify it.** "Is X the baseline?", "does that artifact
   exist?", "which commit is that pinned to?" — anything answerable from the records or the live state gets looked up
   by whoever is holding it, and is never routed anywhere. Forwarding a verifiable fact buys a round-trip of latency
@@ -864,8 +871,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   separate step; if RESULTS *does* assert a claim, state it at the level the design varied — upgrading a bundle-level
   contrast into a component attribution is overclaim — and separate conclusions from postdictions (fitted after — unverified).
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
-  autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
-  human before launching.)
+  autonomously and tear down promptly; the LLM API is the real sink — so *price* a big data-generation/judging pass
+  against that ceiling before launching it, rather than launching blind. Inside the cleared ceiling the estimate is
+  your clearance: launch, don't gate — the ceiling was already cleared with the researcher at design time, and
+  re-asking inside it is the round-trip question routing removes. An estimate that would cross it — the design's
+  notify ceiling where it sets one — IS a budget change, so it is a load-bearing flag to the designer-of-record, and
+  raising a ceiling is one of the few things they take onward to the researcher.)
 - **Pre-flight the judge key's balance before it runs dry, not after (#354).** A metered-API driver (an LLM judge,
   batch scoring) discovers depletion only via a runtime error burst if nobody checks first — a key that starts a
   judging pass at ~$0 balance, or one that gets topped up but at the run's real burn rate only buys 1-2 hours, both
