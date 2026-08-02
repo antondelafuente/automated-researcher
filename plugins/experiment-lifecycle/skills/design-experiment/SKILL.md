@@ -607,7 +607,7 @@ you as a load-bearing flag, same as always.
 is DECIDE-RECORD-REPORT (automated-researcher#664).** When a question reaches you, apply two checks:
 
 1. **Does it stay inside the already-cleared budget / cost envelope?**
-2. **Does it change what is being measured** — the question, the arms, the metric; what the numbers will mean?
+2. **Does it leave unchanged what is being measured** — the question, the arms, the metric; what the numbers will mean? (A meaning-changing answer FAILS this check.)
 
 **Both pass → you decide**, record the decision durably where the run's own record carries it (an amendment note on
 the experiment's registry record — the run-supervision record's question/answer inbox is cleared by

@@ -47,9 +47,9 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   on the run-supervision record, `references/CODEX_SUPERVISION.md` §3), otherwise however the brief says to reach
   them. That channel is a line to the **designer**, not a relay to the researcher: the designer is expected to
   *answer* it under the two-check rule (does the answer stay inside the already-cleared cost envelope, and does it
-  change what is being measured?), forwarding only what fails one of those checks. So route up and keep working —
-  you flag, you do not rule, and you do not address the researcher over the designer's head. (The designer's side of
-  this is `design-experiment`'s designer-of-record duties.)
+  leave unchanged what is being measured?), forwarding only what fails one of those checks. So route up and keep
+  working — you flag, you do not rule, and you do not address the researcher over the designer's head. (The
+  designer's side of this is `design-experiment`'s designer-of-record duties.)
 - **That routing governs EVERY escalation you meet, however the individual line is worded.** Wherever anything you
   work from — this skill, `START.md`, `CHECKLIST.md`, a driver comment, an instance recipe — tells you to notify
   someone, gate on someone, or wait for clearance before proceeding, the recipient is the **designer-of-record**; the
