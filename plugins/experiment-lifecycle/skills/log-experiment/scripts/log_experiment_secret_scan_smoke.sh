@@ -506,5 +506,89 @@ printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note40.md"
 if run_dry "$T/reg/note"; then pass "clean note with no TEMP.md logs fine"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
+# #666 (cases 41-46): the staging copy must apply BOTH filters — the worktree's ignore rules and the --only
+# allowlist — BEFORE any bytes move, so a gitignored multi-GB tree that can never be committed is never
+# copied into the /tmp worktree (the reported ENOSPC landing: a 35G `dashboard/build/` copied alongside the
+# three small source files --only named). The fixtures prove "never copied" behaviorally, without needing a
+# multi-GB tree or a full disk: a file the copy MUST NOT touch is made unreadable (mode 000), which the old
+# blanket `cp -r "$DIR"` died on and a copy that skips the path cannot notice. NOTE: mode 000 does not stop
+# root, so these cases only DISCRIMINATE when the smoke runs unprivileged (as it does on CI and on a dev
+# box); as root they still assert the correct end state, just without reproducing the old failure.
+echo "[smoke] case 41: a gitignored subtree the copy must never touch (unreadable file inside it) -> BLOCK listing the file, not a copy failure (#666: enumerated for the #340 guard without being copied)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/build/'
+printf 'notes\n' > "$T/reg/note/note41.md"                      # a normal new file — stages fine
+mkdir -p "$T/reg/note/build/deep"
+printf 'bundle\n' > "$T/reg/note/build/deep/bundle.js"          # inside a WHOLLY-ignored dir; never committable
+chmod 000 "$T/reg/note/build/deep/bundle.js"
+if run_dry "$T/reg/note"; then fail "gitignored subtree was NOT flagged by the #340 guard (#666 regression: enumeration lost with the copy)"; else
+  case "$LAST_ERR" in *"gitignored file"*"reg/note/build/deep/bundle.js"*) pass "gitignored subtree enumerated per-file for the guard without being copied";;
+    *) fail "blocked, but not on the ignored-file guard (the copy likely still touched the ignored subtree): $LAST_ERR";; esac; fi
+chmod 644 "$T/reg/note/build/deep/bundle.js"; rm -rf "$T"
+
+echo "[smoke] case 42: same gitignored subtree, with --skip-ignored -> PASS (the landing no longer costs a copy of a tree it can never commit — the ENOSPC incident)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/build/'
+printf 'notes\n' > "$T/reg/note/note42.md"
+mkdir -p "$T/reg/note/build/deep"
+printf 'bundle\n' > "$T/reg/note/build/deep/bundle.js"
+chmod 000 "$T/reg/note/build/deep/bundle.js"
+if run_dry "$T/reg/note" --skip-ignored; then pass "log proceeds without ever reading the gitignored subtree";
+else fail "acknowledged gitignored subtree still failed the log (the copy touched it): $LAST_ERR"; fi
+chmod 644 "$T/reg/note/build/deep/bundle.js"; rm -rf "$T"
+
+echo "[smoke] case 43: --only names one clean file; a co-tenant's (non-ignored) file the allowlist leaves out is never copied either -> PASS (#666: --only applies BEFORE the copy, not after)"
+T=$(mktemp_d); make_repo "$T"
+printf 'my page\n' > "$T/reg/note/mine43.html"
+printf 'co-tenant build output\n' > "$T/reg/note/cotenant43.bin"
+chmod 000 "$T/reg/note/cotenant43.bin"
+if run_dry "$T/reg/note" --only mine43.html; then pass "--only narrows the copy itself; the co-tenant's file is never read";
+else fail "--only run failed on a co-tenant file it never stages (copied before filtering): $LAST_ERR"; fi
+chmod 644 "$T/reg/note/cotenant43.bin"; rm -rf "$T"
+
+# #670 review (cases 44-46): the ignore-rule state that decides the copy must be the SAME state the later
+# `git add` applies. The copy itself changes that state — a `.gitignore` under $DIR is one of the files being
+# copied — so copy_stage_paths materializes the input's own rule files BEFORE computing any verdict. Cases 41-43
+# above all put the rules in the BASE commit, where the two states coincide and the bug is invisible; these
+# three put them in the INPUT dir, where a pre-copy verdict taken against the base worktree alone diverges.
+echo "[smoke] case 44: the input dir ships its OWN new .gitignore (not in base) for its build tree -> the tree is neither copied (unreadable file inside) nor silently dropped: BLOCK listing it"
+# The common first-land shape: a brand-new experiment dir the base tree has never seen, carrying the very
+# .gitignore that excludes its artifacts. Deciding against the base worktree alone would call the tree
+# not-ignored (copy it — the ENOSPC bug, unfixed), then `git add` would skip it under the just-copied rule
+# with the #340/#331 guard reporting nothing at all.
+T=$(mktemp_d); make_repo "$T"
+printf 'build/\n' > "$T/reg/note/.gitignore"                    # NEW rule, present only in the input dir
+printf 'notes\n' > "$T/reg/note/note44.md"
+mkdir -p "$T/reg/note/build/deep"
+printf 'bundle\n' > "$T/reg/note/build/deep/bundle.js"
+chmod 000 "$T/reg/note/build/deep/bundle.js"
+if run_dry "$T/reg/note"; then fail "a rule the INPUT dir adds was ignored by the pre-copy filter — the tree was copied and then silently dropped from the commit with no guard report"; else
+  case "$LAST_ERR" in *"gitignored file"*"reg/note/build/deep/bundle.js"*) pass "the input's own .gitignore governs the copy and the guard alike";;
+    *) fail "blocked, but not on the ignored-file guard (the copy likely still touched the ignored subtree): $LAST_ERR";; esac; fi
+chmod 644 "$T/reg/note/build/deep/bundle.js"; rm -rf "$T"
+
+echo "[smoke] case 45: the input dir's .gitignore NEGATES a base rule -> the re-included file still lands (no change to what gets committed)"
+# The other direction: a base-only verdict calls keep.jsonl ignored, so it is never copied and the guard
+# BLOCKs on it — where the pre-#666 blanket copy staged and committed it. #666 declares that a non-goal.
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/**/*.jsonl'
+printf '!keep.jsonl\n' > "$T/reg/note/.gitignore"
+printf 'row\n' > "$T/reg/note/keep.jsonl"
+if run_dry "$T/reg/note"; then pass "a base rule the input re-includes still commits (the guard does not fire)";
+else fail "a file the input's .gitignore re-includes was treated as excluded: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 46: --only a subdir, with the governing .gitignore one level UP in the input dir -> that ancestor rule still applies"
+# find's roots are the --only paths, so `reg/note/.gitignore` is never enumerated under `reg/note/sub` — the
+# ancestor chain from each root's parent up to \$REL has to be collected separately, or an --only run decides
+# against rules the `git add` will then apply.
+T=$(mktemp_d); make_repo "$T"
+printf '*.bin\n' > "$T/reg/note/.gitignore"                     # at $REL, OUTSIDE the --only root
+mkdir -p "$T/reg/note/sub"
+printf 'keep\n' > "$T/reg/note/sub/keep46.md"
+printf 'blob\n' > "$T/reg/note/sub/big46.bin"
+chmod 000 "$T/reg/note/sub/big46.bin"
+if run_dry "$T/reg/note" --only sub; then fail "an ancestor .gitignore in the input dir was missed by the --only copy filter — the .bin was copied and then silently dropped"; else
+  case "$LAST_ERR" in *"gitignored file"*"reg/note/sub/big46.bin"*) pass "the ancestor .gitignore governs an --only-narrowed copy too";;
+    *) fail "blocked, but not on the ignored-file guard (the copy likely still touched the ignored file): $LAST_ERR";; esac; fi
+chmod 644 "$T/reg/note/sub/big46.bin"; rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi
