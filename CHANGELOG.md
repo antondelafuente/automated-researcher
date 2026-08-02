@@ -1,3 +1,18 @@
+- experiment-lifecycle 0.3.83 (2026-08-02): makes `design-experiment` prove the kickoff actually SUBMITTED
+  before dispatch counts as done (#659). A real dispatch's tmux `send-keys <prompt> Enter` raced the fresh
+  executor session's startup prompts, the Enter got consumed, the kickoff sat unsent in the input box, and the
+  executor idled at 0 tokens for ~15 minutes until the researcher — not any machinery — noticed. Step 4's
+  kickoff paragraph now requires a post-send pane capture with BOTH signals before reporting "executor
+  running": the input box empty (the multi-line prompt no longer above the separator — a casual `❯`-line read
+  can't tell a pending unsent prompt from the ghost/auto-suggest text that normally sits there) and the token
+  counter greater than 0 AND increasing across two reads seconds apart (a static non-zero count is not a
+  pass). Failing either → re-send a bare Enter (idempotent against an empty composer, unlike a text nudge,
+  which would append to a still-pending prompt) and re-check. The designer heartbeat's first tick inherits the
+  same check, so a race that slips past the dispatcher costs one heartbeat interval instead of researcher
+  attention, and the instruction is carried into the dispatched-watchdog variant, which has no memory of the
+  kickoff. Cost is two pane captures; written concretely for the tmux/Claude-launcher path where the race
+  lives, with the substrate-neutral contract named (the Codex path's own form is #628's `verify-bootstrap`
+  receipt). Docs only — no script or record-format changes.
 - experiment-lifecycle 0.3.82 (2026-07-25): makes the Codex-native coordination surface capability-detected and
   the dispatched executor visible to the researcher (#637). A real dispatch created an app-visible child task
   (Codex Desktop **Subagents**, chattable, full executor context preserved) but never told the researcher its

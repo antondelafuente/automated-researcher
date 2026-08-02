@@ -452,6 +452,29 @@ run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your
 invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
 then run to completion.
 
+**A send is not a submit — mechanically verify the kickoff SUBMITTED before you call dispatch done
+(automated-researcher#659).** Dispatch is complete when the executor is *consuming tokens*, not when the send
+call returned. Real incident (2026-08-02, `depv1-negemo-dose-response-1`): a tmux `send-keys <prompt> Enter`
+kickoff raced the fresh executor session's own startup prompts, the Enter was consumed by one of them, the
+kickoff sat **unsent in the input box**, and the executor idled at 0 tokens for ~15 minutes — caught by the
+researcher, not by machinery. So after sending, capture the pane (e.g. `tmux capture-pane -t run-<exp> -p`)
+and require BOTH signals:
+- **The input box is empty** — the multi-line kickoff is no longer sitting above the input separator. A casual
+  pane read does NOT establish this: the `❯` line normally carries ghost/auto-suggest text, so "there's text on
+  the prompt line" cannot distinguish a genuinely pending unsent prompt from ghost text. The discriminators are
+  the multi-line prompt above the separator and the token counter.
+- **The token counter is climbing** — greater than 0 AND increasing across two reads a few seconds apart. A
+  static non-zero count is not a pass.
+
+Not both → **re-send a bare Enter** and re-check. Bare Enter is the right remedy precisely because it is
+idempotent: against an empty composer it is a no-op, so re-sending costs nothing if the kickoff did land
+(unlike a text nudge, which would append to a still-pending prompt and submit a corrupted kickoff). Only once
+both signals hold do you report "executor running". Two pane captures is the whole cost.
+
+This is written concretely for the tmux/Claude-launcher path, where the race lives. The contract behind it is
+substrate-neutral — some mechanical proof the brief was actually accepted and the executor is doing work — and
+the Codex path carries its own form of it in the `verify-bootstrap` receipt above.
+
 **Reap your own design worktree — right after kickoff (automated-researcher#532).** If this design session is
 running in a dedicated worktree (your instance's convention for giving a design-experiment session its own
 working dir, distinct from the shared checkout — mirroring the executor's own dedicated dir just above), it
@@ -490,6 +513,12 @@ For the session-wedge duty, arm at dispatch, in this order:
    Any substrate with a background shell can run the equivalent loop.)
 2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection.** Read each executor's pane and judge
    advancing-vs-frozen against your previous read — the discrimination a model-free probe (#172) cannot make.
+   **The FIRST tick re-verifies the kickoff actually submitted** — run the two-signal check from the kickoff
+   step above (input box empty + token counter climbing) against every supervised pane before any
+   advancing-vs-frozen judgment, and remedy an unsent kickoff with a bare Enter, never the text nudge below
+   (which would append to the still-pending prompt). A race that slipped past the dispatcher then costs one
+   heartbeat interval instead of the researcher's attention (#659). Put this instruction in the heartbeat
+   prompt itself — including the dispatched-watchdog variant in 3 below, which has no memory of the kickoff.
    Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
    it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
    unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several
