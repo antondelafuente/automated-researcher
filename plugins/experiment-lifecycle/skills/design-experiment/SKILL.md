@@ -452,6 +452,42 @@ run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your
 invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
 then run to completion.
 
+**A send is not a submit — mechanically verify the kickoff SUBMITTED before you call dispatch done
+(automated-researcher#659).** Dispatch is complete when the executor is *consuming tokens*, not when the send
+call returned. Real incident (2026-08-02, `depv1-negemo-dose-response-1`): a tmux `send-keys <prompt> Enter`
+kickoff raced the fresh executor session's own startup prompts, the Enter was consumed by one of them, the
+kickoff sat **unsent in the input box**, and the executor idled at 0 tokens for ~15 minutes — caught by the
+researcher, not by machinery. So after sending, capture the pane (e.g. `tmux capture-pane -t run-<exp> -p`) and
+**classify what is on screen before you touch the keyboard again** — the remedy depends on the state, and
+firing the wrong keystroke at the wrong state is how this incident happened in the first place:
+
+1. **A startup / permission / choice prompt is up** (trust-this-folder, a model or theme picker, a tool
+   permission ask — anything with a highlighted default). **Answer it deliberately**: read what it asks and
+   send the answer this dispatch actually requires. Do NOT fire a blind Enter at it — Enter here *selects
+   whatever default is highlighted* rather than submitting anything, which is precisely the keystroke-eating
+   modal that swallowed the original kickoff. Then re-capture and classify again.
+2. **No modal, but the kickoff is still pending in the composer** — the multi-line kickoff still sitting above
+   the input separator. **Send a bare Enter.** It is the right remedy *in this state specifically*: the
+   composer has focus with nothing modal in front of it, so Enter submits what is already typed and nothing
+   else, and a text nudge would instead append to the pending prompt and submit a corrupted kickoff. Then
+   re-capture and classify again.
+3. **No modal and the composer is clear** — the kickoff went in. Now confirm the executor is actually
+   *working*: the **token counter is climbing**, greater than 0 AND increasing across two reads a few seconds
+   apart. A static non-zero count is not a pass. This cold-start test is valid *here* because a
+   just-launched executor sits at 0 until the kickoff turn begins (see the heartbeat's first tick in the
+   supervision step below, where it is NOT valid and a different signature is used instead).
+
+Reading the composer takes care: the `❯` line normally carries ghost/auto-suggest text, so "there's text on the
+prompt line" cannot distinguish a genuinely pending unsent prompt from ghost text. The discriminators are the
+multi-line prompt sitting above the separator and the token counter, not the `❯` line's contents.
+
+Only once you have reached state 3 *and* the counter is climbing do you report "executor running". Two pane
+captures is the whole cost in the common case.
+
+This is written concretely for the tmux/Claude-launcher path, where the race lives. The contract behind it is
+substrate-neutral — some mechanical proof the brief was actually accepted and the executor is doing work — and
+the Codex path carries its own form of it in the `verify-bootstrap` receipt above.
+
 **Reap your own design worktree — right after kickoff (automated-researcher#532).** If this design session is
 running in a dedicated worktree (your instance's convention for giving a design-experiment session its own
 working dir, distinct from the shared checkout — mirroring the executor's own dedicated dir just above), it
@@ -490,6 +526,20 @@ For the session-wedge duty, arm at dispatch, in this order:
    without anyone noticing. Any substrate with a background shell can run the equivalent loop.)
 2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection.** Read each executor's pane and judge
    advancing-vs-frozen against your previous read — the discrimination a model-free probe (#172) cannot make.
+   **The FIRST tick asks one extra question of every supervised pane before any advancing-vs-frozen judgment:
+   did the kickoff ever land at all?** (#659 — a race that slipped past the dispatcher then costs one heartbeat
+   interval instead of the researcher's attention.) Key it on the **never-started signature**, which is durable
+   at this distance from kickoff: the token counter still at **0** — nothing has ever been consumed — together
+   with the kickoff still pending in the composer or an unanswered startup/permission prompt still on screen.
+   Remedy it the way the kickoff step does: **answer a modal deliberately, bare Enter for a pending composer**,
+   never the text nudge below (which would append to the still-pending prompt). Do **NOT** reuse the kickoff
+   step's *climbing*-counter test here: 45–60 min in, a correctly running executor legitimately shows a static
+   counter — mid-tool-call, waiting on a long job, sitting at a question, or simply finished — so demanding
+   "increasing" would misread all of those as an unsent kickoff, poke healthy sessions, and short-circuit the
+   wedge assessment this tick exists to make. No never-started signature → fall straight through to the
+   advancing-vs-frozen judgment below, which is what a static counter is actually diagnosed by. Put this
+   instruction in the heartbeat prompt itself — including the dispatched-watchdog variant in 3 below, which has
+   no memory of the kickoff.
    Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
    it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
    unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several

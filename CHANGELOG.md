@@ -1,3 +1,23 @@
+- experiment-lifecycle 0.3.84 (2026-08-02): makes `design-experiment` prove the kickoff actually SUBMITTED
+  before dispatch counts as done (#659). A real dispatch's tmux `send-keys <prompt> Enter` raced the fresh
+  executor session's startup prompts, the Enter got consumed, the kickoff sat unsent in the input box, and the
+  executor idled at 0 tokens for ~15 minutes until the researcher — not any machinery — noticed. Step 4's
+  kickoff paragraph now makes dispatch conditional on a post-send pane capture that is CLASSIFIED before it is
+  acted on, because a receipt is only valid at the moment it is read and a remedy is only valid for the state
+  actually on screen: a startup/permission/choice prompt still up is answered deliberately (never with a blind
+  Enter, which would accept whatever default is highlighted — the same keystroke-eating modal that caused the
+  incident); a kickoff still pending in the composer with nothing modal in front of it gets the bare Enter
+  (idempotent only in exactly that state); a clear composer then has to show the token counter greater than 0
+  AND increasing across two reads seconds apart before "executor running" is reported. A casual `❯`-line read
+  can't tell a pending unsent prompt from the ghost/auto-suggest text that normally sits there, so the
+  discriminators are named explicitly. The designer heartbeat's first tick inherits the *question* but not the
+  cold-start test: 45–60 min in, a correctly running executor legitimately shows a static counter (mid-tool,
+  waiting, at a question, or finished), so the tick keys on the durable never-started signature — counter
+  still at 0 with the kickoff pending or a modal unanswered — and otherwise falls straight through to its
+  advancing-vs-frozen judgment. Carried into the dispatched-watchdog variant, which has no memory of the
+  kickoff. Cost is two pane captures; written concretely for the tmux/Claude-launcher path where the race
+  lives, with the substrate-neutral contract named (the Codex path's own form is #628's `verify-bootstrap`
+  receipt). Docs only — no script or record-format changes.
 - experiment-lifecycle 0.3.83 (2026-08-02): the Claude-side designer heartbeat must be a standing cron, armed by
   explicitly invoking the loop skill (`/loop 45m …` → `CronCreate`), never a `ScheduleWakeup` dynamic wakeup
   (#658). At the `depv1-negemo-dose-response-1` dispatch (2026-08-02) a designer armed the 45-60 min session-wedge
