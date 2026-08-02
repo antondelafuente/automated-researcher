@@ -40,6 +40,11 @@
 # dir that the .gitignore excluded is printed and BLOCKS; pass --skip-ignored to acknowledge and proceed
 # when the exclusion really is an intentional R2-scale one.
 #
+# Staging copy (#666): the worktree is populated with ONLY the files that could actually be committed — the
+# --only allowlist and the BASE tree's ignore rules are both applied BEFORE any bytes move, so a gitignored
+# multi-GB tree that can never be committed is never copied into /tmp (it used to be, and a landing died
+# with ENOSPC whenever free disk was smaller than the whole input dir). See copy_stage_paths.
+#
 # Config (instance, env-overridable; NO instance defaults — fail closed):
 #   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
 #                                    Env is the OVERRIDE; if unset it is bridged from the instance profile's
@@ -415,8 +420,12 @@ esac
 # Used by BOTH the --dry-run gate and the real push path, so the SCANNED tree IS the COMMITTED tree — there is
 # no working-tree-vs-index or stale-base skew between what we scan and what we push. cleanup + trap are armed
 # before the first worktree creation on either path.
-WT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it
+WT=""; WT_PARENT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it
+# WT_PARENT — the mktemp dir holding the worktree AND copy_stage_paths' path lists (#666) — is rm -rf'd by
+# NAME, so stage_worktree validates it is a real, non-empty path before assigning it: an empty value here
+# would turn the line below into an `rm -rf /`.
 cleanup() { [ -n "$WT" ] && git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
+            [ -n "$WT_PARENT" ] && rm -rf "$WT_PARENT" >/dev/null 2>&1 || true
             [ "$CREATED_BRANCH" = 1 ] && git -C "$REPO_ROOT" branch -D "$BRANCH" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -478,14 +487,13 @@ check_excluded_claim() {
     done
   done
 }
-# check_ignored_files (#340): MUST be called AFTER `git add -- "$REL"` in the worktree. Lists any file under
-# $REL that the BASE tree's .gitignore excluded from the just-staged set (`git ls-files --others --ignored
-# --exclude-standard`, NOT `git status`, which collapses a wholly-ignored directory to a single `!! dir/`
-# entry and so would only ever surface the directory's own basename — silently missing every filename inside
-# it against check_excluded_claim's per-file prose check below). `ls-files` walks INTO an ignored directory
-# and lists each file individually, NUL-delimited for the same path-safety reason secret_scan reads paths raw
-# — see its comment; this also means an ignored SYMLINK is caught the same as a regular file, and a
-# non-ASCII path is never git-quoted into a mismatch. A silent exclusion is fine for a genuine R2-scale
+# check_ignored_files (#340): MUST be called AFTER `git add -- "$REL"` in the worktree (check_excluded_claim
+# below reads the staged set). Reports any file under STAGE_PATHS that the BASE tree's ignore rules excluded
+# from the staged set — the list copy_stage_paths already computed, per-file (an ignored DIRECTORY is
+# enumerated as each file inside it, never collapsed to the directory's own basename, which would silently
+# miss every filename inside it against check_excluded_claim's per-file prose check below), covering an
+# ignored SYMLINK the same as a regular file, and carrying raw byte paths so a non-ASCII path is never
+# quoted into a mismatch. A silent exclusion is fine for a genuine R2-scale
 # artifact but not for a small pinned file sharing the ignored extension (the #340 incident) — BLOCK by
 # default and print the list, unless the caller passed --skip-ignored to explicitly acknowledge the exclusion
 # is intentional. #331's check_excluded_claim reuses this SAME excluded-file list (rather than re-deriving it
@@ -493,10 +501,10 @@ check_excluded_claim() {
 # claiming an excluded file is committed.
 check_ignored_files() {
   local path; local -a hits=()
-  while IFS= read -r -d '' path; do
+  for path in "${IGNORED_UNDER_STAGE[@]}"; do
     is_trivial_ignore "$path" && continue
     hits+=("$path")
-  done < <(git -C "$WT" ls-files --others --ignored --exclude-standard -z -- "${STAGE_PATHS[@]}")
+  done
   [ "${#hits[@]}" -eq 0 ] && return 0
   note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
   printf '  %s\n' "${hits[@]}" >&2
@@ -507,24 +515,87 @@ check_ignored_files() {
   fi
   die "$KIND has gitignored file(s) excluded from the staged commit (listed above) — if this is an intentional R2-scale exclusion, re-run with --skip-ignored; if any of these should have been committed (e.g. a small pinned instrument file sharing an ignored extension), fix the .gitignore or rename/relocate the file, then retry — NOTE: a per-branch 'git add -f' does NOT make a file survive this staging step (this worktree is fresh off origin/$BASE_BRANCH and stages with a plain 'git add'); see run-experiment's SKILL.md R2-vs-git guidance for the rename-to-a-non-ignored-extension fix (automated-researcher#553)"
 }
+# copy_stage_paths (#666): populate the fresh worktree with ONLY the files under STAGE_PATHS that the BASE
+# tree's ignore rules do not exclude — i.e. exactly the set the `git add` below could stage — and record the
+# excluded ones in IGNORED_UNDER_STAGE for check_ignored_files.
+#
+# This used to be a blanket `cp -r "$DIR" …`: the ENTIRE input dir was copied into the /tmp worktree BEFORE
+# either --only or .gitignore was applied, so a gitignored multi-GB tree that can never be committed (the
+# reported case: a 35G `dashboard/build/` sitting next to the three small source files --only named) was
+# copied anyway and the landing died with ENOSPC whenever free disk was smaller than the input dir. The only
+# workaround was moving that tree aside and back — a footgun when it also serves live traffic. Both filters
+# now apply BEFORE any bytes move, so the staging copy costs what the commit costs, not what the dir weighs.
+#
+# The excluded set is ENUMERATED here rather than discovered after the fact: `git ls-files --others
+# --ignored` (what check_ignored_files used to call) can only ever report files PRESENT in the worktree, so
+# not copying them would have silently turned the #340/#331 guard into a no-op. `git check-ignore` answers
+# the same question for paths that were never copied, in the same worktree — same index, same .gitignore /
+# exclude files, and the same tracked-file exemption `git add` honors — so the guard's list is the one
+# ls-files produced, minus the copy of the bytes. Ignore rules match a file INSIDE an ignored directory too,
+# so a wholly-ignored tree is still enumerated file-by-file, which is what check_excluded_claim needs.
+declare -a IGNORED_UNDER_STAGE=()
+copy_stage_paths() {
+  local cand ign copy rc=0 p
+  cand="$WT_PARENT/stage-candidates"; ign="$WT_PARENT/stage-ignored"; copy="$WT_PARENT/stage-copy"
+  local -a roots=()
+  for p in "${STAGE_PATHS[@]}"; do roots+=("$REPO_ROOT/$p"); done
+  # Absolute roots (so find never reads a leading '-' in a path as an option), stripped back to the
+  # repo-root-relative form check-ignore, `git add` and the guard's printed list all use. `-P` (find's
+  # default) NEVER follows a symlink, so a symlinked file or dir is listed as ITSELF and copied verbatim
+  # below: --only stages exactly the path you name (#586) and symlink_scan still wholesale-BLOCKs it (#416).
+  # Only regular files and symlinks are listed — git can stage nothing else, and an empty directory is not
+  # representable in a commit. NUL-delimited throughout for the same path-safety reason secret_scan reads
+  # paths raw; `LC_ALL=C sort -z` makes both the copy and the guard's printed list deterministic byte order.
+  find "${roots[@]}" \( -type f -o -type l \) -print0 \
+    | while IFS= read -r -d '' p; do printf '%s\0' "${p#"$REPO_ROOT/"}"; done \
+    | LC_ALL=C sort -z > "$cand" || die "could not enumerate the files under $REL to stage"
+  # check-ignore exits 1 when NOTHING matched (not an error) and >1 on a real failure — fail closed on the
+  # latter rather than staging against an empty excluded-file list the #340 guard would then read as clean.
+  git -C "$WT" check-ignore -z --stdin < "$cand" > "$ign" || rc=$?
+  [ "$rc" -le 1 ] || die "internal: git check-ignore failed in the staging worktree (exit $rc) — refusing to stage without a trustworthy gitignore verdict"
+  local -A ignored=()
+  while IFS= read -r -d '' p; do ignored["$p"]=1; IGNORED_UNDER_STAGE+=("$p"); done < "$ign"
+  while IFS= read -r -d '' p; do
+    if [ -z "${ignored["$p"]:-}" ]; then printf '%s\0' "$p"; fi
+  done < "$cand" > "$copy"
+  # `cp --parents` recreates each file's directory chain under $WT; -P keeps a symlink a symlink (never
+  # dereferenced — see above). xargs batches, so this is a handful of execs, not one per file.
+  ( cd "$REPO_ROOT" && xargs -0 -r cp -P --parents -t "$WT" -- ) < "$copy" \
+    || die "could not copy the staged set into the staging worktree under $WT_PARENT (out of disk?)"
+}
 stage_worktree() {
   git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$BRANCH" && die "local branch $BRANCH already exists (a prior run may have failed) — remove it and retry"
   git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH^{commit}" >/dev/null 2>&1 \
     || die "no origin/$BASE_BRANCH ref to base the log on — fetch origin (or set LOG_EXPERIMENT_BASE_BRANCH)"
-  WT="$(mktemp -d)/wt"
+  WT_PARENT="$(mktemp -d)" || die "could not create a temp dir for the staging worktree"
+  [ -n "$WT_PARENT" ] && [ -d "$WT_PARENT" ] || { WT_PARENT=""; die "internal: mktemp -d returned an empty/non-existent path — refusing to stage (cleanup rm -rf's this dir by name)"; }
+  WT="$WT_PARENT/wt"
   git -C "$REPO_ROOT" worktree add -q -b "$BRANCH" "$WT" "origin/$BASE_BRANCH" || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
   CREATED_BRANCH=1
-  mkdir -p "$WT/$(dirname "$REL")"
-  cp -r "$DIR" "$WT/$(dirname "$REL")/"
-  # STAGE_PATHS is "$REL" (the whole dir) unless --only narrowed it (#374) — either way this `git add` also
-  # respects the BASE tree's .gitignore (large artifacts stay on R2). Anything under $DIR NOT named by
-  # STAGE_PATHS was copied into $WT above (for a possible sibling reference) but is never `git add`-ed, so it
-  # can never be staged/committed/pushed — it is discarded with the rest of $WT on cleanup.
-  # `|| true`: unlike adding a whole directory (which silently SKIPS any ignored entry inside it, exit 0),
-  # `git add` given an EXPLICITLY-named ignored pathspec (only reachable via --only) still adds every OTHER
-  # named path but exits 1 for the ignored one — under `set -e` that would kill the script here, before
-  # check_ignored_files (next line) gets to run its own, better-messaged detection of exactly this drop.
-  git -C "$WT" add -- "${STAGE_PATHS[@]}" || true
+  copy_stage_paths
+  # STAGE_PATHS is "$REL" (the whole dir) unless --only narrowed it (#374) — either way this `git add` sees
+  # only the copy_stage_paths subset, so anything the BASE tree's .gitignore excludes (large artifacts stay
+  # on R2) or that --only left out is never staged/committed/pushed, exactly as before; it is now simply
+  # never copied either (#666). Pathspecs, not the file list, so a file DELETED from $DIR since the last
+  # land still stages its deletion (secret_scan handles that staged-deletion case).
+  # Drop any pathspec that now resolves to NOTHING — neither present in the worktree nor known to the index.
+  # `git add` aborts the WHOLE invocation on an unmatched pathspec, which would drop the co-named good paths
+  # with it; the only way to get one is `--only` naming a wholly-gitignored path, which the old copy handed
+  # to `git add` as a present-but-ignored file: git skipped exactly that path (exit 1, hence the `|| true`
+  # below) and staged the rest, then check_ignored_files reported the drop. Filtering here reproduces that —
+  # same rest staged, and the ignored path is still in IGNORED_UNDER_STAGE for the guard.
+  local -a add_paths=(); local sp
+  for sp in "${STAGE_PATHS[@]}"; do
+    if [ -e "$WT/$sp" ] || [ -L "$WT/$sp" ] || git -C "$WT" ls-files --error-unmatch -- "$sp" >/dev/null 2>&1; then
+      add_paths+=("$sp")
+    fi
+  done
+  # `|| true` is a residual belt: `git add` given an EXPLICITLY-named ignored pathspec (only reachable via
+  # --only) adds every OTHER named path but exits 1 for the ignored one, which is what the old
+  # copy-everything-then-add path routinely hit. Nothing ignored is copied in now, so that exit should no
+  # longer be reachable — but ANY nonzero here must still not kill the script under `set -e` before
+  # check_ignored_files (next line) gets to run its own, better-messaged detection of exactly what dropped.
+  [ "${#add_paths[@]}" -eq 0 ] || git -C "$WT" add -- "${add_paths[@]}" || true
   check_ignored_files                                 # #340: BLOCK on a non-trivial file the .gitignore silently dropped
   # `if` (not `… && die`): as the last statement of this function, a bare `diff --quiet` returning 1 (the
   # normal has-a-diff case) would make the function return 1 and trip `set -e` in the caller.

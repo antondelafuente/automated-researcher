@@ -506,5 +506,43 @@ printf 'a fresh clean note, no handoff scratch\n' > "$T/reg/note/note40.md"
 if run_dry "$T/reg/note"; then pass "clean note with no TEMP.md logs fine"; else fail "clean note BLOCKED (regression): $LAST_ERR"; fi
 rm -rf "$T"
 
+# #666 (cases 41-43): the staging copy must apply BOTH filters — the BASE tree's ignore rules and the --only
+# allowlist — BEFORE any bytes move, so a gitignored multi-GB tree that can never be committed is never
+# copied into the /tmp worktree (the reported ENOSPC landing: a 35G `dashboard/build/` copied alongside the
+# three small source files --only named). The fixtures prove "never copied" behaviorally, without needing a
+# multi-GB tree or a full disk: a file the copy MUST NOT touch is made unreadable (mode 000), which the old
+# blanket `cp -r "$DIR"` died on and a copy that skips the path cannot notice. NOTE: mode 000 does not stop
+# root, so these cases only DISCRIMINATE when the smoke runs unprivileged (as it does on CI and on a dev
+# box); as root they still assert the correct end state, just without reproducing the old failure.
+echo "[smoke] case 41: a gitignored subtree the copy must never touch (unreadable file inside it) -> BLOCK listing the file, not a copy failure (#666: enumerated for the #340 guard without being copied)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/build/'
+printf 'notes\n' > "$T/reg/note/note41.md"                      # a normal new file — stages fine
+mkdir -p "$T/reg/note/build/deep"
+printf 'bundle\n' > "$T/reg/note/build/deep/bundle.js"          # inside a WHOLLY-ignored dir; never committable
+chmod 000 "$T/reg/note/build/deep/bundle.js"
+if run_dry "$T/reg/note"; then fail "gitignored subtree was NOT flagged by the #340 guard (#666 regression: enumeration lost with the copy)"; else
+  case "$LAST_ERR" in *"gitignored file"*"reg/note/build/deep/bundle.js"*) pass "gitignored subtree enumerated per-file for the guard without being copied";;
+    *) fail "blocked, but not on the ignored-file guard (the copy likely still touched the ignored subtree): $LAST_ERR";; esac; fi
+chmod 644 "$T/reg/note/build/deep/bundle.js"; rm -rf "$T"
+
+echo "[smoke] case 42: same gitignored subtree, with --skip-ignored -> PASS (the landing no longer costs a copy of a tree it can never commit — the ENOSPC incident)"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'reg/note/build/'
+printf 'notes\n' > "$T/reg/note/note42.md"
+mkdir -p "$T/reg/note/build/deep"
+printf 'bundle\n' > "$T/reg/note/build/deep/bundle.js"
+chmod 000 "$T/reg/note/build/deep/bundle.js"
+if run_dry "$T/reg/note" --skip-ignored; then pass "log proceeds without ever reading the gitignored subtree";
+else fail "acknowledged gitignored subtree still failed the log (the copy touched it): $LAST_ERR"; fi
+chmod 644 "$T/reg/note/build/deep/bundle.js"; rm -rf "$T"
+
+echo "[smoke] case 43: --only names one clean file; a co-tenant's (non-ignored) file the allowlist leaves out is never copied either -> PASS (#666: --only applies BEFORE the copy, not after)"
+T=$(mktemp_d); make_repo "$T"
+printf 'my page\n' > "$T/reg/note/mine43.html"
+printf 'co-tenant build output\n' > "$T/reg/note/cotenant43.bin"
+chmod 000 "$T/reg/note/cotenant43.bin"
+if run_dry "$T/reg/note" --only mine43.html; then pass "--only narrows the copy itself; the co-tenant's file is never read";
+else fail "--only run failed on a co-tenant file it never stages (copied before filtering): $LAST_ERR"; fi
+chmod 644 "$T/reg/note/cotenant43.bin"; rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi

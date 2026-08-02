@@ -56,6 +56,13 @@ experiment/design-stage gates read their audit/design evidence straight from the
 allowlisted staged set, so narrowing there is refused rather than risk approving evidence that never actually
 lands in the commit.
 
+Staging into that worktree copies **only what could actually be committed**: both the `--only` allowlist and
+the research repo's `.gitignore` are applied *before* any bytes move, so a gitignored multi-GB tree living in
+the dir (a `dashboard/build/`) never costs a copy of itself in `/tmp`. It used to, and a landing failed with
+`No space left on device` whenever free disk was smaller than the whole input dir — even when `--only` named
+three small source files (#666). The ignored-file guard below still reports every excluded file by name; it
+just no longer needs them copied in to see them.
+
 The driver **classifies by the registry convention** (no label needed):
 
 | the dir has… | classified as | gate |
@@ -114,8 +121,8 @@ A plain `git add` silently drops anything the research repo's `.gitignore` match
 artifacts (see Composes below), but a small **pinned** file (e.g. a frozen instrument the `DESIGN.md`
 declares "committed with this design") can share the same ignored extension and vanish with no trace: the PR
 still opens and merges, looking complete, while a dispatched brief ends up referencing an input that was
-never actually landed. After staging, the driver diffs "files present in the dir" against "files actually
-staged": any non-trivial excluded file (well-known junk like `.DS_Store`/`__pycache__`/`*.pyc` is filtered
+never actually landed. The driver diffs "files present in the dir" against "files the ignore rules allow to
+stage": any non-trivial excluded file (well-known junk like `.DS_Store`/`__pycache__`/`*.pyc` is filtered
 out) is printed and **BLOCKS**. If the exclusion really is an intentional R2-scale one, re-run with
 `--skip-ignored` to acknowledge and proceed; otherwise fix the `.gitignore` or rename/relocate the file so it
 lands, then retry. Applies to every kind (experiment/design-stage/note) — the underlying `git add` behavior
