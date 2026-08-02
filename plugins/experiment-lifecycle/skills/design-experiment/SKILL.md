@@ -485,21 +485,35 @@ For the session-wedge duty, arm at dispatch, in this order:
 1. **An event-driven shell monitor per executor pane — zero model turns while healthy.** A detached shell watcher
    polling the pane text (e.g. `tmux capture-pane -t run-<exp> -p | tail -5`) for the terminal transitions — the
    executor's DONE/BLOCKED line, or the pane gone — delivering one notification turn to whoever holds the heartbeat
-   duty when it fires; stop it when the run is reaped. (Claude Code: the harness `Monitor` primitive — visible,
-   cancellable harness machinery, not an ad-hoc background sleep-loop the harness can kill without anyone noticing.
-   Any substrate with a background shell can run the equivalent loop.)
+   duty when it fires; **record its id**; stop it when the run is reaped. (Claude Code: the harness `Monitor`
+   primitive — visible, cancellable harness machinery, not an ad-hoc background sleep-loop the harness can kill
+   without anyone noticing. Any substrate with a background shell can run the equivalent loop.)
 2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection.** Read each executor's pane and judge
    advancing-vs-frozen against your previous read — the discrimination a model-free probe (#172) cannot make.
    Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
    it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
    unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several
-   executors → ONE merged heartbeat over all their panes, never one loop per run.** (Claude Code: `/loop 45m`; a
-   **Codex** designer still has no periodic-reinvocation primitive today, so run this heartbeat as an ad hoc / manual
+   executors → ONE merged heartbeat over all their panes, never one loop per run.** (A **Codex** designer still has
+   no periodic-reinvocation primitive today, so run this heartbeat as an ad hoc / manual
    check at the same 45-60 min cadence — read the executor's pane/log tail and the run-supervision record's `status`
    only, never the full design conversation, and do NOT block dispatch on this being automated away. A real
    load-bearing question from the executor arrives through the durable question/answer inbox on the run-supervision
    record — `has-question`/`answer-question` — not only through pane text, so this cadence check should also poll
    that. See `references/CODEX_SUPERVISION.md` in `run-experiment` for the full contract, #223.)
+
+   > **Claude Code implementation — invoke the loop skill; never a `ScheduleWakeup` chain
+   > (automated-researcher#658).** Arm this layer by explicitly invoking the loop skill (`/loop 45m <heartbeat
+   > prompt>`), which registers a **standing cron** (`CronCreate`): it fires until deleted or expired, with no
+   > per-tick re-arm step to lose. **Record the returned cron job id** with your dispatch notes, and delete the
+   > job when the run is reaped. Do **NOT** implement this duty as a `ScheduleWakeup` dynamic wakeup: those are
+   > self-re-arming chains where each firing must schedule the next, so one broken link — an interrupted turn, a
+   > user message consuming the turn before the re-arm — ends supervision **silently**. That is a measured
+   > incident, not a hypothetical (2026-08-02, the `depv1-negemo-dose-response-1` dispatch): the pending wakeup
+   > vanished during interactive churn, no heartbeat was live for ~40 minutes, and only the researcher noticing
+   > surfaced it. Nobody watches the watcher (exactly one supervision level — see 3 below), so this failure mode
+   > has no backstop. Other substrates with a scheduling primitive: same rule — a standing schedule, never a
+   > self-re-arming chain.
+
 3. **Designer context known-large → dispatch the heartbeat to a separate small session (optional).** The heartbeat
    needs ~2k tokens (pane text + the rubric above) but a loop in the designer session executes with the whole
    designer history, re-cached cold on every tick. The dispatched watchdog is spawned at kickoff with the list of
@@ -507,6 +521,17 @@ For the session-wedge duty, arm at dispatch, in this order:
    escalates real problems), and terminates when every supervised run reports DONE or is reaped. It is the
    designer's *delegated* watch, not a new level: nobody watches the watchdog — exactly **one** supervision level,
    as always (the launcher watches the executor; nobody watches the launcher; two nested failures is out of scope).
+
+**"Supervision armed" is a checkable state, not a claim (automated-researcher#658).** On a substrate with a
+scheduling primitive, dispatch is not complete until BOTH layers demonstrably exist and both ids are recorded with
+the dispatch notes: the per-pane monitor (1) and the heartbeat cron (2). Verify against the substrate's own listing
+rather than your memory of having armed them — Claude Code: `CronList` for the heartbeat job id, `TaskList` for the
+monitor — so a retro can check supervision mechanically instead of trusting prose. Either one missing = go arm it
+before calling dispatch done. If you delegated the heartbeat to a separate watchdog session (3), that session owns
+the cron and reports its id back to you (a cron wakes only its creating session, so it is that session's `CronList`
+the id lives in) — what you record is unchanged. A substrate with no scheduling primitive (Codex today) has no cron
+id to record: say so explicitly at dispatch and fall back to its documented manual cadence above, rather than
+reporting supervision armed on the strength of the monitor alone.
 
 **Context hygiene while supervising:** route bulk reads (RESULTS.md, screenshots, long logs) through subagents/forks
 during supervision phases — context accumulated while babysitting is rent paid on every future turn of the designer
