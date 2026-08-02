@@ -109,8 +109,9 @@ question/answer inbox:
 (automated-researcher#664).** An answer is expected *from the designer*, under the two-check rule
 `design-experiment`'s designer-of-record duties define: if the answer stays inside the already-cleared cost envelope
 AND does not change what is being measured (the question, the arms, the metric — what the numbers will mean), the
-designer decides, records the decision durably (this record, or an amendment note on the experiment's registry
-record), and reports it to the researcher after the fact. Only a question that fails one of those two checks —
+designer decides, records the decision durably (an amendment note on the experiment's registry record — this inbox is
+the transport, not the record: the answer text is cleared when the executor consumes it), and reports it to the
+researcher after the fact. Only a question that fails one of those two checks —
 design clearance, the Presentation lock, raising a cost ceiling, anything that alters the experiment's meaning —
 travels onward to the researcher. And a question whose answer is checkable from the records or the live state ("is X
 the baseline?", "does Y exist?") is never asked through this channel at all: whoever holds it verifies it directly.

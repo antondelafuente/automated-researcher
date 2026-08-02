@@ -13,7 +13,9 @@ watches your progress; talk to it with clear status lines.
 > measured; a question whose answer is checkable from the records or the live state is not a question, so verify it
 > yourself instead of routing it anywhere. That routing governs every escalation in this brief however the individual
 > line is worded — anything telling you to notify, gate on, or get clearance from "the human" or "the researcher"
-> means the designer-of-record unless it is a budget or meaning change. The design is locked: execute per `DESIGN.md`,
+> means the designer-of-record unless it is a budget or meaning change. (An instance line requiring a *human's*
+> authorization for credentials, access, or destructive operations beyond this run's own compute is a trust gate, not
+> question routing — honor it as written.) The design is locked: execute per `DESIGN.md`,
 > collect the data it specifies and report it (the numbers / plot); do not redesign and do not pre-register a verdict —
 > interpretation is the researcher's separate step. Never dispatch `Agent(subagent_type: "fork")` for a narrow research
 > question — the fork inherits this whole disposition and can silently take on the executor role itself; do narrow

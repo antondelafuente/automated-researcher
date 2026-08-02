@@ -316,7 +316,9 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
   what is being measured; a question whose answer is checkable from the records or the live state is not a question,
   so verify it yourself instead of routing it anywhere. That routing governs every escalation in this brief however
   the individual line is worded — anything telling you to notify, gate on, or get clearance from "the human" or "the
-  researcher" means the designer-of-record unless it is a budget or meaning change. Never dispatch
+  researcher" means the designer-of-record unless it is a budget or meaning change. (An instance line requiring a
+  *human's* authorization for credentials, access, or destructive operations beyond this run's own compute is a trust
+  gate, not question routing — honor it as written.) Never dispatch
   `Agent(subagent_type: "fork")` for a narrow research question — the fork inherits this whole disposition and can
   silently take on the executor role itself; do narrow research inline or via a read-only, non-fork subagent
   instead (see `run-experiment`'s executor-disposition section for the incident and the full guardrail)."*
@@ -607,9 +609,10 @@ is DECIDE-RECORD-REPORT (automated-researcher#664).** When a question reaches yo
 1. **Does it stay inside the already-cleared budget / cost envelope?**
 2. **Does it change what is being measured** — the question, the arms, the metric; what the numbers will mean?
 
-**Both pass → you decide**, record the decision durably where the run's own record carries it (the run-supervision
-record, or an amendment note on the experiment's registry record — a decision that exists only in a chat turn is not
-recorded), and report it to the researcher **after the fact**. **Either check fails → forward to the researcher.**
+**Both pass → you decide**, record the decision durably where the run's own record carries it (an amendment note on
+the experiment's registry record — the run-supervision record's question/answer inbox is cleared by
+`consume-question` by design, so an answer that lived only there is not a record, and neither is a decision that
+exists only in a chat turn), and report it to the researcher **after the fact**. **Either check fails → forward to the researcher.**
 Researcher-owned and untouched by this: design clearance, the Presentation lock, raising any cost ceiling, and
 anything that alters the experiment's meaning — those are legitimate asks, and this default is not a reason to
 suppress them. What it eliminates is the *decidable* question: a bounded, invariant-preserving call you already have

@@ -56,7 +56,11 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   researcher is reached *through* them, for the two classes above and nothing else. A line that names "the human" or
   "the researcher" for anything else predates this rule: route it to the designer-of-record anyway, and note the
   stale wording in `GAPS` so the brief gets fixed. Reading such a line literally is exactly how the round-trip this
-  rule exists to remove comes back.
+  rule exists to remove comes back. **This closure re-routes *experiment* escalations — the load-bearing-gap classes
+  above. It never overrides an instance's own trust gates:** a line requiring a *human's* authorization for
+  credentials or secrets, access grants, or destructive/irreversible operations beyond the run's own disposable
+  compute is a live authorization boundary, not stale wording — honor it as written; that clearance is not the
+  designer-of-record's to give (trust gates stay fail-closed).
 - **A question whose answer is checkable is not a question — verify it.** "Is X the baseline?", "does that artifact
   exist?", "which commit is that pinned to?" — anything answerable from the records or the live state gets looked up
   by whoever is holding it, and is never routed anywhere. Forwarding a verifiable fact buys a round-trip of latency
