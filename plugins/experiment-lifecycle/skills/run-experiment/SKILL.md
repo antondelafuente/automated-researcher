@@ -33,14 +33,27 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
 - **Run to completion.** Do **not** end your turn until you hit a real blocker or you're done. **Stopping after planning
   is the failure mode** (real incident: a fresh executor planned, said "proceeding," then parked silently for hours).
   Plan briefly, then *execute* — don't narrate the next step and stop.
-- **Gaps — two kinds, and only one ever involves a human:**
+- **Gaps — two kinds, and only one ever routes up:**
   - **Mechanical / reversible gap** (a path to pick, a parameter the design didn't pin, a disk size): **pick a sensible
     default, record what you chose, and keep going.** No flag, no wait.
   - **Load-bearing gap** (changes the *method, the cost, or what the result means*): **do not guess — and do not idle-
     wait.** Notify the designer-of-record and **keep working on everything the gap doesn't block.** Only if the gap
     blocks the *whole* run do you stop — and then **TEAR DOWN THE COMPUTE FIRST** (a blocked run bills the same as a
-    completed one — see tear-down-on-block in the close), record the blocker, ping the human, and clear the now-pointless
-    self-wake. **Never leave blocked compute billing while you wait for a decision.**
+    completed one — see tear-down-on-block in the close), record the blocker, ping the designer-of-record, and clear
+    the now-pointless self-wake. **Never leave blocked compute billing while you wait for a decision.**
+- **Question routing: your questions terminate at the designer-of-record, not the researcher
+  (automated-researcher#664).** Every load-bearing flag goes to the designer-of-record named in `START.md` — through
+  the durable question/answer inbox where your instance uses one (`ask-question` / `has-answer` / `consume-question`
+  on the run-supervision record, `references/CODEX_SUPERVISION.md` §3), otherwise however the brief says to reach
+  them. That channel is a line to the **designer**, not a relay to the researcher: the designer is expected to
+  *answer* it under the two-check rule (does the answer stay inside the already-cleared cost envelope, and does it
+  change what is being measured?), forwarding only what fails one of those checks. So route up and keep working —
+  you flag, you do not rule, and you do not address the researcher over the designer's head. (The designer's side of
+  this is `design-experiment`'s designer-of-record duties.)
+- **A question whose answer is checkable is not a question — verify it.** "Is X the baseline?", "does that artifact
+  exist?", "which commit is that pinned to?" — anything answerable from the records or the live state gets looked up
+  by whoever is holding it, and is never routed anywhere. Forwarding a verifiable fact buys a round-trip of latency
+  and nothing the records didn't already say.
 - **The design is locked — don't redesign.** Collect + report the data `DESIGN.md` specifies (the numbers / the plot);
   don't pre-register a verdict — interpretation is the researcher's separate step. If you think the design is wrong, that's
   a load-bearing flag to the designer-of-record, not a unilateral change.
@@ -67,8 +80,9 @@ paths, scripts to adapt, cost ceiling, designer-of-record, and the execution-pro
 **Work the `CHECKLIST` as you go — it's the forcing function, not optional.** Resolve every `[BLOCK]` gate to exactly
 one end-state with EVIDENCE (an artifact path + numbers, never a bare ✓): **☑ PASS** / **☑ N.A. ev: <why>** / **☒ FAIL
 ev: <what failed>**. A `[BLOCK]` gate is **un-passable without evidence** — a 2-sample smoke is NOT evidence for a
-full-pool data gate. A **FAIL blocks continuation** and is a load-bearing flag (notify the human; proceed only if they
-clear a changed method); **keep the FAIL recorded** — the FAIL→fix→PASS history is the validity trail. Fill the `GAPS`
+full-pool data gate. A **FAIL blocks continuation** and is a load-bearing flag (notify the designer-of-record and
+proceed only once they clear it — and a *changed method* changes what the numbers mean, so that clearance is the
+researcher's to give, not theirs); **keep the FAIL recorded** — the FAIL→fix→PASS history is the validity trail. Fill the `GAPS`
 section as you go. Commit `CHECKLIST.md` at close — the cross-family close audit verifies it against the artifacts.
 
 **The single most common faceplant:** freshly-acquired compute has your *identity* only — it does **NOT** have the
@@ -911,7 +925,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Reap your session at a clean close** — symmetric with pod-teardown: the finished executor frees its own process as
   the terminal action (`reap_session.sh`), only on a clean `close`, via the self-only instance seam. A parked/blocked
   run keeps its session for resume; no seam configured is a no-op.
-- **Don't redesign** — the brief is locked; design questions go to the designer-of-record.
+- **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to
+  the researcher), and a question you can check from the records or the live state you answer yourself.
 
 ## Reference
 
