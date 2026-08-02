@@ -1,3 +1,16 @@
+- experiment-lifecycle 0.3.83 (2026-08-02): the Claude-side designer heartbeat must be a standing cron, armed by
+  explicitly invoking the loop skill (`/loop 45m …` → `CronCreate`), never a `ScheduleWakeup` dynamic wakeup
+  (#658). At the `depv1-negemo-dose-response-1` dispatch (2026-08-02) a designer armed the 45-60 min session-wedge
+  heartbeat as a ScheduleWakeup chain; those are self-re-arming — each firing must schedule the next — so one
+  broken link during interactive churn ended supervision silently, leaving ~40 minutes unwatched until the
+  researcher noticed. Nobody watches the watcher, so the failure had no backstop. `design-experiment`'s "Arm
+  designer-side supervision" step now names the loop skill prescriptively, forbids the ScheduleWakeup
+  implementation with the incident as the why, requires the returned cron job id (and the pane monitor's id) to be
+  recorded, and defines **"supervision armed" as a checkable state** — both layers verified against `CronList` /
+  `TaskList` before dispatch is called complete, so a retro can check it mechanically instead of trusting prose.
+  Claude substrate only: Codex has no periodic-reinvocation primitive, so its documented ad-hoc cadence
+  (`CODEX_SUPERVISION.md`) is unchanged, and it records no cron id — it says so explicitly instead. Doc-only; no
+  script or record-format changes.
 - experiment-lifecycle 0.3.82 (2026-07-25): makes the Codex-native coordination surface capability-detected and
   the dispatched executor visible to the researcher (#637). A real dispatch created an app-visible child task
   (Codex Desktop **Subagents**, chattable, full executor context preserved) but never told the researcher its
