@@ -33,14 +33,38 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
 - **Run to completion.** Do **not** end your turn until you hit a real blocker or you're done. **Stopping after planning
   is the failure mode** (real incident: a fresh executor planned, said "proceeding," then parked silently for hours).
   Plan briefly, then *execute* — don't narrate the next step and stop.
-- **Gaps — two kinds, and only one ever involves a human:**
+- **Gaps — two kinds, and only one ever routes up:**
   - **Mechanical / reversible gap** (a path to pick, a parameter the design didn't pin, a disk size): **pick a sensible
     default, record what you chose, and keep going.** No flag, no wait.
   - **Load-bearing gap** (changes the *method, the cost, or what the result means*): **do not guess — and do not idle-
     wait.** Notify the designer-of-record and **keep working on everything the gap doesn't block.** Only if the gap
     blocks the *whole* run do you stop — and then **TEAR DOWN THE COMPUTE FIRST** (a blocked run bills the same as a
-    completed one — see tear-down-on-block in the close), record the blocker, ping the human, and clear the now-pointless
-    self-wake. **Never leave blocked compute billing while you wait for a decision.**
+    completed one — see tear-down-on-block in the close), record the blocker, ping the designer-of-record, and clear
+    the now-pointless self-wake. **Never leave blocked compute billing while you wait for a decision.**
+- **Question routing: your questions terminate at the designer-of-record, not the researcher
+  (automated-researcher#664).** Every load-bearing flag goes to the designer-of-record named in `START.md` — through
+  the durable question/answer inbox where your instance uses one (`ask-question` / `has-answer` / `consume-question`
+  on the run-supervision record, `references/CODEX_SUPERVISION.md` §3), otherwise however the brief says to reach
+  them. That channel is a line to the **designer**, not a relay to the researcher: the designer is expected to
+  *answer* it under the two-check rule (does the answer stay inside the already-cleared cost envelope, and does it
+  leave unchanged what is being measured?), forwarding only what fails one of those checks. So route up and keep
+  working — you flag, you do not rule, and you do not address the researcher over the designer's head. (The
+  designer's side of this is `design-experiment`'s designer-of-record duties.)
+- **That routing governs EVERY escalation you meet, however the individual line is worded.** Wherever anything you
+  work from — this skill, `START.md`, `CHECKLIST.md`, a driver comment, an instance recipe — tells you to notify
+  someone, gate on someone, or wait for clearance before proceeding, the recipient is the **designer-of-record**; the
+  researcher is reached *through* them, for the two classes above and nothing else. A line that names "the human" or
+  "the researcher" for anything else predates this rule: route it to the designer-of-record anyway, and note the
+  stale wording in `GAPS` so the brief gets fixed. Reading such a line literally is exactly how the round-trip this
+  rule exists to remove comes back. **This closure re-routes *experiment* escalations — the load-bearing-gap classes
+  above. It never overrides an instance's own trust gates:** a line requiring a *human's* authorization for
+  credentials or secrets, access grants, or destructive/irreversible operations beyond the run's own disposable
+  compute is a live authorization boundary, not stale wording — honor it as written; that clearance is not the
+  designer-of-record's to give (trust gates stay fail-closed).
+- **A question whose answer is checkable is not a question — verify it.** "Is X the baseline?", "does that artifact
+  exist?", "which commit is that pinned to?" — anything answerable from the records or the live state gets looked up
+  by whoever is holding it, and is never routed anywhere. Forwarding a verifiable fact buys a round-trip of latency
+  and nothing the records didn't already say.
 - **The design is locked — don't redesign.** Collect + report the data `DESIGN.md` specifies (the numbers / the plot);
   don't pre-register a verdict — interpretation is the researcher's separate step. If you think the design is wrong, that's
   a load-bearing flag to the designer-of-record, not a unilateral change.
@@ -67,8 +91,9 @@ paths, scripts to adapt, cost ceiling, designer-of-record, and the execution-pro
 **Work the `CHECKLIST` as you go — it's the forcing function, not optional.** Resolve every `[BLOCK]` gate to exactly
 one end-state with EVIDENCE (an artifact path + numbers, never a bare ✓): **☑ PASS** / **☑ N.A. ev: <why>** / **☒ FAIL
 ev: <what failed>**. A `[BLOCK]` gate is **un-passable without evidence** — a 2-sample smoke is NOT evidence for a
-full-pool data gate. A **FAIL blocks continuation** and is a load-bearing flag (notify the human; proceed only if they
-clear a changed method); **keep the FAIL recorded** — the FAIL→fix→PASS history is the validity trail. Fill the `GAPS`
+full-pool data gate. A **FAIL blocks continuation** and is a load-bearing flag (notify the designer-of-record and
+proceed only once they clear it — and a *changed method* changes what the numbers mean, so that clearance is the
+researcher's to give, not theirs); **keep the FAIL recorded** — the FAIL→fix→PASS history is the validity trail. Fill the `GAPS`
 section as you go. Commit `CHECKLIST.md` at close — the cross-family close audit verifies it against the artifacts.
 
 **The single most common faceplant:** freshly-acquired compute has your *identity* only — it does **NOT** have the
@@ -86,7 +111,7 @@ teardown backstop before you detach. The autonomous self-wake must, each tick: c
 **liveness** signal (compute busy = alive; idle AND not-done = hung), AND a **positive-progress** signal (a stage
 advancing / bytes growing — liveness alone can't tell working from a wedged hot-loop), plus the driver log for
 BLOCKED/errors; and it must honor a **look-again deadline** — a deadline quietly gone past with compute still billing is
-the signal you parked, so STOP re-waiting, diagnose, and notify the human.
+the signal you parked, so STOP re-waiting, diagnose, and notify the designer-of-record.
 
 **The same tick also owns the pod-lease heartbeat — refresh is not something to remember by hand.** The `gpu-job`
 lease's `expiry` is the SOLE deletion trigger the standing reaper enforces (the per-pod watchdog is retired, #266/
@@ -117,8 +142,8 @@ then:
   case below: do NOT refresh, surface loudly on the next wake.
 - **neither** (busy-but-not-progressing, hung, BLOCKED, or simply quiet with no active marker) → do **NOT**
   refresh. Don't let this pass silently: treat it like a look-again-deadline miss — surface it loudly on the
-  next wake (diagnose, notify the human) instead of quietly trusting the lease's existing expiry to eventually
-  reap it unattended.
+  next wake (diagnose, notify the designer-of-record) instead of quietly trusting the lease's existing expiry to
+  eventually reap it unattended.
 
 For an **autonomous detached run**, this is a capability requirement, not a best-effort preference. If your substrate
 cannot arm an independent recurring wake, do **not** silently substitute an in-process monitor and then park. Mark the
@@ -500,9 +525,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Tear-down-on-block:** a BLOCKED / errored run, OR a run stopped by an instrument/data/validity gate,
   tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it per
   the ledger-status definition above (a gate stop is not automatically `technical-failure`; teardown urgency
-  never depends on which) → **tear down (stop billing)** → notify the human → *then* discuss redesign. Do NOT
-  leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the agent asked what
-  to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
+  never depends on which) → **tear down (stop billing)** → notify the designer-of-record → *then* discuss
+  redesign. Do NOT leave blocked compute billing while you wait (a real incident billed ~8.7h / $76 because the
+  agent asked what to do first). The warm env is reproducible. **Only exception:** an explicit, expiry-stamped keepalive set
   for a concrete, named debugging reason.
 - **The completion boundary (the safety gate):** tear down only once the upload is **verified** — *every artifact unique
   to this run* (adapter, eval summaries, rollout/sample logs, **raw per-pod driver console logs**, not just their
@@ -850,8 +875,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   separate step; if RESULTS *does* assert a claim, state it at the level the design varied — upgrading a bundle-level
   contrast into a component attribution is overclaim — and separate conclusions from postdictions (fitted after — unverified).
 - **Cost / API discipline is your execution profile's policy** + the brief's ceiling. (Typically: GPU is cheap, run it
-  autonomously and tear down promptly; the LLM API is the real sink — gate big data-generation/judging runs with the
-  human before launching.)
+  autonomously and tear down promptly; the LLM API is the real sink — so *price* a big data-generation/judging pass
+  against that ceiling before launching it, rather than launching blind. Inside the cleared ceiling the estimate is
+  your clearance: launch, don't gate — the ceiling was already cleared with the researcher at design time, and
+  re-asking inside it is the round-trip question routing removes. An estimate that would cross it — the design's
+  notify ceiling where it sets one — IS a budget change, so it is a load-bearing flag to the designer-of-record, and
+  raising a ceiling is one of the few things they take onward to the researcher.)
 - **Pre-flight the judge key's balance before it runs dry, not after (#354).** A metered-API driver (an LLM judge,
   batch scoring) discovers depletion only via a runtime error burst if nobody checks first — a key that starts a
   judging pass at ~$0 balance, or one that gets topped up but at the run's real burn rate only buys 1-2 hours, both
@@ -911,7 +940,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Reap your session at a clean close** — symmetric with pod-teardown: the finished executor frees its own process as
   the terminal action (`reap_session.sh`), only on a clean `close`, via the self-only instance seam. A parked/blocked
   run keeps its session for resume; no seam configured is a no-op.
-- **Don't redesign** — the brief is locked; design questions go to the designer-of-record.
+- **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to
+  the researcher), and a question you can check from the records or the live state you answer yourself.
 
 ## Reference
 

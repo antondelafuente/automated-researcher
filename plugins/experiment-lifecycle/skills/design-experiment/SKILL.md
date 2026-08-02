@@ -310,8 +310,15 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
 - The **executor disposition** (verbatim — this is what makes the handoff work): *"You are an autonomous executor. Run
   this experiment to completion — do not end your turn until you hit a real blocker or you're done; stopping after
   planning is the failure mode. Mechanical/reversible gap → pick a sensible default, record it, keep going.
-  Load-bearing gap (changes method/cost/meaning) → notify the researcher and work AROUND it; only a gap that blocks the
-  whole run stops you, and then you notify + arm your self-wake — NEVER park silently. Never dispatch
+  Load-bearing gap (changes method/cost/meaning) → notify the designer-of-record and work AROUND it; only a gap that
+  blocks the whole run stops you, and then you notify + arm your self-wake — NEVER park silently. Your questions go to
+  the designer-of-record, not the researcher — they answer them, and escalate only what changes the cleared budget or
+  what is being measured; a question whose answer is checkable from the records or the live state is not a question,
+  so verify it yourself instead of routing it anywhere. That routing governs every escalation in this brief however
+  the individual line is worded — anything telling you to notify, gate on, or get clearance from "the human" or "the
+  researcher" means the designer-of-record unless it is a budget or meaning change. (An instance line requiring a
+  *human's* authorization for credentials, access, or destructive operations beyond this run's own compute is a trust
+  gate, not question routing — honor it as written.) Never dispatch
   `Agent(subagent_type: "fork")` for a narrow research question — the fork inherits this whole disposition and can
   silently take on the executor role itself; do narrow research inline or via a read-only, non-fork subagent
   instead (see `run-experiment`'s executor-disposition section for the incident and the full guardrail)."*
@@ -542,7 +549,9 @@ For the session-wedge duty, arm at dispatch, in this order:
    no memory of the kickoff.
    Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
    it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
-   unanswered in the pane, or any real problem → surface to the researcher with specifics. **Supervising several
+   unanswered in the pane, or any real problem → it lands on **you** as designer-of-record (a delegated watchdog
+   escalates to you, not past you): answer it under the decide-record-report rule below, and surface it to the
+   researcher with specifics only when one of that rule's two checks fails. **Supervising several
    executors → ONE merged heartbeat over all their panes, never one loop per run.** (A **Codex** designer still has
    no periodic-reinvocation primitive today, so run this heartbeat as an ad hoc / manual
    check at the same 45-60 min cadence — read the executor's pane/log tail and the run-supervision record's `status`
@@ -587,10 +596,37 @@ reporting supervision armed on the strength of the monitor alone.
 during supervision phases — context accumulated while babysitting is rent paid on every future turn of the designer
 session, including every heartbeat tick.
 
-**Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you), but you
-**do not drive it** mid-run (that defeats the self-sufficiency test) — you review at the synthesis pass. The heartbeat
-nudge above is bounded health supervision, not driving: it pokes an idle session back to life, it does not answer
-design questions or steer the method — a real question still routes back to you as a load-bearing flag, same as always.
+**Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you — through
+the durable question/answer inbox on the run-supervision record where the instance uses one,
+`has-question`/`answer-question`), but you **do not drive it** mid-run (that defeats the self-sufficiency test) — you
+review at the synthesis pass. The heartbeat nudge above is bounded health supervision, not driving: it pokes an idle
+session back to life, it does not answer design questions or steer the method — a real question still routes back to
+you as a load-bearing flag, same as always.
+
+**You are where the executor's questions TERMINATE, not a relay to the researcher — on an unattended run the default
+is DECIDE-RECORD-REPORT (automated-researcher#664).** When a question reaches you, apply two checks:
+
+1. **Does it stay inside the already-cleared budget / cost envelope?**
+2. **Does it leave unchanged what is being measured** — the question, the arms, the metric; what the numbers will mean? (A meaning-changing answer FAILS this check.)
+
+**Both pass → you decide**, record the decision durably where the run's own record carries it (an amendment note on
+the experiment's registry record — the run-supervision record's question/answer inbox is cleared by
+`consume-question` by design, so an answer that lived only there is not a record, and neither is a decision that
+exists only in a chat turn), and report it to the researcher **after the fact**. **Either check fails → forward to the researcher.**
+Researcher-owned and untouched by this: design clearance, the Presentation lock, raising any cost ceiling, and
+anything that alters the experiment's meaning — those are legitimate asks, and this default is not a reason to
+suppress them. What it eliminates is the *decidable* question: a bounded, invariant-preserving call you already have
+the judgment to make, sent up for approval anyway (2026-08-02/03, observed in both families — the same session, once
+told "make decisions as long as nothing changes drastically," immediately made the correct bounded call; it had the
+judgment, it lacked the license). Note what is deliberately **not** a condition here: "is it reversible or
+gate-protected?" Nearly everything in this pipeline is redoable at small dollar cost, so a reversibility clause just
+gets over-applied in the cautious direction — which is the failure mode this default exists to fix. The executor's
+own disposition is unchanged by all of this: mechanical/reversible gap → sensible default, record, keep going; bigger
+gap → route up and work around it. The executor flags; it does not rule.
+
+**A verifiable fact is never forwarded — and that binds you too.** A question whose answer is checkable from the
+records or the live state ("is X the baseline?", "does Y exist?") gets verified directly by whoever is holding it,
+not relayed to anyone.
 
 **When to keep the designer driving instead (per-experiment, reversible):** genuinely exploratory / iterative work where
 the design *is* the discovery and can't be fully pre-specified. For pre-registered, well-specified designs, dispatch it.

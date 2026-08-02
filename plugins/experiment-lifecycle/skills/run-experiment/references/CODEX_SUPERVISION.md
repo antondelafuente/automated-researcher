@@ -105,9 +105,20 @@ question/answer inbox:
 - **`consume-question <run-id>`** (the executor) — reads the answer, then clears the pair. Refuses to
   consume a still-unanswered question (that would drop it on the floor); idempotent once already clear.
 
+**The inbox terminates at the designer-of-record — it is not a relay to the researcher
+(automated-researcher#664).** An answer is expected *from the designer*, under the two-check rule
+`design-experiment`'s designer-of-record duties define: if the answer stays inside the already-cleared cost envelope
+AND does not change what is being measured (the question, the arms, the metric — what the numbers will mean), the
+designer decides, records the decision durably (an amendment note on the experiment's registry record — this inbox is
+the transport, not the record: the answer text is cleared when the executor consumes it), and reports it to the
+researcher after the fact. Only a question that fails one of those two checks —
+design clearance, the Presentation lock, raising a cost ceiling, anything that alters the experiment's meaning —
+travels onward to the researcher. And a question whose answer is checkable from the records or the live state ("is X
+the baseline?", "does Y exist?") is never asked through this channel at all: whoever holds it verifies it directly.
+
 **`question_route`** and **`terminal_state_route`** (set at `start`/`checkpoint` via `--question-route` /
 `--terminal-route`, read back via the `question-route`/`terminal-route` getters) are opaque pointers naming
-**how** these signals actually reach a human or a delegated watcher — the default is `record` (poll this
+**how** these signals actually reach the designer-of-record or a delegated watcher — the default is `record` (poll this
 same file, per §6's cadence), but an instance may route through a chat channel, a paging system, or
 whatever it already has; the product does not interpret the value, only carries it so the binding is
 durable and inspectable rather than living only in someone's memory of "how this run's questions get
