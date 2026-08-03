@@ -15,6 +15,9 @@ REC="$HERE/run_supervision_record.sh"
 TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export AAR_RUN_SUPERVISION_DIR="$TMP"
+# The no-handle no-op case below asserts that NOTHING is bound, so this smoke must not inherit an
+# instance's #673 derive-at-start seam from the ambient env (run_supervision_record.sh's own smoke covers it).
+unset EXPERIMENT_SESSION_HANDLE_CMD
 
 fails=0
 ok(){ echo "ok   $1"; }

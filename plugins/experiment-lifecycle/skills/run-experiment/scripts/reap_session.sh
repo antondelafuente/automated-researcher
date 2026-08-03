@@ -9,9 +9,14 @@
 #      (`run_supervision_record.sh is-closed` = closed AND NOT stopped). A parked/blocked run is
 #      desired-active (never closed) and a deliberately-stopped run is excluded — neither is ever reaped,
 #      so a run that must survive for resume keeps its session. absent/invalid/active also refuse.
-#   2. HANDLE: read the opaque `session-handle` from the record. No handle recorded -> nothing to reap
+#   2. HANDLE: read the `session-handle` from the record. No handle recorded -> nothing to reap
 #      (exit 0). The product NEVER interprets the handle; it is the instance's own binding (tmux name,
-#      systemd unit, pid-file, ...).
+#      systemd unit, pid-file, ...). It is NOT a free-choice string, though: the seam below compares it
+#      against the CURRENT session's own identity, so the recorded value must be exactly what the seam
+#      derives for itself. `run_supervision_record.sh start` binds that by construction from the
+#      instance's `EXPERIMENT_SESSION_HANDLE_CMD` self-identity seam when the executor omits
+#      `--session-handle` — a hand-written near-miss (`tmux:<name>` vs `<name>`) made this refuse twice,
+#      and a closed record is terminal by the time reap runs, so it was uncorrectable (#673).
 #   3. SELF-ONLY SEAM: the instance seam `EXPERIMENT_SESSION_REAP_CMD` (a word-split command string, the
 #      *_CMD convention) is invoked with the handle as its FINAL argument. This is SELF-reap: the seam MUST
 #      verify the CURRENT session's own identity matches

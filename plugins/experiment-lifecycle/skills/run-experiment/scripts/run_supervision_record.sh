@@ -2,8 +2,10 @@
 # run_supervision_record.sh — the run-supervision record: machine-consumed desired-state for a
 # model-free relaunch supervisor (the #54 crash-resilience design; child 1 + child 3). PRODUCT helper —
 # no instance specifics (session names, relaunch commands, systemd wiring are all instance, consumed
-# via this API; the session_handle field below records the instance value OPAQUELY — the product never
-# interprets it).
+# via this API; the session_handle field below holds an instance-owned value this helper never PARSES —
+# but it is not a free-choice string either: it must be EXACTLY what the instance's own teardown seams
+# compare against, so `start` derives it from the instance's self-identity seam when the caller omits
+# `--session-handle` — see derive_session_handle below, automated-researcher#673).
 #
 # WHAT IT IS: a tiny per-run JSON record carrying RELAUNCH-scoped state only —
 #   desired_active / stopped / closed / handoff_path / lease_pod_ids / session_handle / worktree_path /
@@ -74,7 +76,9 @@
 #   is-closed -> exit 0 iff the record is terminal `closed` (run finished cleanly); else exit 1
 #              (absent/invalid/stopped/active all fail closed). The reap guard: only a finished run is
 #              reapable, so a parked/blocked (desired-active) run's session is never torn down.
-#   session-handle -> print the opaque instance handle ("" + exit 1 if unset/missing).
+#   session-handle -> print the instance-owned session handle ("" + exit 1 if unset/missing). Bound at
+#              `start`/`checkpoint` via `--session-handle H`, or DERIVED at `start` from the instance's
+#              self-identity seam when the flag is omitted (automated-researcher#673).
 #   worktree-path -> print the run's own worktree path, bound at `start`/`checkpoint` via `--worktree PATH`
 #              ("" + exit 1 if unset/missing). This is the run-id<->worktree BINDING `reap_worktree.sh`
 #              checks (automated-researcher#535 review, round 2): the record is written from INSIDE the
@@ -157,11 +161,14 @@
 #   run_supervision_record.sh list                           # `<run-id> <state>` per record (enumeration)
 #
 # Record root is instance-overridable: ${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}.
+# Instance seam: EXPERIMENT_SESSION_HANDLE_CMD (see derive_session_handle) — this session's own handle, in
+# the exact shape the teardown seams compare against; `start` binds it when --session-handle is omitted.
 set -euo pipefail
 
 ROOT="${AAR_RUN_SUPERVISION_DIR:-$HOME/.config/run-supervision}"
 
 die(){ echo "run_supervision_record: $*" >&2; exit 2; }
+warn(){ echo "run_supervision_record: $*" >&2; }
 
 # run-id is used as a filename — keep it path-safe (no traversal / separators).
 validate_id(){
@@ -183,6 +190,48 @@ validate_supervision_mode(){
     autonomous-detached|controller-supervised) ;;
     *) die "invalid --supervision-mode '$1' (allowed: autonomous-detached, controller-supervised)";;
   esac
+}
+
+# EXPERIMENT_SESSION_HANDLE_CMD — the instance's own "who am I" expression: it prints the CALLING session's
+# handle in EXACTLY the shape the instance's teardown seams compare against (reap_session.sh's self-only
+# EXPERIMENT_SESSION_REAP_CMD, session_janitor.sh's SESSION_JANITOR_LIST_CMD). `start` binds that value when
+# the caller omits --session-handle, so the recorded handle and the string the reap seam checks itself
+# against cannot disagree by construction.
+#
+# WHY (automated-researcher#673, twice — depv1-negemo-chat-substrate-1 and depv1-negemo-hotdraw-1): the docs
+# called the handle "opaque … the product never interprets it", so executors reasonably wrote a
+# self-describing `tmux:<session>`. The instance seam is NOT opaque about it — it compares against the bare
+# session name — so self-reap refused ("never reap a peer", correctly), session_janitor.sh read the same
+# mismatched field and so reported instead of reaping, and the ~300–530MB session stayed resident. It was
+# also unfixable at the point it was detected: reap is the step AFTER `close`, and a closed record is
+# terminal, so `checkpoint --session-handle` refuses. Deriving at bind time is the only window in which the
+# executor can still act — the whole class disappears when nobody has to guess a format they cannot verify.
+#
+# `start`-only on purpose: like --worktree, the derived value is trustworthy only because `start` runs from
+# INSIDE the run's own session, so it can only ever name its OWN session, never a peer's. A `checkpoint` may
+# be written by a supervisor or a peer process, so it never derives.
+#
+# The seam must be a fast, non-blocking self-identity read (this runs under the per-record lock), and must
+# FAIL (non-zero) rather than print a guess when the caller is not in a session it recognizes. An unset
+# seam, a failing seam, or empty/multi-line output binds NOTHING — the pre-#673 behavior (reap_session.sh's
+# documented no-handle no-op) plus a loud line while the record is still mutable, never a hard failure of
+# the run's very first action.
+derive_session_handle(){
+  [ -n "${EXPERIMENT_SESSION_HANDLE_CMD:-}" ] || return 0
+  local out
+  # shellcheck disable=SC2086  # intentional word-split of the command string (the *_CMD seam convention)
+  if ! out=$($EXPERIMENT_SESSION_HANDLE_CMD 2>/dev/null); then
+    warn "EXPERIMENT_SESSION_HANDLE_CMD failed — no session handle bound, so session self-reap at close will be a documented no-op (pass --session-handle explicitly if this instance needs one)"
+    return 0
+  fi
+  if [ -z "$out" ]; then
+    warn "EXPERIMENT_SESSION_HANDLE_CMD printed nothing — no session handle bound, so session self-reap at close will be a documented no-op"
+    return 0
+  fi
+  case "$out" in
+    *$'\n'*) warn "EXPERIMENT_SESSION_HANDLE_CMD printed more than one line — refusing to bind an ambiguous session handle (it must print exactly one line: this session's own handle)"; return 0;;
+  esac
+  printf '%s\n' "$out"
 }
 
 # Read a top-level field from the record JSON ("" if record or field absent). python3 is already a
@@ -487,6 +536,19 @@ cmd_create(){
     invalid) die "create: run '$id' has a malformed record on disk — inspect/remove $file before re-creating";;
     *)       die "create: unexpected record state '$state' for '$id'";;
   esac
+  # #673: bind the handle the teardown seams will actually compare against. Omitted -> derive it from the
+  # instance's own self-identity seam (nothing bound if the seam is unset/failing — the pre-#673 no-op).
+  # Supplied -> keep the caller's value verbatim, but say so LOUDLY when it isn't this session's own handle:
+  # a self-reap that will refuse at close is only correctable now, while the record is still mutable.
+  local self_handle; self_handle=$(derive_session_handle)
+  if [ -z "$session_handle" ]; then
+    if [ -n "$self_handle" ]; then
+      session_handle=$self_handle
+      echo "run_supervision_record: bound --session-handle '$session_handle' derived from EXPERIMENT_SESSION_HANDLE_CMD" >&2
+    fi
+  elif [ -n "$self_handle" ] && [ "$self_handle" != "$session_handle" ]; then
+    warn "NOTE: --session-handle '$session_handle' is not this session's own handle ('$self_handle', per EXPERIMENT_SESSION_HANDLE_CMD). The teardown seams compare against the latter, so session self-reap at close will refuse and leave this session resident (automated-researcher#673) — omit --session-handle to bind the derived value instead. Expected ONLY if you are deliberately binding a host-visible child/thread handle rather than this session's own."
+  fi
   write_record "$file" "$handoff" "" "" "" "true" "$session_handle" "" "" "" "$worktree" \
     "$executor_family" "$supervision_mode" "$question_route" "$terminal_route" "" "" "" "$look_again"
   echo "created run-supervision record: $file (desired-active)"

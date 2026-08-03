@@ -167,8 +167,11 @@ this document exists to close.
 ## 5. Recovery does not depend on one in-memory exec handle
 
 This is not a new mechanism — `run_supervision_record.sh` and `RELAUNCH_SUPERVISOR.md` are already
-substrate-neutral (the whole point of `session_handle` being an opaque, instance-owned value the product
-never interprets). The Codex-specific gap was operational, not structural: nothing told a Codex designer to
+substrate-neutral (the whole point of `session_handle` being an instance-owned value the product never
+parses — though never-parsed is not free-choice: wherever the instance's own teardown/liveness seams compare
+that field against a session identity they derive for themselves, bind exactly that value, or omit
+`--session-handle` and let `start` derive it, per `RELAUNCH_SUPERVISOR.md` and automated-researcher#673).
+The Codex-specific gap was operational, not structural: nothing told a Codex designer to
 actually *use* this contract instead of trusting an in-conversation `write_stdin` wait as if it were durable
 state. It is not: bind a `session_handle` naming whatever Codex actually gives you (a task/thread id, a
 detached-shell pidfile path — whatever is stable enough to re-probe later) at `start`, keep the standing

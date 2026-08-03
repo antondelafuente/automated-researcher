@@ -66,17 +66,19 @@ e.g. "if any single arm wins >90% the selection is degenerate".>
 - Keep a standing successor handoff at `<TEMP.md path>` (pointers only — pod ids, artifact paths, look-again
   deadline, next action; never trigger-prone prose); refresh it at every checkpoint.
 - Write the run-supervision record at run start and keep it current:
-  `run_supervision_record.sh start <run-id> --handoff <TEMP.md path> --session-handle <opaque session handle> --worktree <this worktree's path>`,
-  then `checkpoint … --handoff <TEMP.md path> --lease-pod <id>` at each checkpoint. The `--session-handle` is the supervisor's `run-id` →
-  session binding (how it knows WHICH process this run is, to probe liveness and resume in place); it is an
-  **opaque, instance-owned** value — a tmux session name, a systemd unit, a pid-file path, whatever the
-  instance's launcher owns. The consuming instance's dispatch/launcher RESOLVES this placeholder: it injects
-  the concrete handle into this brief, or pre-creates / `update`s the record with it. Don't ship the literal
-  `<opaque session handle>` — a brief with the placeholder unresolved leaves the supervisor unable to find the
-  session. `--worktree` is set by the executor itself, from **inside its own worktree**, at start — it is the
+  `run_supervision_record.sh start <run-id> --handoff <TEMP.md path> --worktree <this worktree's path>`,
+  then `checkpoint … --handoff <TEMP.md path> --lease-pod <id>` at each checkpoint. The session handle that
+  `start` binds is the supervisor's `run-id` → session binding (how it knows WHICH process this run is, to probe
+  liveness, resume in place, and reap at close); its shape is **instance-owned** — a tmux session name, a systemd
+  unit, a pid-file path — but it is NOT yours to invent: `start` derives it from the instance's own self-identity
+  seam so the recorded value is exactly what the teardown seams compare against (a hand-written near-miss like
+  `tmux:<name>` silently defeats both the close-time reap and the janitor backstop, and cannot be corrected once
+  the record is closed — `automated-researcher#673`). So **omit `--session-handle`** unless this instance's
+  dispatch/launcher injects a concrete handle here (or pre-creates / `update`s the record with it), in which case
+  pass exactly that value and never a literal placeholder. `--worktree` is set by the executor itself, from
+  **inside its own worktree**, at start — it is the
   run-id<->worktree binding `reap_worktree.sh` checks at close, so a clean-closed run-id can only ever reap the
-  worktree IT bound, never a peer's; unlike `--session-handle` it is NOT an instance-resolved placeholder for
-  the launcher to inject. Use `run_supervision_record.sh status <run-id>` as checklist evidence. At close it's a POST-AUDIT finalizer:
+  worktree IT bound, never a peer's. Use `run_supervision_record.sh status <run-id>` as checklist evidence. At close it's a POST-AUDIT finalizer:
   `close <run-id>` (finished) / `stop <run-id>` (deliberate quit) — never cleared early. (See the run-experiment
   resume contract + the CHECKLIST open/close gates.)
 

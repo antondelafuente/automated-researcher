@@ -46,10 +46,11 @@
       silently skipped; a healthy long run must never silently outlive its lease expiry (#293).      ev:
 - ☐ [BLOCK] Resume contract armed (so a model-free supervisor can relaunch a dead run): standing successor
       handoff (`TEMP.md`) current; run-supervision record written and **desired-active** with a session handle
-      bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque> --worktree
-      <this worktree's path>`) — the `<opaque>` handle RESOLVED to a concrete instance value by the
-      dispatch/launcher (a tmux name, systemd unit, pid-file path), NOT left as the literal placeholder, so the
-      supervisor can find this run's session; `--worktree` is set by the executor itself, from inside its own
+      bound (`run_supervision_record.sh start <run-id> --handoff <TEMP.md> --worktree <this worktree's path>`)
+      — `status` shows a concrete `session_handle`, either DERIVED by `start` from the instance's self-identity
+      seam (omit `--session-handle`; never hand-write or prefix one — #673) or the value the dispatch/launcher
+      injected, so the supervisor can find this run's session and the close-time reap actually fires;
+      `--worktree` is set by the executor itself, from inside its own
       worktree, at start — the run-id<->worktree binding `reap_worktree.sh` checks at close; live pod ids checkpointed (`run_supervision_record.sh checkpoint <run-id> --handoff <TEMP.md> --lease-pod <id>`)
       and EACH live pod registered for reaping via the `gpu-job` pod lease (the sole backstop since the
       per-pod watchdog was retired, #266) AND kept fresh by the self-wake heartbeat above for as long as the run
