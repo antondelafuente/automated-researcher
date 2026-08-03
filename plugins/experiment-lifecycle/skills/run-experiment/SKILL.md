@@ -208,11 +208,24 @@ Three obligations, maintained continuously (not at close):
 
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
   > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start, from **inside your own
-  > worktree**: `start <run-id> --handoff <TEMP.md path> --session-handle <opaque> --worktree <this worktree's
-  > path>` (marks the run **desired-active**, records the opaque, instance-owned handle that binds this run-id
-  > to your session — a tmux name / systemd unit / pid-file path; the product never interprets it — and binds
+  > worktree**: `start <run-id> --handoff <TEMP.md path> --worktree <this worktree's
+  > path>` (marks the run **desired-active**, binds the run-id→session handle — see below — and binds
   > this run-id to your own worktree path, the binding `reap_worktree.sh` checks at close so a clean-closed
   > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2).
+  > **Do not hand-write the session handle.** Its *shape* is instance-owned (a tmux name / systemd unit /
+  > pid-file path) but it is not yours to choose: the instance's teardown seams compare the recorded value
+  > against the current session's OWN identity, so a plausible near-miss — `tmux:run-x` where the seam derives
+  > `run-x` — makes self-reap refuse ("never reap a peer", correctly), makes the janitor backstop report
+  > instead of reap, and is uncorrectable at close because the record is terminal by the time the reap runs:
+  > it leaks a ~300–530MB session (`automated-researcher#673`, hit twice). So **omit `--session-handle`** and
+  > `start` binds what the instance's own self-identity seam (`EXPERIMENT_SESSION_HANDLE_CMD`) derives, so the
+  > two cannot disagree; it prints the value it bound, and says so loudly when it can bind none (no seam
+  > configured → nothing bound, and close-time self-reap is a documented no-op). Pass an explicit
+  > `--session-handle <handle>` only when your launcher injected one, or when you are binding a host-visible
+  > child/thread handle (the app-visible-child path above) — and then it must be EXACTLY the string that
+  > instance's seam compares against (for a tmux instance: the bare session name, no `<scheme>:` prefix);
+  > `start` warns when what you passed isn't this session's own handle, which is your one chance to fix it
+  > while the record is still mutable.
   > At each checkpoint: `checkpoint <run-id> --handoff <path> --lease-pod <id>…`
   > (refresh the handoff + link the pod ids the run holds — these link to `gpu-job`'s pod leases by id). Use
   > `status <run-id>` as compact checklist evidence. If you hit a case you can't resume in place (a usage-policy
@@ -731,11 +744,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:
   `run_supervision_record.sh` scripts' `reap_session.sh <run-id>`. It fires **only on a clean close** (the record is
   `closed` and not `stopped`, via `is-closed`): a **parked / blocked** run is desired-active, never `closed`, so its
-  session is KEPT for resume (only its pod was torn down) — this step never reaps it. It reads the record's opaque
+  session is KEPT for resume (only its pod was torn down) — this step never reaps it. It reads the record's
   `session_handle` and hands it to your instance's **session-teardown seam** (`EXPERIMENT_SESSION_REAP_CMD` — resolved
   LIVE at close like the deploy-account teardown key, NOT a frozen `START.md` field). The seam is **self-only**: it must
   verify the current session matches the handle and fail closed on a mismatch, so a stale/misbound handle reaps nothing,
-  never a peer. **No seam configured → a logged no-op** (the standing session-janitor sweep is the backstop for a
+  never a peer — which is exactly why the handle is bound at `start` from the instance's own self-identity seam rather
+  than hand-written (a near-miss handle leaks the session and can no longer be corrected here, `#673` above). **No seam configured → a logged no-op** (the standing session-janitor sweep is the backstop for a
   crashed close, below). The **transcript persists on disk** (resumable) — this frees the process, not the record.
   Nothing runs after this by design.
 - **The session janitor is the backstop for a crashed close.** Self-reap above only fires from inside the closing

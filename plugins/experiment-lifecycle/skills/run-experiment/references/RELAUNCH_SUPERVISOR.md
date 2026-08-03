@@ -95,10 +95,20 @@ relaunch(run):
 
 The supervisor needs to know *which* process/session a desired-active `run-id` corresponds to, both to probe
 `session_is_alive` and to target `resume_same_session`. That binding is the record's **`session_handle`** — an
-**opaque, instance-owned** value the product never interprets (a tmux session name, a systemd unit, a wrapper
+**instance-owned** value the product never parses (a tmux session name, a systemd unit, a wrapper
 pid-file path — whatever the instance's launcher owns). The agent records it at run start (`create --session-handle
-…`) and the supervisor reads it back (`session-handle <run-id>`). Keeping it opaque is what lets this contract stay
+…`) and the supervisor reads it back (`session-handle <run-id>`). Not parsing it is what lets this contract stay
 substrate-neutral while still giving the supervisor a concrete handle to act on.
+
+**Uninterpreted is not the same as free-choice** (automated-researcher#673). Every consumer of this field —
+`session_is_alive`, `session_janitor.sh`'s live-session list, `reap_session.sh`'s self-only teardown seam — compares
+the recorded value against a session identity the INSTANCE derives for itself, so the handle has exactly one correct
+value per session and the agent cannot verify a guess until the comparison happens (at close, when the record is
+already terminal and unfixable). The product therefore derives it rather than asking: `start` binds what the
+instance's own self-identity seam (`EXPERIMENT_SESSION_HANDLE_CMD`, one line, non-zero exit when the caller is not
+in a session it recognizes) prints, whenever `--session-handle` is omitted. Derivation is `start`-only — a
+`checkpoint` may be written by the supervisor or another peer, which cannot claim the run's identity — and an
+unset/failing seam binds nothing (the pre-existing no-handle no-op), never a guessed value.
 
 ## Idempotence, single-writer, crash-storm cap
 
@@ -118,7 +128,7 @@ atomic-write + monotonic-state + fail-closed semantics (so no consumer re-derive
 
 | operation | who calls it | meaning |
 |---|---|---|
-| `start <run-id> [--handoff P] [--session-handle H]` (`create` compatibility name) | agent, at run start | mark desired-active; bind handoff + session handle |
+| `start <run-id> [--handoff P] [--session-handle H]` (`create` compatibility name) | agent, at run start | mark desired-active; bind handoff + session handle (handle DERIVED from the instance's self-identity seam when `--session-handle` is omitted — #673) |
 | `checkpoint <run-id> [--handoff P] [--lease-pod ID]… [--session-handle H]` (`update` compatibility name) | agent, at checkpoints | refresh handoff / link pods / rebind handle |
 | `request-relaunch <run-id> [--handoff P] [--reason T]` | agent or a `StopFailure`-style hook | positive "recover me" signal (fail-closed on a terminal/missing record). **Requires a bound `handoff_path`** — pass `--handoff P` to bind it atomically, or it must already be on the record — since this is the can't-resume-in-place signal whose fallback (`launch_successor`) needs the handoff to point the fresh successor at. Fails closed if no handoff is bound after the request. |
 | `is-desired-active <run-id>` | **supervisor** | exit 0 = relaunch-eligible; else 1 (fail-closed) |
@@ -137,8 +147,11 @@ reference:
 
 - the concrete mapping `resume_same_session → --continue`, `launch_successor → relaunch-session.sh <name> <dir>
   handoff` (adapted to take the bound `handoff_path`);
-- `session_is_alive` (how to probe the opaque `session_handle` — a tmux liveness check, a systemd `is-active`, a
+- `session_is_alive` (how to probe the `session_handle` — a tmux liveness check, a systemd `is-active`, a
   pid-file probe — using a positive mtime/heartbeat signal, never `pkill -f` self-matching);
+- the concrete self-identity expression behind `EXPERIMENT_SESSION_HANDLE_CMD` (for a tmux instance, printing the
+  bare current session name) — and, critically, the SAME expression its teardown seams compare against, since that
+  agreement is the whole point of deriving the handle instead of letting the agent choose one (#673);
 - the systemd timer or `setsid` bash loop that runs the pass, its cadence, the crash-storm cap constants, the
   RunPod key, session names, and paths;
 - the **dry-run rollout window** (#54 "Rollout"): log the relaunches the supervisor *would* perform, reconciled

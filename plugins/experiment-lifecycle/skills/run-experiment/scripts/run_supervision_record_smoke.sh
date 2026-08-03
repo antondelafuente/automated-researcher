@@ -14,6 +14,10 @@
 # corrupt fail-closed guards as the rest of the record. Also covers the #628 supervision-bootstrap
 # receipt: the look-again-by getter, and verify-bootstrap's successful-bootstrap / missing-record /
 # wrong-field / bootstrap-timeout paths (small --timeout-sec/--poll-interval-sec values keep this smoke fast).
+# Also covers #673's derive-at-`start` session handle: EXPERIMENT_SESSION_HANDLE_CMD bound when
+# --session-handle is omitted, an explicit handle still winning verbatim but WARNED when it isn't this
+# session's own, `checkpoint` never deriving, and the unset/failing/empty/multi-line seam cases binding
+# nothing without ever failing the run's first action.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -23,6 +27,9 @@ S="$HERE/run_supervision_record.sh"
 TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 export AAR_RUN_SUPERVISION_DIR="$TMP"
+# The #673 derive-at-start seam is exercised explicitly at the end of this smoke; every case before it
+# asserts the NO-seam behavior, so a box that happens to export the seam must not change what they observe.
+unset EXPERIMENT_SESSION_HANDLE_CMD
 
 fails=0
 ok(){ echo "ok   $1"; }
@@ -539,5 +546,60 @@ if run verify-bootstrap broken --executor-family codex --supervision-mode contro
 # --- verify-bootstrap: required-arg / malformed-timeout validation ---
 if run verify-bootstrap vb1 --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record >/dev/null 2>&1; then no verify-bootstrap-missing-family-arg-rejected; else ok verify-bootstrap-missing-family-arg-rejected; fi
 if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record --timeout-sec abc >/dev/null 2>&1; then no verify-bootstrap-bad-timeout-rejected; else ok verify-bootstrap-bad-timeout-rejected; fi
+
+# ===== #673: derive the session handle at `start` from the instance's self-identity seam =====
+# The incident class: a hand-written `tmux:<name>` handle made self-reap refuse AND the janitor report-only,
+# and a closed record is terminal so it could never be corrected. Deriving at bind time removes the guess.
+SELF_STUB="$TMP/self_handle.sh"
+cat > "$SELF_STUB" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${STUB_SELF:-run-derived}"
+EOF
+chmod +x "$SELF_STUB"
+
+# --- omitted --session-handle -> the derived value is bound verbatim ---
+EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" run start d1 --handoff /art/d1/TEMP.md >/dev/null 2>&1
+[ "$(run session-handle d1)" = "run-derived" ] && ok derive-binds-when-omitted || no "derive-binds-when-omitted ($(run session-handle d1 || true))"
+# --- the seam is a COMMAND STRING, word-split like the other *_CMD seams ---
+EXPERIMENT_SESSION_HANDLE_CMD="bash $SELF_STUB" run start d1b >/dev/null 2>&1
+[ "$(run session-handle d1b)" = "run-derived" ] && ok derive-cmdstring || no derive-cmdstring
+# --- an explicit --session-handle still wins verbatim (the launcher-injected / child-handle path) ---
+EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" run start d2 --session-handle "tmux:run-d2" >/dev/null 2>&1
+[ "$(run session-handle d2)" = "tmux:run-d2" ] && ok derive-explicit-wins || no derive-explicit-wins
+# ...and the mismatch is reported loudly, while the record is still mutable (the #673 detection window) ---
+EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" run start d2b --session-handle "tmux:run-d2b" 2>"$TMP/d2b.err" >/dev/null
+grep -q 'is not this session' "$TMP/d2b.err" && ok derive-mismatch-warned || no derive-mismatch-warned
+# --- a MATCHING explicit handle is not warned about ---
+EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" run start d2c --session-handle "run-derived" 2>"$TMP/d2c.err" >/dev/null
+grep -q 'is not this session' "$TMP/d2c.err" && no derive-match-not-warned || ok derive-match-not-warned
+# --- unset seam -> nothing bound (pre-#673 behavior preserved: reap_session.sh's no-handle no-op) ---
+run start d3 >/dev/null 2>&1
+if run session-handle d3 >/dev/null 2>&1; then no derive-unset-seam-binds-nothing; else ok derive-unset-seam-binds-nothing; fi
+# --- failing seam -> nothing bound, warned, and `start` still SUCCEEDS (never fails the run's first action) ---
+if EXPERIMENT_SESSION_HANDLE_CMD="false" run start d4 2>"$TMP/d4.err" >/dev/null; then ok derive-failing-seam-start-ok; else no derive-failing-seam-start-ok; fi
+if run session-handle d4 >/dev/null 2>&1; then no derive-failing-seam-binds-nothing; else ok derive-failing-seam-binds-nothing; fi
+grep -q 'EXPERIMENT_SESSION_HANDLE_CMD failed' "$TMP/d4.err" && ok derive-failing-seam-warned || no derive-failing-seam-warned
+# --- empty output -> nothing bound, warned ---
+if EXPERIMENT_SESSION_HANDLE_CMD="true" run start d5 2>"$TMP/d5.err" >/dev/null; then ok derive-empty-start-ok; else no derive-empty-start-ok; fi
+if run session-handle d5 >/dev/null 2>&1; then no derive-empty-binds-nothing; else ok derive-empty-binds-nothing; fi
+grep -q 'printed nothing' "$TMP/d5.err" && ok derive-empty-warned || no derive-empty-warned
+# --- multi-line output is ambiguous (the janitor enumerates handles line-wise) -> nothing bound, warned ---
+MULTI_STUB="$TMP/multi_handle.sh"
+printf '#!/usr/bin/env bash\nprintf "a\\nb\\n"\n' > "$MULTI_STUB"; chmod +x "$MULTI_STUB"
+if EXPERIMENT_SESSION_HANDLE_CMD="$MULTI_STUB" run start d6 2>"$TMP/d6.err" >/dev/null; then ok derive-multiline-start-ok; else no derive-multiline-start-ok; fi
+if run session-handle d6 >/dev/null 2>&1; then no derive-multiline-binds-nothing; else ok derive-multiline-binds-nothing; fi
+grep -q 'more than one line' "$TMP/d6.err" && ok derive-multiline-warned || no derive-multiline-warned
+# --- checkpoint NEVER derives: a checkpoint may be written by a supervisor/peer, so it can't claim identity ---
+run start d7 >/dev/null 2>&1
+EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" run checkpoint d7 --handoff /art/d7/TEMP.md >/dev/null 2>&1
+if run session-handle d7 >/dev/null 2>&1; then no derive-checkpoint-never-derives; else ok derive-checkpoint-never-derives; fi
+# --- the derived handle is what reap_session.sh hands the self-only seam (end-to-end, no session killed) ---
+REAP_SH="$HERE/reap_session.sh"
+if [ -f "$REAP_SH" ]; then
+  EXPERIMENT_SESSION_HANDLE_CMD="$SELF_STUB" STUB_SELF="run-e2e" run start d8 >/dev/null 2>&1
+  run close d8 >/dev/null
+  reaped=$(EXPERIMENT_SESSION_REAP_CMD="echo" bash "$REAP_SH" d8 2>/dev/null | tail -1)
+  [ "$reaped" = "run-e2e" ] && ok derive-reap-gets-derived-handle || no "derive-reap-gets-derived-handle ($reaped)"
+fi
 
 [ "$fails" = 0 ] && { echo "run_supervision_record smoke PASS"; exit 0; } || { echo "run_supervision_record smoke FAIL"; exit 1; }
