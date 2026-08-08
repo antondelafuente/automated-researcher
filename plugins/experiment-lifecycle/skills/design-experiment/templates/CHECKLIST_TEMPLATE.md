@@ -153,8 +153,10 @@
       (first-batches, or a small-model path) before the real run — no OOM / format / save error.  ev:
 - ☐ [BLOCK] Anchor-gate: the base/reference reproduces its standing value (and any loaded released
       checkpoint matches its published numbers) BEFORE pooling or comparing.                      ev:
-- ☐ [BLOCK] Compared arms co-measured in ONE serving session; the canonical grader on EVERY
-      decision cell (no cheap-grader on a reported/decision cell).                                ev:
+- ☐ [BLOCK] Arms whose pairwise deltas the DESIGN names as load-bearing are co-measured in ONE serving
+      session — the named comparison set, not an implied everything; any prior-wave value cited instead of
+      re-served carries its merged-record identifier + the measured cross-wave wobble (the lean anchor
+      policy). The canonical grader on EVERY decision cell (no cheap-grader on a reported/decision cell). ev:
 - ☐ Full eval rollouts READ (actual text): grader / parse / truncation / think-length all sane.   ev:
 - ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout
       artifacts (each row or a companion summary) and CONSISTENT across co-measured arms — verifiable from

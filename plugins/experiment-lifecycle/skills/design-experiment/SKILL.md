@@ -63,10 +63,40 @@ are not.** Pin:
   pass/fail verdicts. (If a design genuinely *does* assert a rigorous claim, that's fine — it just then gets audited as
   one; the default is measurement.)
 - **What's measured + comparability (the load-bearing core).** The arms; the canonical metric with **EXACT eval
-  definitions** (load-bearing); **comparability** — the anchor-gate and co-measurement on ONE scale; the confound controls
+  definitions** (load-bearing); **comparability** — the anchor-gate, and co-measurement on ONE scale **for the arms
+  whose pairwise delta the purpose actually reads** (name that comparison set in `DESIGN.md`; it is what the
+  CHECKLIST's co-measure gate checks, and what the lean anchor policy below scopes); the confound controls
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
+  - **Comparability is a CHOICE, never a default — the lean anchor policy for repeat waves (researcher standing
+    decision 2026-07-20, re-confirmed 2026-08-08 on #694).** Co-measurement in one serving session buys
+    comparability for the pair it covers, and it is not free: re-serving + re-generating + re-judging a full prior
+    anchor slate ran ~$16/subject eval+judge, ~$200/wave on the depv1 thread — paid wave after wave for deltas
+    nothing in the purpose read. Before every comparability-motivated arm, parameter, or gate, answer **"do we need
+    to compare?"** — name the specific pairwise delta the purpose reads. An arm whose delta against the new arms is
+    not load-bearing does not get re-served just because it was measured before.
+  - **The DEFAULT for a repeat wave on a PINNED instrument stack is the lean anchor slate:** the new arms + a floor
+    subject (e.g. stock) + **ONE anchor pair serving as the anchor-GATE** — a breakage tripwire for the wrong
+    adapter, instrument drift, or battery drift, not a re-measurement of the prior slate. Every other prior-wave
+    value is **cited from the merged records** (the EXACT committed identifier, per the reuse pin below — #487) **alongside
+    the instance's measured cross-wave wobble**, not re-served. Re-serving any additional arm is **opt-in and
+    justified by a named load-bearing delta** — and it stays cheap to change your mind: when a delta becomes
+    load-bearing at interpretation time, re-serve that one arm retroactively for the cost of one subject.
+    *Pinned instrument stack* is the precondition, not a formality: same judge model + judge prompt + transport,
+    same batteries, same eval definitions. If any of those moved, prior-wave values are not on this wave's scale
+    and the citation path is void — co-measure instead.
+    *Measured grounding:* two depv1 waves days apart on an identical pinned stack moved stock 0.255→0.199 and a
+    top64 re-serve 0.901→0.846 — cross-wave wobble ≈ ±0.05–0.08 against decision-relevant effects of ±0.6. The
+    full-slate re-measurement buys precision an order of magnitude below anything that changes a conclusion.
+  - **Wobble ledger (the convention that keeps the citation path grounded).** So a citation carries a *measured*
+    wobble rather than an assumed one, each wave records its anchor values — the floor subject and the anchor pair,
+    one line per wave — in the thread's records (`RESULTS.md`, or the thread's standing record if it keeps one).
+    The next wave's design cites that ledger for the wobble figure it attaches to every prior-wave value it reuses.
+    The lean slate feeds the ledger it draws on: the floor subject and anchor pair are re-served every wave, so
+    their deltas against the prior entry ARE that wave's wobble measurement — a thread's first repeat wave
+    establishes the first entry from its own anchor-gate, and the figure gets better grounded each wave. Cite the
+    wobble you actually have; never assume one.
 - **Every model choice gets named and cleared with the researcher, never inherited by default (#335).** Generation,
   training, judge/classifier, and embedding (leakage-screen) models each get stated explicitly in this pass, with your
   recommendation, same posture as any other load-bearing choice — a model silently inherited from whatever a prior
