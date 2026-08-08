@@ -81,8 +81,15 @@ are not.** Pin:
     adapter, instrument drift, or battery drift, not a re-measurement of the prior slate. Every other prior-wave
     value is **cited from the merged records** (the EXACT committed identifier, per the reuse pin below — #487) **alongside
     the instance's measured cross-wave wobble**, not re-served. Re-serving any additional arm is **opt-in and
-    justified by a named load-bearing delta** — and it stays cheap to change your mind: when a delta becomes
-    load-bearing at interpretation time, re-serve that one arm retroactively for the cost of one subject.
+    justified by a named load-bearing delta** — and it stays cheap to change your mind when one becomes
+    load-bearing at interpretation time, provided you name which recovery you actually bought. Re-serving the
+    prior arm ALONE does NOT make its delta co-measured: the fresh value lands on a NEW session's scale while
+    the arm it is read against stays on this wave's, so that delta is cross-session — legitimate only on a
+    still-pinned stack and reported with the ledger's wobble attached, exactly like a cited value (cost: one
+    subject; it buys a fresh value, not comparability). A genuinely **co-measured** delta costs the PAIR:
+    re-serve the prior arm together with the arm it is compared against in ONE new session (cost: two
+    subjects) — still an order of magnitude below re-serving the slate. Buy the pair when the delta is close
+    enough to the wobble that a cross-session read can't carry it; otherwise the cheaper route is the honest one.
     *Pinned instrument stack* is the precondition, not a formality: same judge model + judge prompt + transport,
     same batteries, same eval definitions. If any of those moved, prior-wave values are not on this wave's scale
     and the citation path is void — co-measure instead.
