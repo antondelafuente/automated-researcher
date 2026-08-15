@@ -742,18 +742,29 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:
-  `run_supervision_record.sh` scripts' `reap_session.sh <run-id>`. It fires **only on a clean close** (the record is
+  `run_supervision_record.sh` scripts' `reap_session.sh <run-id>`. **This step is MANDATORY at a clean close — not a
+  judgment call, and not inside your latitude to deviate (`automated-researcher#720`).** That latitude covers genuine
+  blockers (the guard refuses, the seam errors), never preference; if the reap itself is genuinely blocked, say so in
+  the close report rather than silently leaving the session resident. **The pane is NOT the deliverable** — "the
+  researcher hasn't read my final summary yet" is never a reason to skip: the durable summary is `RESULTS.md` + the
+  record landed by `log-experiment` + the close report routed via the record's `terminal_state_route`, and the
+  **transcript persists on disk** (resumable) after the kill, so this frees the process, not the record. Nine
+  consecutive executor runs (2026-08-14/15) each talked themselves out of this step on exactly that premise and each
+  left a ~300–530 MB session resident until a human noticed. It fires **only on a clean close** (the record is
   `closed` and not `stopped`, via `is-closed`): a **parked / blocked** run is desired-active, never `closed`, so its
   session is KEPT for resume (only its pod was torn down) — this step never reaps it. It reads the record's
   `session_handle` and hands it to your instance's **session-teardown seam** (`EXPERIMENT_SESSION_REAP_CMD` — resolved
   LIVE at close like the deploy-account teardown key, NOT a frozen `START.md` field). The seam is **self-only**: it must
   verify the current session matches the handle and fail closed on a mismatch, so a stale/misbound handle reaps nothing,
   never a peer — which is exactly why the handle is bound at `start` from the instance's own self-identity seam rather
-  than hand-written (a near-miss handle leaks the session and can no longer be corrected here, `#673` above). **No seam configured → a logged no-op** (the standing session-janitor sweep is the backstop for a
-  crashed close, below). The **transcript persists on disk** (resumable) — this frees the process, not the record.
-  Nothing runs after this by design.
-- **The session janitor is the backstop for a crashed close.** Self-reap above only fires from inside the closing
-  session — if the executor dies before it runs (or the close never finalizes), the session sits resident
+  than hand-written (a near-miss handle leaks the session and can no longer be corrected here, `#673` above). **No seam
+  configured → a logged no-op** — the one case where the process legitimately outlives you, and a wiring gap to report
+  in the retro, not a reason the step was optional. Nothing runs after this by design.
+- **The session janitor is the backstop for a CRASHED close — never an alternative to self-reap
+  (`automated-researcher#720`).** It is not a collection service that tidies up after a healthy close, and an instance
+  may not have it scheduled at all (the instance that hit #720 didn't until 2026-08-15), so "the janitor will get it"
+  is not something you can assume about the box you are running on — reap yourself. Self-reap above only fires from
+  inside the closing session — if the executor dies before it runs (or the close never finalizes), the session sits resident
   indefinitely (~300–530 MB each; a batch of these OOMs a small box). `scripts/session_janitor.sh`, scheduled by the
   instance like `gpu-job`'s `pod_reaper.sh`, sweeps the run-supervision record registry standing outside any one
   session: it reaps ONLY a record that is a clean close (`is-closed`) whose recorded `session_handle` matches a LIVE
@@ -951,9 +962,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
   verified AND `log-experiment` has merged the record, gated on the same clean-close `is-closed` check as
   session reap, right before it (`reap_worktree.sh`). A parked/blocked/crashed run keeps its worktree for forensics.
-- **Reap your session at a clean close** — symmetric with pod-teardown: the finished executor frees its own process as
-  the terminal action (`reap_session.sh`), only on a clean `close`, via the self-only instance seam. A parked/blocked
-  run keeps its session for resume; no seam configured is a no-op.
+- **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
+  finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
+  self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +
+  the routed close report; the transcript survives the kill), and the janitor is the crashed-close backstop, not an
+  opt-out. A parked/blocked run keeps its session for resume; no seam configured is a no-op.
 - **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to
   the researcher), and a question you can check from the records or the live state you answer yourself.
 
