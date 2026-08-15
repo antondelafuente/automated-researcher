@@ -503,6 +503,20 @@ driver instead.
   logs**, **raw per-pod driver console logs** — e.g. `train_seed*.log`/`gen_seed*.log`; a structured summary alone
   drops warnings/stderr/timing detail a future reader can't get back once the pod is torn down (#419) — generated
   data, reproduce scripts, `SUMMARY.md` — per the profile; full data to files, never truncated).
+- **Assert the upload destination against the RUNNING experiment before the first copy — fail closed (#729).** An
+  uploader's artifact-store root is typically a bare path literal, and driver stacks are pulled wholesale from a
+  prior experiment: a rename sweep that catches module names, file names, and uppercase tags still misses the
+  lowercase path literal, so the new wave writes into the PARENT's root and overwrites a closed record's
+  same-named objects. Before any copy runs, compare the destination root's leaf against the experiment identifier
+  the driver itself computes — the run's own `EXPERIMENT` constant / registry dir name, **not a second literal you
+  also had to rename** — and refuse the upload on mismatch:
+  ```bash
+  [ "${R2##*/}" = "$EXP" ] || { echo "BLOCKED: upload destination ${R2##*/} != running experiment $EXP"; exit 1; }
+  ```
+  It costs nothing and makes the failure impossible rather than merely detectable. The incident (2026-08-15):
+  `depv1-negemo-manufacture-2` uploaded its whole artifact set into `depv1-negemo-manufacture-1`'s root — nine of
+  ten legs printed `>>> uploaded` normally, and **41 objects of a closed, merged record were permanently lost**
+  (no object versioning on the bucket, the parent's worktree already reaped, so no undo).
 - **Stamp the decoding config into the rollout artifacts (self-contained artifacts, #233).** Whenever you write
   eval rollouts, persist the exact generation settings — **temperature, top_p, max_new_tokens, seed, and the
   sampling mode (greedy/sample)** — into each rollout row *or* a companion summary, so cross-arm decoding
@@ -550,10 +564,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   pod-teardown event to hang it on — trigger the verify EITHER on (a) an imminent teardown OR (b) a leg/artifact
   reaching "done, will not be touched again," whichever comes first, independent of whether a pod exists at all;
   run a consolidated R2-vs-local check (`rclone check` or equivalent) once at THAT leg's own completion, not only a
-  single sweep at the very end of the whole run. **Teardown follows your profile's policy** (deploying-account
-  key; delete-don't-stop for ephemeral/region-free units; the mechanics are `gpu-job`'s). **Verify on the control
-  plane of the deploying account** that the unit is actually gone (never SSH liveness; a 404 from the wrong key
-  masquerades as deleted while it bills).
+  single sweep at the very end of the whole run. **That check must be independent of the destination the copy used
+  (#729):** `rclone copy "$src" "$R2/$dst"` followed by `rclone check "$src" "$R2/$dst"` verifies the wrong
+  destination against itself and passes green — it confirms the copy happened, never that it happened to the
+  INTENDED target. Re-derive the expected experiment root for the check from the running experiment's own
+  identifier (the Step 4 assertion above), so a mis-pointed root fails the gate instead of satisfying it.
+  **Teardown follows your profile's policy** (deploying-account key; delete-don't-stop for ephemeral/region-free
+  units; the mechanics are `gpu-job`'s). **Verify on the control plane of the deploying account** that the unit is
+  actually gone (never SSH liveness; a 404 from the wrong key masquerades as deleted while it bills).
 - **Stepping away?** Your unit is lease-covered — `gpu-job`'s lease reaper tears down **THIS unit's id** at lease
   expiry (set a short lease for faster idle teardown; the per-pod watchdog was retired, #266). Peers own theirs.
   This is for a deliberate idle stop — a run you're actively driving keeps its lease fresh via the self-wake
@@ -957,6 +975,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   as a POST-AUDIT finalizer (`stop`/`close`) — never resurrect a deliberate quit, never clear desired-active early.
 - **Kill-on-completion is the default.** Tear down once the upload is *verified* (every unique artifact). Keep one unit
   running only for a concrete queued follow-up (expiry-stamped). Log run + teardown.
+- **Never upload without asserting the destination against the running experiment first, and never verify an upload
+  against the same destination variable the copy used (#729)** — a pulled driver stack's un-renamed path literal
+  otherwise overwrites another experiment's closed record while every leg reports success.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
 - **Tear down your own worktree at a clean close** — the workspace member of the same teardown symmetry as
   pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
