@@ -90,9 +90,12 @@ are not.** Pin:
     re-serve the prior arm together with the arm it is compared against in ONE new session (cost: two
     subjects) — still an order of magnitude below re-serving the slate. Buy the pair when the delta is close
     enough to the wobble that a cross-session read can't carry it; otherwise the cheaper route is the honest one.
-    *Pinned instrument stack* is the precondition, not a formality: same judge model + judge prompt + transport,
-    same batteries, same eval definitions. If any of those moved, prior-wave values are not on this wave's scale
-    and the citation path is void — co-measure instead.
+    *Pinned instrument stack* is the precondition, not a formality: same judge model + judge prompt, same
+    batteries, same eval definitions. If any of those moved, prior-wave values are not on this wave's scale
+    and the citation path is void — co-measure instead. The judge TRANSPORT is deliberately NOT one of those
+    void-triggers (#735): a same-model transport swap is a recorded choice, not a citation-voiding event — cite
+    prior-wave values with the standing wobble band you already attach to every cited value, plus a one-line note
+    of the swap (and this wave's in-wave anchor pair doubles as a free read of the transport offset).
     *Measured grounding:* two depv1 waves days apart on an identical pinned stack moved stock 0.255→0.199 and a
     top64 re-serve 0.901→0.846 — cross-wave wobble ≈ ±0.05–0.08 against decision-relevant effects of ±0.6. The
     full-slate re-measurement buys precision an order of magnitude below anything that changes a conclusion.
@@ -254,11 +257,14 @@ are not.** Pin:
     the wave's judge-call volume and the rows/min it needs against a deadline, then check that against the pinned
     instrument's PROVISIONED capacity (call latency × concurrency, not the model's theoretical rate) — block dispatch
     if capacity falls short rather than discovering it mid-run (a real incident needed a 2.6x multi-account workaround
-    discovered mid-run, after ~14h+ of a wave being judge-bound while ample budget sat unusable). A judge instrument is
-    pinned to model+transport for anchor continuity (a same-model different-transport judge is not a safe swap — a
-    real case measured 13% disagreement between them), so the fix is providing enough CAPACITY at that pin, not
-    substituting a different one: pre-provision it (e.g. multiple validated keys/accounts) before dispatch whenever
-    the capacity check would otherwise fail.
+    discovered mid-run, after ~14h+ of a wave being judge-bound while ample budget sat unusable). When the capacity
+    check falls short, EITHER pre-provision capacity at the current transport (e.g. multiple validated
+    keys/accounts, before dispatch) OR swap to an equivalent transport serving the same pinned model+rubric —
+    whichever is cheaper — recording the swap on the wave.
+    *Measured grounding (depv1 thread):* a same-model transport swap moved cell means by +0.03 to ±0.05 — inside
+    the standing ±0.05–0.08 cross-wave wobble — while per-row agreement was 87% within 1 point (the once-cited
+    "13%" is that per-row tail, not a scale shift). The model+rubric pin stays hard; the transport is a recorded
+    property.
 
 ## Step 2 — The pre-launch gates (both MANDATORY for a new design, before any GPU/$ spend)
 
