@@ -581,6 +581,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     showing, and an artifact-store pointer for each.
   Render figures and populate dataset entries per what the cleared DESIGN.md Presentation spec asked for — this is
   implementation of an agreed spec, not improvisation. An arm/dataset the spec never mentioned needs no entry.
+  **Drive new figure code once against a SYNTHETIC fixture before the real data exists (#731).** Hand-build a
+  small fake table covering the extremes the real one will have — the largest and smallest values, the longest
+  labels, the widest axis range, an empty/skipped cell — and render it. Rendering defects are geometry, not
+  data: on `depv1-negemo-manufacture-2` this caught three (a clipped marker, overlapping annotations,
+  colliding tick labels) before any real numbers existed, when fixing them was a one-line edit rather than a
+  re-render at the end of close. It costs one throwaway fixture and does not need the run to have finished.
   The manifest's `title` and `labels` follow the instance's prose style guide when `AAR_STYLE_GUIDE` (an
   optional env var naming a path or URI) is set — unset, the plain-language requirement above stands on its own.
 - **The publish leg — YOURS when the brief carries a viewer recipe (#347); manifest-only otherwise.** Check the
@@ -893,6 +899,19 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   rows matched) — don't accept "the correlation happened to be null" at face value. This is the
   aggregation-stage analog of the eval-script gotcha where N conditions collapsing to N *identical* numbers
   signals a reused server/stale cache, not a real result (`gpu-job` SKILL.md's `serve_adapters_eval` section).
+  **A PARTIAL miss is the same class and is harder to see, so assert it in the aggregator itself, not by
+  eye (#731).** A dose-figure builder joined `figures/dose.csv` against `figures/subject_grid.csv` on the
+  SUBJECT name (`manu200-d40-s4`) while that grid keys on `(arm, seed)` — `subject` holds `manu200-d40`, the
+  seed is a separate column — so all four canonical judged cells came out BLANK while rows sourced from a
+  different file populated normally. Nothing was all-null, nothing errored, the figure looked plausible, and
+  only the cross-family close audit caught it. **The invariant to assert before writing any table or figure:
+  a row FLAGGED as judged must actually carry a number.** `scripts/assert_join_complete.py` in this skill
+  ships it — call `assert_join_complete(rows, flag_field, value_fields, group_field=..., per_group_fields=...)`
+  from your aggregator (or run it over the written CSV) instead of re-deriving the check per experiment. Put
+  the always-present numbers (`mean`) in `value_fields` and any field only SOME batteries legitimately carry
+  (`interval`, on bootstrapped batteries only) in `per_group_fields`, which is required only within a group
+  that already demonstrates it: **the invariant is per-battery**, and #731's first hand-rolled version
+  demanded an interval on every judged row and mis-fired on legitimately interval-free coherence rows.
 - **Cheap proxy in, full-scale out.** Search on small model / small-n / cheap grader; validate finalists at full scale.
   **Re-run finalists once** before believing them (best-of-N from noise fakes ≈ SE·√(2 ln N) — often bigger than the
   gaps you chase).
@@ -906,6 +925,14 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   re-asking inside it is the round-trip question routing removes. An estimate that would cross it — the design's
   notify ceiling where it sets one — IS a budget change, so it is a load-bearing flag to the designer-of-record, and
   raising a ceiling is one of the few things they take onward to the researcher.)
+- **A gate that is supposed to PREVENT spend belongs at judge-input EMISSION, not at dispatch (#731).** When a
+  tripwire decides a row/cell shouldn't be judged, the durable way to make that decision stick is to never
+  write the row into the judge-input file in the first place — a gate applied at dispatch time lives only in
+  the dispatching process, so any later pass, retry, or resume re-reads an input file that still contains the
+  skipped rows and cheerfully spends on them. Enforced at emission on `depv1-negemo-manufacture-2`, the
+  per-battery tripwire's skip held across the whole run: 1,032 judge calls were never purchased, and no
+  resume could re-purchase them. The gate's decision is then also a readable artifact (what's absent from the
+  input file), not a runtime fact that vanished with the process.
 - **Pre-flight the judge key's balance before it runs dry, not after (#354).** A metered-API driver (an LLM judge,
   batch scoring) discovers depletion only via a runtime error burst if nobody checks first — a key that starts a
   judging pass at ~$0 balance, or one that gets topped up but at the run's real burn rate only buys 1-2 hours, both
