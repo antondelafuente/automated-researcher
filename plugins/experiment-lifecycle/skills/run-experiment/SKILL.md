@@ -521,7 +521,7 @@ driver instead.
   eval rollouts, persist the exact generation settings — **temperature, top_p, max_new_tokens, seed, and the
   sampling mode (greedy/sample)** — into each rollout row *or* a companion summary, so cross-arm decoding
   comparability is verifiable from the artifacts alone, not only re-derivable from driver source. The data-audit
-  gate checks the config is present and consistent across co-measured arms.
+  gate checks the config is present and consistent across every arm a load-bearing delta is read across.
 - **Log the run in your ledger** (per the profile). Every GPU run goes in. **Close writes exactly ONE explicit
   experiment-level terminal event — a ledger line whose `run` field equals the registry dir name exactly, no
   suffix (#473).** Sub-runs may log whatever granularity they like (`…-smoke`, `…-seed1`, `…-seed2-gen`, …
