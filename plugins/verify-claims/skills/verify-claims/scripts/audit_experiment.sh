@@ -50,7 +50,9 @@
 #                    default re-audit would audit the prior audit instead of the design)
 # --design audits the PROPOSAL's DATA-TRUSTABILITY before any money/GPU moves (third gate alongside
 # verify_claim pre-launch and the close audit): will it produce reliable, comparable data for its stated
-# purpose? instrument pins + citation hygiene (NOT the absence of arms served together — #776: hunting
+# purpose? instrument pins + cross-scale band hygiene — the scale unit is the serving SESSION, not the wave,
+# so any delta read across two sessions carries the thread's measured band, whether the far side is a cited
+# prior-wave value or the design's own second session (NOT the absence of arms served together — #776: hunting
 # "co-measurement" traps here was the vector that regrew a doctrine the researcher retired three times,
 # because lean designs got re-flagged and the language re-accepted at triage; re-serving a prior slate
 # "for comparability" cost ~$200/wave on depv1 and ~$200 again in csp1-refusal-footprint-map-1 for deltas
@@ -175,10 +177,15 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
 'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
 1. VALIDITY / COMPARABILITY (lead) — three checks, in this order. (a) INSTRUMENT PINS: are the judge model +
    rubric, battery bytes, and exact eval definitions pinned across everything being compared? An unpinned
-   instrument voids comparability outright. (b) CITED-VALUE HYGIENE: prior-wave values are CITED from the merged
-   records BY DEFAULT — does each cited value carry its record identifier and the thread's MEASURED cross-wave
-   wobble band? A cited value with no band is a finding. (c) BAND-VS-DELTA: is any load-bearing delta smaller
-   than the wobble band it carries, with nothing re-served together to resolve it? That is a finding — the
+   instrument voids comparability outright. (b) CROSS-SCALE BAND HYGIENE: the scale unit is the SERVING
+   SESSION, not the wave. Every load-bearing delta whose two sides come from DIFFERENT sessions needs its
+   record identifier plus the thread's MEASURED wobble band attached — and that includes two of the design's
+   OWN new arms when they are served in separate sessions, not only values cited from a prior wave. A
+   cross-session delta with no band is a finding; so is one treated as same-scale merely because both arms are
+   new. (Citing prior-wave values from the merged records is the standing DEFAULT, and the ledger's cross-wave
+   figure is the conservative band — it over-covers a within-wave cross-session read.) (c) BAND-VS-DELTA: is
+   any load-bearing delta smaller than the band it carries, with nothing re-served together to resolve it?
+   That is a finding — the
    citation path cannot carry that read. Any train/eval leakage, probe contamination, or selection effect
    built into the construction? Does the anchor / baseline reproduce?
    DO NOT flag the absence of arms served together in one session as a defect when the citation path above is

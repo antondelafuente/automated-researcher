@@ -153,13 +153,18 @@
       (first-batches, or a small-model path) before the real run — no OOM / format / save error.  ev:
 - ☐ [BLOCK] Anchor-gate: the base/reference reproduces its standing value (and any loaded released
       checkpoint matches its published numbers) BEFORE pooling or comparing.                      ev:
-- ☐ [BLOCK] Delta provenance: every pairwise delta the DESIGN names as load-bearing resolves by ONE
-      explicitly recorded route — (1) MEASURED THIS WAVE: both sides are served by this wave itself, so the
-      delta is already on one scale and needs nothing further (the ordinary route for a delta between two new
-      arms, and for the anchor pair); (2) CITED from the merged records (record identifier + the measured
-      cross-wave wobble band attached; the default for any prior-wave value); (3) RE-SERVED alongside the arm
-      it is read against, with the per-delta justification the DESIGN names (the delta sits inside the band, so
-      the citation path cannot carry it). Absence of re-serving is NOT a defect; a delta with NO recorded route is.
+- ☐ [BLOCK] Delta provenance: every pairwise delta the DESIGN names as load-bearing has its provenance
+      class explicitly recorded. **The scale unit is the SERVING SESSION, not the wave.** (1) SAME-SCALE —
+      both sides measured in the same serving session on the pinned stack, so the delta needs nothing further
+      (the anchor pair; any arms served together). (2) CROSS-SCALE — the two sides come from different
+      sessions, whether the far side is a cited prior-wave value OR another of THIS wave's arms served in a
+      separate session: valid on a still-pinned instrument stack, recorded with the record identifier plus the
+      thread's measured wobble band attached (the ledger's cross-wave figure bounds a within-wave
+      cross-session read too — use it unless the thread has a tighter measured one). Re-serving an arm
+      alongside the one it is read against is the opt-in way to move a delta from (2) to (1), justified per
+      delta by the DESIGN — never an expectation, and absence of re-serving is NOT a defect. BLOCK fires on a
+      delta with NO class recorded, on a cross-scale delta carrying no band, and on any delta read across a
+      MOVED instrument.
       The canonical grader on EVERY decision cell (no cheap-grader on a decision cell).                  ev:
 - ☐ Full eval rollouts READ (actual text): grader / parse / truncation / think-length all sane.   ev:
 - ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout

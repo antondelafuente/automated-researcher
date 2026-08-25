@@ -66,8 +66,10 @@ are not.** Pin:
   definitions** (load-bearing); **comparability** — the HARD instrument pins (judge model + rubric, battery bytes,
   eval definitions), the anchor-gate, and a measured wobble band on every prior-wave value **the purpose actually
   reads a delta against** (name that comparison set in `DESIGN.md`; those are the deltas the CHECKLIST's
-  delta-provenance gate resolves by citation or by re-serving, and what the citation-default policy below
-  scopes — a delta between two arms THIS wave serves is already on one scale and needs neither); the confound controls
+  delta-provenance gate classifies as same-scale or cross-scale, and what the citation-default policy below
+  scopes — **the scale unit is the SERVING SESSION, not the wave**: two arms served in the same session need
+  no band, and every delta read across two sessions carries one, whether the far side is a prior wave's
+  record or another of this wave's own sessions); the confound controls
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
@@ -89,11 +91,16 @@ are not.** Pin:
     value is **cited from the merged records** (the EXACT committed identifier, per the reuse pin below — #487) **alongside
     the instance's measured cross-wave wobble**, not re-served. Re-serving any additional arm is **opt-in and
     justified by a named load-bearing delta** — and it stays cheap to change your mind when one becomes
-    load-bearing at interpretation time, provided you name which recovery you actually bought. Re-serving the
-    prior arm ALONE does not put its delta on one scale: the fresh value lands on a NEW session's scale while
-    the arm it is read against stays on this wave's, so that delta is cross-session — legitimate only on a
-    still-pinned stack and reported with the ledger's wobble attached, exactly like a cited value (cost: one
-    subject; it buys a fresh value, not a shared scale). The opt-in route that DOES buy a shared scale costs the
+    load-bearing at interpretation time, provided you name which recovery you actually bought. **The scale
+    unit is the serving session, not the wave**, and that cuts both ways. It is why re-serving the prior arm
+    ALONE does not put its delta on one scale: the fresh value lands on a NEW session's scale while the arm it
+    is read against stays on the session that produced it, so that delta is cross-session — legitimate only on
+    a still-pinned stack and reported with the ledger's wobble attached, exactly like a cited value (cost: one
+    subject; it buys a fresh value, not a shared scale). And it is equally why two of THIS wave's own arms
+    served in SEPARATE sessions are a cross-session read too, carrying the band exactly like a cited value —
+    being new buys nothing on its own; being served together is what buys a shared scale. (The ledger's
+    cross-wave figure is the conservative bound for a within-wave cross-session read: same stack, less
+    elapsed time, so it over-covers rather than under-covers.) The opt-in route that DOES buy a shared scale costs the
     PAIR: re-serve the prior arm alongside the arm it is compared against, both in the new session (cost: two
     subjects) — still an order of magnitude below re-serving the slate. Buy the pair for the one delta whose
     expected size sits inside the wobble band; otherwise the citation path is both cheaper and the honest one.
@@ -283,8 +290,9 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   context.
 - **design-audit — the design's DATA-TRUSTABILITY** (`audit_experiment --design` → `DESIGN_AUDIT.md`): a cross-family
   review of the *proposal* — does it produce reliable, comparable data for its stated purpose? Instrument pins (unpinned
-  judge/rubric/battery/eval definitions), citation hygiene (a cited value missing its wobble band, or a cited delta
-  smaller than the band it carries with nothing re-served together to resolve it),
+  judge/rubric/battery/eval definitions), cross-scale band hygiene (the scale unit is the serving SESSION, not the
+  wave: any delta read across two sessions missing its wobble band — a cited prior-wave value or the design's own
+  second session alike — or a delta smaller than the band it carries with nothing re-served together to resolve it),
   confounds that corrupt the number, variable-pinning, anchor reproduction, honest component / parse% reporting,
   execution under-specification, and is-this-the-right/cheapest-data. A lean design that cites every prior-wave value
   with its band and re-serves nothing beyond the lean slate's floor subject + one anchor-gate pair draws **no finding
