@@ -65,8 +65,9 @@ are not.** Pin:
 - **What's measured + comparability (the load-bearing core).** The arms; the canonical metric with **EXACT eval
   definitions** (load-bearing); **comparability** — the HARD instrument pins (judge model + rubric, battery bytes,
   eval definitions), the anchor-gate, and a measured wobble band on every prior-wave value **the purpose actually
-  reads a delta against** (name that comparison set in `DESIGN.md`; it is what the CHECKLIST's delta-provenance
-  gate checks, and what the citation-default policy below scopes); the confound controls
+  reads a delta against** (name that comparison set in `DESIGN.md`; those are the deltas the CHECKLIST's
+  delta-provenance gate resolves by citation or by re-serving, and what the citation-default policy below
+  scopes — a delta between two arms THIS wave serves is already on one scale and needs neither); the confound controls
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
@@ -286,7 +287,8 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   smaller than the band it carries with nothing re-served together to resolve it),
   confounds that corrupt the number, variable-pinning, anchor reproduction, honest component / parse% reporting,
   execution under-specification, and is-this-the-right/cheapest-data. A lean design that cites every prior-wave value
-  with its band and re-serves nothing draws **no finding on that basis** — the citation path is the rule, not a gap.
+  with its band and re-serves nothing beyond the lean slate's floor subject + one anchor-gate pair draws **no finding
+  on that basis** — the citation path is the rule, not a gap.
   It leads with a qualitative evidence-quality read
   ("this will produce a clean comparable number" / "this confound will muddy it"). Claim-rigor dimensions (decision-rule
   soundness, claim-scope, power) fire **only if the design actually asserts a verdict** — a measurement design that states a

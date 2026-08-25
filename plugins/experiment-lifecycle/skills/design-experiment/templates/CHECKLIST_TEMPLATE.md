@@ -154,10 +154,12 @@
 - ☐ [BLOCK] Anchor-gate: the base/reference reproduces its standing value (and any loaded released
       checkpoint matches its published numbers) BEFORE pooling or comparing.                      ev:
 - ☐ [BLOCK] Delta provenance: every pairwise delta the DESIGN names as load-bearing resolves by ONE
-      explicitly recorded route — either CITED from the merged records (record identifier + the measured
-      cross-wave wobble band attached; the default) or RE-SERVED alongside the arm it is read against, with
-      the per-delta justification the DESIGN names (the delta sits inside the band, so the citation path
-      cannot carry it). Absence of re-serving is NOT a defect; a delta with NEITHER route recorded is.
+      explicitly recorded route — (1) MEASURED THIS WAVE: both sides are served by this wave itself, so the
+      delta is already on one scale and needs nothing further (the ordinary route for a delta between two new
+      arms, and for the anchor pair); (2) CITED from the merged records (record identifier + the measured
+      cross-wave wobble band attached; the default for any prior-wave value); (3) RE-SERVED alongside the arm
+      it is read against, with the per-delta justification the DESIGN names (the delta sits inside the band, so
+      the citation path cannot carry it). Absence of re-serving is NOT a defect; a delta with NO recorded route is.
       The canonical grader on EVERY decision cell (no cheap-grader on a decision cell).                  ev:
 - ☐ Full eval rollouts READ (actual text): grader / parse / truncation / think-length all sane.   ev:
 - ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout
