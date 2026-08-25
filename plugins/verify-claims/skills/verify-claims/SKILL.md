@@ -55,7 +55,10 @@ evidence** ladder — each rung read by a foreign model family you're too invest
 - **`verify_claim.sh` — the brief's FACTS** (pre-launch; above).
 - **`audit_experiment.sh --design <exp> [design-file]`** → `DESIGN_AUDIT.md` — the design's
   **DATA-TRUSTABILITY**, PRE-LAUNCH: will it produce reliable, comparable data for its stated purpose?
-  comparability / co-measurement, confounds that corrupt the number, variable-pinning, anchor reproduction,
+  instrument pins (unpinned judge/rubric/battery/eval definitions), citation hygiene (a cited value with no
+  wobble band, or a delta smaller than its band with nothing re-served together to resolve it) — never the mere
+  absence of arms served together, which is the standing default,
+  confounds that corrupt the number, variable-pinning, anchor reproduction,
   honest component / parse% reporting, right/cheapest-data — plus a qualitative evidence-quality read.
   Claim-rigor (decision rules, claim-scope, power) fires **only if the design asserts a verdict** — a
   measurement design states a purpose, not a claim. **Schedule efficiency (#311, reframed #322):** enumerate

@@ -63,36 +63,42 @@ are not.** Pin:
   pass/fail verdicts. (If a design genuinely *does* assert a rigorous claim, that's fine — it just then gets audited as
   one; the default is measurement.)
 - **What's measured + comparability (the load-bearing core).** The arms; the canonical metric with **EXACT eval
-  definitions** (load-bearing); **comparability** — the anchor-gate, and co-measurement on ONE scale **for the arms
-  whose pairwise delta the purpose actually reads** (name that comparison set in `DESIGN.md`; it is what the
-  CHECKLIST's co-measure gate checks, and what the lean anchor policy below scopes); the confound controls
+  definitions** (load-bearing); **comparability** — the HARD instrument pins (judge model + rubric, battery bytes,
+  eval definitions), the anchor-gate, and a measured wobble band on every prior-wave value **the purpose actually
+  reads a delta against** (name that comparison set in `DESIGN.md`; it is what the CHECKLIST's delta-provenance
+  gate checks, and what the citation-default policy below scopes); the confound controls
   that corrupt *the number*; **pinning the independent variable** — name the intervention at the level actually
   varied; a bundled intervention is pinned — and later reported — as the bundle; the data-audit + manifest. This
   is the rigor that earns its keep: the silent failure mode is *a clean pipeline producing a confidently-wrong NUMBER*.
-  - **Comparability is a CHOICE, never a default — the lean anchor policy for repeat waves (researcher standing
-    decision 2026-07-20, re-confirmed 2026-08-08 on #694).** Co-measurement in one serving session buys
-    comparability for the pair it covers, and it is not free: re-serving + re-generating + re-judging a full prior
-    anchor slate ran ~$16/subject eval+judge, ~$200/wave on the depv1 thread — paid wave after wave for deltas
-    nothing in the purpose read. Before every comparability-motivated arm, parameter, or gate, answer **"do we need
-    to compare?"** — name the specific pairwise delta the purpose reads. An arm whose delta against the new arms is
-    not load-bearing does not get re-served just because it was measured before.
-  - **The DEFAULT for a repeat wave on a PINNED instrument stack is the lean anchor slate:** the new arms + a floor
+  - **CITATION is the default for every prior-wave value; RE-SERVING TOGETHER is opt-in and justified per delta —
+    the lean anchor policy, now *the* rule (researcher standing decision 2026-07-20, re-confirmed 2026-08-08 on
+    #694, made unconditional 2026-08-25 on #776).** Instrument pins stay hard — every incident behind this
+    section (judge-era incomparability, battery drift) is an *instrument* failure, and those protections are
+    untouched. What is retired is the expectation that arms get re-served together *for comparability*: that is not
+    free — re-serving + re-generating + re-judging a full prior anchor slate ran ~$16/subject eval+judge,
+    ~$200/wave on the depv1 thread, paid wave after wave for deltas nothing in the purpose read, and ~$200 again
+    in csp1-refusal-footprint-map-1. So the question is never "should these land together?" but **"which specific
+    read delta can the citation path not carry?"** — name that delta and why (its expected size falls inside the
+    thread's measured wobble band), or cite. No arm is re-served "for comparability" without that named
+    justification, and an arm whose delta against the new arms is not load-bearing does not get re-served just
+    because it was measured before.
+  - **The rule for a repeat wave on a PINNED instrument stack is the lean anchor slate:** the new arms + a floor
     subject (e.g. stock) + **ONE anchor pair serving as the anchor-GATE** — a breakage tripwire for the wrong
     adapter, instrument drift, or battery drift, not a re-measurement of the prior slate. Every other prior-wave
     value is **cited from the merged records** (the EXACT committed identifier, per the reuse pin below — #487) **alongside
     the instance's measured cross-wave wobble**, not re-served. Re-serving any additional arm is **opt-in and
     justified by a named load-bearing delta** — and it stays cheap to change your mind when one becomes
     load-bearing at interpretation time, provided you name which recovery you actually bought. Re-serving the
-    prior arm ALONE does NOT make its delta co-measured: the fresh value lands on a NEW session's scale while
+    prior arm ALONE does not put its delta on one scale: the fresh value lands on a NEW session's scale while
     the arm it is read against stays on this wave's, so that delta is cross-session — legitimate only on a
     still-pinned stack and reported with the ledger's wobble attached, exactly like a cited value (cost: one
-    subject; it buys a fresh value, not comparability). A genuinely **co-measured** delta costs the PAIR:
-    re-serve the prior arm together with the arm it is compared against in ONE new session (cost: two
-    subjects) — still an order of magnitude below re-serving the slate. Buy the pair when the delta is close
-    enough to the wobble that a cross-session read can't carry it; otherwise the cheaper route is the honest one.
+    subject; it buys a fresh value, not a shared scale). The opt-in route that DOES buy a shared scale costs the
+    PAIR: re-serve the prior arm alongside the arm it is compared against, both in the new session (cost: two
+    subjects) — still an order of magnitude below re-serving the slate. Buy the pair for the one delta whose
+    expected size sits inside the wobble band; otherwise the citation path is both cheaper and the honest one.
     *Pinned instrument stack* is the precondition, not a formality: same judge model + judge prompt, same
     batteries, same eval definitions. If any of those moved, prior-wave values are not on this wave's scale
-    and the citation path is void — co-measure instead. The judge TRANSPORT is deliberately NOT one of those
+    and the citation path is void — re-serve the pair instead. The judge TRANSPORT is deliberately NOT one of those
     void-triggers (#735): a same-model transport swap is a recorded choice, not a citation-voiding event — cite
     prior-wave values with the standing wobble band you already attach to every cited value, plus a one-line note
     of the swap (and this wave's in-wave anchor pair doubles as a free read of the transport offset).
@@ -275,9 +281,13 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   support the claim** (a records-sufficiency finding, not a pass). Don't check your own claim; route it to independent
   context.
 - **design-audit — the design's DATA-TRUSTABILITY** (`audit_experiment --design` → `DESIGN_AUDIT.md`): a cross-family
-  review of the *proposal* — does it produce reliable, comparable data for its stated purpose? Comparability / co-measurement
-  traps, confounds that corrupt the number, variable-pinning, anchor reproduction, honest component / parse% reporting,
-  execution under-specification, and is-this-the-right/cheapest-data. It leads with a qualitative evidence-quality read
+  review of the *proposal* — does it produce reliable, comparable data for its stated purpose? Instrument pins (unpinned
+  judge/rubric/battery/eval definitions), citation hygiene (a cited value missing its wobble band, or a cited delta
+  smaller than the band it carries with nothing re-served together to resolve it),
+  confounds that corrupt the number, variable-pinning, anchor reproduction, honest component / parse% reporting,
+  execution under-specification, and is-this-the-right/cheapest-data. A lean design that cites every prior-wave value
+  with its band and re-serves nothing draws **no finding on that basis** — the citation path is the rule, not a gap.
+  It leads with a qualitative evidence-quality read
   ("this will produce a clean comparable number" / "this confound will muddy it"). Claim-rigor dimensions (decision-rule
   soundness, claim-scope, power) fire **only if the design actually asserts a verdict** — a measurement design that states a
   purpose but no decision rule is not "incomplete." **Schedule efficiency (#311, reframed #322):** enumerate the
@@ -399,8 +409,8 @@ Prose discipline gets skipped (real incident: an executor trained on truncated d
 buried prose, not a gate). So the design also emits **`CHECKLIST.md`** — the concrete verification gates the executor
 must resolve **with evidence**, ticked in place (it becomes both protocol and record).
 - **Seed it from the `CHECKLIST` template in this skill's `templates/`** — a UNIVERSAL core (lifecycle gates) + a
-  STANDING data-audit gate + a CONDITIONAL menu (sample reads, smoke, anchor-gate, co-measure — each phrased as a
-  *declared invariant*).
+  STANDING data-audit gate + a CONDITIONAL menu (sample reads, smoke, anchor-gate, delta-provenance — each phrased
+  as a *declared invariant*).
 - **Seed from THIS skill's templates only — never from a sibling experiment's registry copy** (#512): a closed
   sibling's `CHECKLIST.md` / `data_audit_manifest.md` is that experiment's completed RECORD (ticks, evidence, and
   resolved counts included), not a template — copying it and string-replacing fields ships fabricated evidence

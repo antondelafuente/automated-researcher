@@ -153,15 +153,16 @@
       (first-batches, or a small-model path) before the real run — no OOM / format / save error.  ev:
 - ☐ [BLOCK] Anchor-gate: the base/reference reproduces its standing value (and any loaded released
       checkpoint matches its published numbers) BEFORE pooling or comparing.                      ev:
-- ☐ [BLOCK] Arms whose pairwise deltas the DESIGN names as load-bearing are co-measured in ONE serving
-      session — the named comparison set, not an implied everything; any value NOT co-measured with the arm
-      it is read against (cited from merged records, or re-served in a separate session) is reported as a
-      cross-session read, carrying its record/session identifier + the measured cross-wave wobble (the lean
-      anchor policy). The canonical grader on EVERY decision cell (no cheap-grader on a decision cell).  ev:
+- ☐ [BLOCK] Delta provenance: every pairwise delta the DESIGN names as load-bearing resolves by ONE
+      explicitly recorded route — either CITED from the merged records (record identifier + the measured
+      cross-wave wobble band attached; the default) or RE-SERVED alongside the arm it is read against, with
+      the per-delta justification the DESIGN names (the delta sits inside the band, so the citation path
+      cannot carry it). Absence of re-serving is NOT a defect; a delta with NEITHER route recorded is.
+      The canonical grader on EVERY decision cell (no cheap-grader on a decision cell).                  ev:
 - ☐ Full eval rollouts READ (actual text): grader / parse / truncation / think-length all sane.   ev:
 - ☐ Decoding config (temperature/top_p/max_new_tokens/seed/sampling mode) PERSISTED in the rollout
-      artifacts (each row or a companion summary) and CONSISTENT across co-measured arms — verifiable from
-      the artifacts, not only from driver source.                                                  ev:
+      artifacts (each row or a companion summary) and CONSISTENT across every arm a load-bearing delta is
+      read across — verifiable from the artifacts, not only from driver source.                    ev:
 - ☐ [BLOCK] Reused prior-wave data pinned to the EXACT committed identifier, never a category word (a
       same-ish name can hide an accidentally-named/bug-artifact condition, #487); where reuse claims
       byte-identical construction, rebuilt from PRIMARY sources and asserted byte-equal in the build

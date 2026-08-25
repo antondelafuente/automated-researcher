@@ -50,7 +50,11 @@
 #                    default re-audit would audit the prior audit instead of the design)
 # --design audits the PROPOSAL's DATA-TRUSTABILITY before any money/GPU moves (third gate alongside
 # verify_claim pre-launch and the close audit): will it produce reliable, comparable data for its stated
-# purpose? comparability/co-measurement, confounds that corrupt the number, variable-pinning, anchor
+# purpose? instrument pins + citation hygiene (NOT the absence of arms served together — #776: hunting
+# "co-measurement" traps here was the vector that regrew a doctrine the researcher retired three times,
+# because lean designs got re-flagged and the language re-accepted at triage; re-serving a prior slate
+# "for comparability" cost ~$200/wave on depv1 and ~$200 again in csp1-refusal-footprint-map-1 for deltas
+# no purpose read), confounds that corrupt the number, variable-pinning, anchor
 # reproduction, cheaper-decisive alternatives. Claim-rigor (decision rules, claim-scope, power) is audited
 # ONLY if the design asserts a verdict — measurement designs state a purpose, not a claim. Motivated by
 # midtrain-interp v2, whose two real flaws (in-sample steering eval; no random-direction control)
@@ -169,9 +173,18 @@ producing a confidently-wrong NUMBER.
 
 Audit these dimensions. For each, try HARD to find a real problem; if there genuinely is none, say
 'no material finding' for it — do NOT invent issues. False findings destroy this tool's value.
-1. VALIDITY / COMPARABILITY (lead) — will any two numbers being compared be on the same scale, same metric,
-   same data distribution, co-measured? Any train/eval leakage, probe contamination, or selection effect
+1. VALIDITY / COMPARABILITY (lead) — three checks, in this order. (a) INSTRUMENT PINS: are the judge model +
+   rubric, battery bytes, and exact eval definitions pinned across everything being compared? An unpinned
+   instrument voids comparability outright. (b) CITED-VALUE HYGIENE: prior-wave values are CITED from the merged
+   records BY DEFAULT — does each cited value carry its record identifier and the thread's MEASURED cross-wave
+   wobble band? A cited value with no band is a finding. (c) BAND-VS-DELTA: is any load-bearing delta smaller
+   than the wobble band it carries, with nothing re-served together to resolve it? That is a finding — the
+   citation path cannot carry that read. Any train/eval leakage, probe contamination, or selection effect
    built into the construction? Does the anchor / baseline reproduce?
+   DO NOT flag the absence of arms served together in one session as a defect when the citation path above is
+   valid: citing prior-wave values with bands is the researcher's standing rule, not a gap to be closed, and
+   re-serving is opt-in per named delta. A design that cites every prior-wave value with its band and re-serves
+   only its floor subject + one anchor-gate pair is CORRECT — say 'no material finding' on that basis.
 2. CONFOUNDS THAT CORRUPT THE NUMBER — are the planned comparisons matched; are the baselines and negative
    controls (random/orthogonal/shuffled class, placebo arms) IN THE PLAN, not deferred? Is a nuisance
    variable (descriptor/length/format) confounded with the signal?
@@ -184,7 +197,9 @@ Audit these dimensions. For each, try HARD to find a real problem; if there genu
    of checkpoints, prompt formats), where a wrong guess silently changes the DATA.
 5. RIGHT / CHEAPEST DATA FOR THE PURPOSE — given what the design says the data is for, is THIS the right
    data, and is there a materially cheaper way to get the same trustworthy data (or a small addition that
-   makes it cleaner / more comparable)?
+   makes it cleaner / more comparable)? Re-serving prior-wave arms is not such an addition unless dimension
+   1(c) fired on a specific delta — proposing extra arms 'for comparability' is the expensive direction here,
+   not the cheap one.
 6. CLAIM-RIGOR — CONDITIONAL: fire ONLY IF the design actually asserts a rigorous interpretation / verdict
    / pre-registered conclusion. THEN audit it as one (pre-registration completeness: success criteria AND
    falsifiers with thresholds; claim-scope: does the evidence license the claim — causal strength,
