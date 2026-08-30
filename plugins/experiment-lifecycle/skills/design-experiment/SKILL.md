@@ -508,7 +508,8 @@ run context received it, ruled as designer-of-record and consumed the question �
 supervising the run found the inbox already cleared. Two designers-of-record by construction; same ruling both
 times only by luck. So at dispatch:
 1. **Write that name into `START.md`'s designer-of-record section** (the template generates the line from it) —
-   it is the executor's `--designer-session` bind.
+   it is the executor's `--designer-session` bind, and the *seed only*: once bound, **the record is the address
+   of record**, and the brief's copy is never reissued.
 2. **Verify it landed on the record** rather than trusting the brief: `--designer-session <your harness session
    name>` is a required argument of `verify-bootstrap` below, matched EXACTLY against what the executor bound.
 3. **No addressable session on this substrate?** Say so on the record — the reserved literal `record-only` —
@@ -516,7 +517,11 @@ times only by luck. So at dispatch:
    a question. Never substitute a `send-keys`-to-a-tmux-name push for the address you don't have.
 4. **If the designer role moves mid-run** (you hand off, or you are relaunched under a new name), re-bind it —
    `run_supervision_record.sh checkpoint <run-id> --designer-session <new name>` — before the executor's next
-   question, or its notify goes to a session that no longer holds the run.
+   question, or its notify goes to a session that no longer holds the run. That one write is the WHOLE handoff:
+   the executor is told to resolve the address off the record (`designer-session <run-id>`) immediately before
+   every notify, precisely so a rebind takes effect without reissuing the brief — which is also why the stale
+   `START.md` line is harmless, and why **re-binding is not optional**: a successor that leaves the old name
+   bound is addressable only at the session that just left the run.
 
 Why fresh-context dispatch is the default:
 - **It tests the brief's self-sufficiency on every real run** — the product's core promise ("hand an agent a brief, it
@@ -686,7 +691,8 @@ session, including every heartbeat tick.
 
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you — through
 the durable question/answer inbox on the run-supervision record where the instance uses one,
-`has-question`/`answer-question`, with its push notify addressed to the `designer_session` you bound at dispatch;
+`has-question`/`answer-question`, with its push notify addressed to whatever `designer_session` the record holds
+when it asks — so if the role moves to you mid-run, re-bind that field or the notify chases your predecessor;
 a `record-only` binding means **no** push exists, so your own `has-question` poll is the only thing that surfaces
 a question), but you **do not drive it** mid-run (that defeats the self-sufficiency test) — you
 review at the synthesis pass. The heartbeat nudge above is bounded health supervision, not driving: it pokes an idle

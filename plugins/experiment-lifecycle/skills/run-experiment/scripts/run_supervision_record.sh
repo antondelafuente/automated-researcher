@@ -49,7 +49,12 @@
 #   (`has-question`/`has-answer`) IS the channel. The product interprets only that one value; any other is an
 #   opaque harness name it carries verbatim. `verify-bootstrap` requires the field to be BOUND and to match,
 #   so a dispatch can never complete with the designer's address left unrecorded (the pre-#796 state, where
-#   the address lived only as free text in `START.md`).
+#   the address lived only as free text in `START.md`). THIS RECORD IS THE ADDRESS OF RECORD: `START.md`'s
+#   line is only the dispatch-time seed the executor binds at `start`, and a designer handoff (or a relaunch
+#   under a new name) is published by `checkpoint --designer-session <new name>` alone — the brief is never
+#   reissued. So a sender resolves the address through the `designer-session` getter immediately before EACH
+#   notify; caching the brief's copy, or the value it bound at `start`, sends a post-handoff notify to a
+#   session that no longer holds the run — the same wrong-recipient class this field exists to end.
 #
 # SUPERVISION-BOOTSTRAP RECEIPT (automated-researcher#628): `create_thread` (or the Claude-path session spawn)
 #   only proves the executor's thread/session exists — it says nothing about whether the executor ever wrote
@@ -1000,6 +1005,9 @@ cmd_terminal_route(){
 # session-handle/worktree-path. An executor reads this to address its `ask-question` notify — a session-
 # addressed message primitive (`SendMessage <name>`), never `send-keys` to a tmux name, which under an RC
 # host lands in whichever zero-context sibling holds the keyboard (the 2026-08-30 incident in the header).
+# Read it FRESH before every notify, never cached from `START.md` or from the `start` bind: this getter is
+# the only surface that reflects a mid-run `checkpoint --designer-session` rebind (a designer handoff), and
+# a stale cached address routes the question to the session that just left the run.
 cmd_designer_session(){
   local id=$1; local file; file=$(record_path "$id")
   [ -f "$file" ] || exit 1

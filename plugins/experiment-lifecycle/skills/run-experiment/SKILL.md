@@ -46,14 +46,21 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   the durable question/answer inbox where your instance uses one (`ask-question` / `has-answer` / `consume-question`
   on the run-supervision record, `references/CODEX_SUPERVISION.md` §3), otherwise however the brief says to reach
   them.
-- **Address the designer by the harness session name the brief gives you — never by a tmux name
-  (automated-researcher#796).** `START.md`'s designer-of-record section carries a `designer_session`; bind it
-  verbatim at `start` (`--designer-session <name>`), and push your notify to THAT address with your substrate's
-  session-addressed message primitive (Claude Code: `SendMessage <designer_session>`), *after* the question is
-  durably recorded by `ask-question`. **Do not `tmux send-keys` a session name**: under a Remote Control host one
+- **Address the designer by the harness session name ON THE RECORD, resolved fresh at push time — never a tmux
+  name, and never a name you remember (automated-researcher#796).** `START.md`'s designer-of-record section
+  carries a `designer_session`, but that is only the **dispatch-time seed**: you bind it verbatim at `start`
+  (`--designer-session <name>`), and from that moment **the record is the address of record.** The designer
+  re-binds it with `checkpoint --designer-session <new name>` whenever the role moves mid-run (a handoff, a
+  relaunch under a new name), and the brief is never reissued — so resolve the address immediately before
+  **every** notify, `run_supervision_record.sh designer-session <run-id>`, and push to what THAT prints, not to
+  the line you read in `START.md` or the address you used last time. (Getter exits non-zero = the field is
+  unbound, which is a defect in your own `start` — bind it from `START.md` with `checkpoint --designer-session`
+  and read it back; never push to an address you never recorded.) Push with your substrate's session-addressed
+  message primitive (Claude Code: `SendMessage <resolved name>`), *after* the question is durably recorded by
+  `ask-question`. **Do not `tmux send-keys` a session name**: under a Remote Control host one
   tmux name fronts many spawned zero-context sessions, so the push lands in whichever sibling holds the keyboard
   — on 2026-08-30 (`depv1-negemo-qwen-chat-carrier-emotion-1`) exactly that happened, and the sibling ruled as
-  designer-of-record and consumed the question before the supervising session saw it. If `designer_session` is
+  designer-of-record and consumed the question before the supervising session saw it. If the resolved value is
   the literal `record-only`, or your substrate has no such primitive, **the record IS the channel** — the
   designer polls `has-question`; do not improvise another push. Either way the question is already durable
   before the notify, so a lost notify costs latency, not the question — keep working on everything the gap

@@ -28,13 +28,17 @@ watches your progress; talk to it with clear status lines.
        `ListAgents` shows for this session), never an assumed tmux/fleet name. -->
 - **Bind it on the run-supervision record at `start`:** `--designer-session <designer_session>` (the designer's
   `verify-bootstrap` refuses to call dispatch complete until this matches).
+- **This line is the SEED; the record is the address of record.** The designer re-binds `designer_session` with
+  `checkpoint --designer-session <new name>` when the role moves mid-run (a handoff, a relaunch under a new
+  name) — this brief is not reissued, so it goes stale on purpose. Resolve the live address immediately before
+  **every** notify: `run_supervision_record.sh designer-session <run-id>`, and address what it prints.
 - **How to reach them:** record the question durably first — `run_supervision_record.sh ask-question <run-id>
-  --text "…"` — then push one notify addressed to `<designer_session>` with your substrate's
-  session-addressed message primitive (Claude Code: `SendMessage <designer_session>`). **Never `tmux send-keys`
+  --text "…"` — then resolve the address as above and push one notify to it with your substrate's
+  session-addressed message primitive (Claude Code: `SendMessage <resolved name>`). **Never `tmux send-keys`
   a session name:** under a Remote-Control host one tmux name fronts many spawned zero-context sessions, so the
   keystroke lands in whichever sibling holds the keyboard — on 2026-08-30 that sibling read the record, ruled as
   designer-of-record and consumed the question before the supervising session ever saw it.
-- **`<designer_session>` = `record-only`, or no such primitive here → do not improvise a push.** The record IS
+- **Resolved value = `record-only`, or no such primitive here → do not improvise a push.** The record IS
   the channel: the designer polls `has-question`. Keep working on everything the gap doesn't block either way —
   the push is a notification, never something you idle on.
 

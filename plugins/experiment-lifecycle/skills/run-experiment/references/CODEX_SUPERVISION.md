@@ -126,7 +126,13 @@ whichever sibling holds the keyboard — on 2026-08-30 a sibling with no run con
 question that way (automated-researcher#796). The reserved literal **`record-only`** is the honest binding for a
 substrate with no addressable designer session: there is no push and the designer's own `has-question` poll is
 what surfaces a question. `verify-bootstrap` (§2) requires the field bound and matching, so a dispatch cannot
-complete with the designer's address unrecorded. It is deliberately **not** folded into `question_route`:
+complete with the designer's address unrecorded. **The record — not `START.md` — is the address of record:**
+the brief's line is the dispatch-time seed the executor binds at `start`, after which a designer handoff or a
+relaunch under a new name is published by `checkpoint --designer-session <new name>` alone (the brief is never
+reissued). So the executor resolves the address with the `designer-session` getter immediately before *each*
+notify rather than reusing the brief's copy or the value it once bound — a sender that caches past a mid-run
+rebind reproduces exactly the "notify reaches a session that no longer holds the run" failure this field
+exists to end. It is deliberately **not** folded into `question_route`:
 that field names the *transport* and stays uninterpreted (default `record` — poll this file, correctly so),
 while `designer_session` names the *recipient* the push on top of that transport is addressed to. Improvising
 the recipient was the whole defect — the transport was already durable and right.

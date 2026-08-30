@@ -18,7 +18,12 @@
   never a fleet-shaped guess, never the tmux name — write it into `START.md`, verify it landed, own the polling
   when it binds `record-only`, and re-bind on a mid-run designer handoff; `run-experiment` tells the executor to
   bind it verbatim at `start` and push its `ask-question` notify to that address, never `tmux send-keys` to a
-  session name. The question stays durable before the notify, so a lost push costs latency, not the question.
+  session name. **The record, not `START.md`, is the address of record:** the brief's line is only the
+  dispatch-time seed, so a designer handoff is published by `checkpoint --designer-session <new name>` alone
+  (the brief is never reissued) and the executor resolves the address through the `designer-session` getter
+  immediately before EACH notify — caching the brief's copy would send a post-handoff question to the session
+  that just left the run, the same wrong-recipient class this field exists to end (review round 1).
+  The question stays durable before the notify, so a lost push costs latency, not the question.
   Slice 1 of #796 only: the executor's own harness address, heartbeat survivability under RC, the handoff path,
   and the instance-side fleet retirement are separate slices.
 - experiment-lifecycle 0.3.84 (2026-08-02): makes `design-experiment` prove the kickoff actually SUBMITTED
