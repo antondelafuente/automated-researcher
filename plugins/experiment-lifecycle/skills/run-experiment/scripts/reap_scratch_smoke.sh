@@ -9,6 +9,8 @@
 #     directory in place and exit non-zero
 #   - the unset-seam / no-rclone NO-OPs (exit 0, nothing deleted, nothing invoked)
 #   - path-sanity refusals: a symlinked scratch dir, the run's own bound worktree, and a cwd inside it
+#   - the destination probe matches the run-id LITERALLY (a '.' in a run-id is not a regex wildcard
+#     that could pass the gate against a different, similarly-named archive prefix)
 # rclone is stubbed on PATH — nothing is uploaded and no network is touched.
 set -uo pipefail
 
@@ -165,6 +167,17 @@ rec create p_cwd >/dev/null; rec close p_cwd >/dev/null
 s=$(mkscratch p_cwd); reset_log
 if (cd "$s" && bash "$R" p_cwd "$s" >/dev/null 2>&1); then no cwd-inside-refused; else ok cwd-inside-refused; fi
 [ -d "$s" ] && ok cwd-inside-scratch-kept || no cwd-inside-scratch-kept
+
+# --- the destination probe matches the run-id LITERALLY, not as a regex --------------------------------
+# A run-id is a free-form identifier: a '.' in it must not match an arbitrary character in some OTHER
+# archive prefix that happens to be listed under the same root.
+rec create "run.x" >/dev/null; rec close "run.x" >/dev/null
+s="$TMP/work/run.x"; mkdir -p "$s"; echo payload > "$s/out.txt"
+mkdir -p "$STUB_STORE/runax"   # would match the regex `run.x/`, is NOT the intended archive
+reset_log
+if STUB_SKIP_STORE=1 bash "$R" "run.x" "$s" >/dev/null 2>&1; then no lsf-literal-match; else ok lsf-literal-match; fi
+[ -d "$s" ] && ok lsf-literal-scratch-kept || no lsf-literal-scratch-kept
+rm -rf "$STUB_STORE/runax"
 
 # --- argument validation ----------------------------------------------------------------------------
 if bash "$R" only-one-arg >/dev/null 2>&1; then no args-refused; else ok args-refused; fi

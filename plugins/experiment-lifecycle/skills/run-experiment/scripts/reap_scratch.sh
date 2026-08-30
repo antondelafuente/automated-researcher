@@ -145,7 +145,9 @@ fi
 # Verification, part 2 (#729 + gpu-job's r2_exists incident): prove something actually landed at the
 # INTENDED prefix by listing the PARENT and matching the run-id in it — a single-path `rclone lsf` exits
 # 0 on a missing path, so it would pass against a destination that was never written.
-if ! rclone lsf "$dest_root/" 2>/dev/null | grep -qx "$id/"; then
+# -F as well as -x: a run-id is a free-form identifier, so treating it as a regex would let '.' match any
+# character and pass this gate against a DIFFERENT, similarly-named archive prefix.
+if ! rclone lsf "$dest_root/" 2>/dev/null | grep -qxF "$id/"; then
   die "ARCHIVE NOT FOUND at the intended destination: '$id/' is not listed under '$dest_root/'. Scratch left in place. Record this on the run's ledger line."
 fi
 
