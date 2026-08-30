@@ -334,7 +334,25 @@ jobs:
             # automated-researcher#223) — and, being the same single read, cannot race against the bodies.
             # The issue-author login above is unaffected (GraphQL's `--json author` already returns
             # `app/<slug>` correctly) and is left as-is.
-            mapfile -t comment_logins < <(jq -r '.[].user.login // "null"' /tmp/raw_comments.json)
+            #
+            # automated-researcher#797: the alternative operator MUST be applied per element
+            # (`.[] | (.user.login // "null")`), never to the whole `.[].user.login` stream. jq's `//` yields
+            # its right side when the left produces NO outputs, so the stream form emitted a single literal
+            # `null` login for a ticket with ZERO comments (`[] | jq -r '.[].user.login // "null"'` -> `null`)
+            # — a login `canonical_login` correctly refuses, forcing EVERY fresh ticket (triaged on `opened`,
+            # before anyone has commented) down the capability-reduced path: 12/12 of the runs surveyed on
+            # #797, including tickets filed by the researcher and by the engineer bots. Fail-closed, so
+            # nothing unsafe happened, but the adjudicator's file-footprint / wave-batching check silently
+            # never ran. The per-element form yields no logins for an empty array while still emitting the
+            # `null` sentinel for a comment whose `user` is missing/null (a deleted account), which
+            # `canonical_login` keeps rejecting — the original intent. That second half also closes a
+            # fail-OPEN case the stream form had: `//` on a stream keeps only its TRUTHY outputs, so a
+            # deleted-account comment sitting alongside any comment with a real login had its `null`
+            # silently filtered out of the login list entirely — its (attacker-controllable) body still rode
+            # into the packet while the sentinel meant to force the untrusted path had vanished.
+            # Regression-covered by
+            # `classify_ticket_trust_smoke.sh`, which runs THIS line's jq program extracted from this file.
+            mapfile -t comment_logins < <(jq -r '.[] | (.user.login // "null")' /tmp/raw_comments.json)
             author_login=$(jq -r '.tickets[0].author' triage-packets.json)
             trusted_author=$("$GITHUB_WORKSPACE/.github/scripts/classify-ticket-trust.sh" "$ALLOWLIST" "$author_login" "${comment_logins[@]}")
             echo "ticket #$ISSUE_NUMBER trusted_author=$trusted_author"
