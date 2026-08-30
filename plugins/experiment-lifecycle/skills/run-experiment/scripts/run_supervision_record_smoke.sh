@@ -17,7 +17,11 @@
 # Also covers #673's derive-at-`start` session handle: EXPERIMENT_SESSION_HANDLE_CMD bound when
 # --session-handle is omitted, an explicit handle still winning verbatim but WARNED when it isn't this
 # session's own, `checkpoint` never deriving, and the unset/failing/empty/multi-line seam cases binding
-# nothing without ever failing the run's first action.
+# nothing without ever failing the run's first action. Also covers #796's designer address: the
+# designer_session field (bind at start/checkpoint, getter, status line, whitespace rejected because the
+# value is an ADDRESS handed to a message primitive, the reserved `record-only` literal, legacy records
+# reading as absent) and verify-bootstrap's now-required --designer-session (match, fail-fast mismatch,
+# timeout while unbound, missing-arg rejected).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -470,55 +474,60 @@ if run look-again la1 oops >/dev/null 2>&1; then no surplus-lookagain-rejected; 
 
 # --- verify-bootstrap: successful bootstrap (all fields match + look-again bound) ---
 run create vb1 --handoff /art/vb1/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb1 --question-route record --terminal-route record --look-again "111" >/dev/null
+  --worktree /ws/run/vb1 --question-route record --terminal-route record --designer-session designer-vb1 \
+  --look-again "111" >/dev/null
 if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb1 --question-route record --terminal-route record \
+     --worktree /ws/run/vb1 --question-route record --terminal-route record --designer-session designer-vb1 \
      --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb1.out" 2>&1; then ok verify-bootstrap-success; else no verify-bootstrap-success; fi
 grep -q "supervision-bootstrap receipt PASSED" "$TMP/vb1.out" && ok verify-bootstrap-receipt-line || no verify-bootstrap-receipt-line
 
 # --- verify-bootstrap: missing record — never appears, fails at the timeout deadline (not fail-fast) ---
 if run verify-bootstrap vb_nonesuch --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb_nonesuch --question-route record --terminal-route record \
+     --worktree /ws/run/vb_nonesuch --question-route record --terminal-route record --designer-session designer-x \
      --timeout-sec 1 --poll-interval-sec 1 >"$TMP/vb_missing.out" 2>&1; then no verify-bootstrap-missing-record; else ok verify-bootstrap-missing-record; fi
 grep -q "no supervision record ever appeared" "$TMP/vb_missing.out" && ok verify-bootstrap-missing-message || no verify-bootstrap-missing-message
 
 # --- verify-bootstrap: wrong worktree/mode/route — fails IMMEDIATELY, not at the (long) timeout deadline ---
 run create vb2 --handoff /art/vb2/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb2 --question-route record --terminal-route record --look-again "222" >/dev/null
+  --worktree /ws/run/vb2 --question-route record --terminal-route record --designer-session designer-vb2 \
+  --look-again "222" >/dev/null
 VB2_START=$(date +%s)
 if run verify-bootstrap vb2 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/WRONG --question-route record --terminal-route record \
+     --worktree /ws/run/WRONG --question-route record --terminal-route record --designer-session designer-vb2 \
      --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb2.out" 2>&1; then no verify-bootstrap-wrong-worktree; else ok verify-bootstrap-wrong-worktree; fi
 VB2_ELAPSED=$(( $(date +%s) - VB2_START ))
 [ "$VB2_ELAPSED" -lt 10 ] && ok verify-bootstrap-wrong-worktree-failfast || no "verify-bootstrap-wrong-worktree-failfast (took ${VB2_ELAPSED}s)"
 grep -q "worktree_path mismatch" "$TMP/vb2.out" && ok verify-bootstrap-wrong-worktree-message || no verify-bootstrap-wrong-worktree-message
 
 run create vb3 --handoff /art/vb3/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb3 --question-route record --terminal-route record --look-again "333" >/dev/null
+  --worktree /ws/run/vb3 --question-route record --terminal-route record --designer-session designer-vb3 \
+  --look-again "333" >/dev/null
 if run verify-bootstrap vb3 --executor-family codex --supervision-mode autonomous-detached \
-     --worktree /ws/run/vb3 --question-route record --terminal-route record \
+     --worktree /ws/run/vb3 --question-route record --terminal-route record --designer-session designer-vb3 \
      --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb3.out" 2>&1; then no verify-bootstrap-wrong-mode; else ok verify-bootstrap-wrong-mode; fi
 grep -q "supervision_mode mismatch" "$TMP/vb3.out" && ok verify-bootstrap-wrong-mode-message || no verify-bootstrap-wrong-mode-message
 
 run create vb4 --handoff /art/vb4/TEMP.md --executor-family claude --supervision-mode controller-supervised \
-  --worktree /ws/run/vb4 --question-route record --terminal-route record --look-again "444" >/dev/null
+  --worktree /ws/run/vb4 --question-route record --terminal-route record --designer-session designer-vb4 \
+  --look-again "444" >/dev/null
 if run verify-bootstrap vb4 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb4 --question-route record --terminal-route record \
+     --worktree /ws/run/vb4 --question-route record --terminal-route record --designer-session designer-vb4 \
      --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb4.out" 2>&1; then no verify-bootstrap-wrong-family; else ok verify-bootstrap-wrong-family; fi
 grep -q "executor_family mismatch" "$TMP/vb4.out" && ok verify-bootstrap-wrong-family-message || no verify-bootstrap-wrong-family-message
 
 run create vb5 --handoff /art/vb5/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb5 --question-route "chan:#other" --terminal-route record --look-again "555" >/dev/null
+  --worktree /ws/run/vb5 --question-route "chan:#other" --terminal-route record --designer-session designer-vb5 \
+  --look-again "555" >/dev/null
 if run verify-bootstrap vb5 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb5 --question-route record --terminal-route record \
+     --worktree /ws/run/vb5 --question-route record --terminal-route record --designer-session designer-vb5 \
      --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb5.out" 2>&1; then no verify-bootstrap-wrong-qroute; else ok verify-bootstrap-wrong-qroute; fi
 grep -q "question_route mismatch" "$TMP/vb5.out" && ok verify-bootstrap-wrong-qroute-message || no verify-bootstrap-wrong-qroute-message
 
 # --- verify-bootstrap: bootstrap timeout — record active + all fields match, but no look-again receipt yet ---
 run create vb6 --handoff /art/vb6/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb6 --question-route record --terminal-route record >/dev/null
+  --worktree /ws/run/vb6 --question-route record --terminal-route record --designer-session designer-vb6 >/dev/null
 if run verify-bootstrap vb6 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb6 --question-route record --terminal-route record \
+     --worktree /ws/run/vb6 --question-route record --terminal-route record --designer-session designer-vb6 \
      --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb6.out" 2>&1; then no verify-bootstrap-timeout; else ok verify-bootstrap-timeout; fi
 grep -q "never reached the full expected state" "$TMP/vb6.out" && ok verify-bootstrap-timeout-message || no verify-bootstrap-timeout-message
 
@@ -527,25 +536,92 @@ grep -q "never reached the full expected state" "$TMP/vb6.out" && ok verify-boot
 # poll_sec, so --timeout-sec 1 --poll-interval-sec 30 could block ~30s instead of failing near 1s) ---
 VB8_START=$(date +%s)
 if run verify-bootstrap vb_overshoot --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb_overshoot --question-route record --terminal-route record \
+     --worktree /ws/run/vb_overshoot --question-route record --terminal-route record --designer-session designer-x \
      --timeout-sec 1 --poll-interval-sec 30 >/dev/null 2>&1; then no verify-bootstrap-no-overshoot; else ok verify-bootstrap-no-overshoot; fi
 VB8_ELAPSED=$(( $(date +%s) - VB8_START ))
 [ "$VB8_ELAPSED" -lt 10 ] && ok verify-bootstrap-no-overshoot-timing || no "verify-bootstrap-no-overshoot-timing (took ${VB8_ELAPSED}s)"
 
 # --- verify-bootstrap: terminal (stopped/closed/invalid) records refused immediately, never treated as a healthy wait ---
 run create vb7 --handoff /art/vb7/TEMP.md --executor-family codex --supervision-mode controller-supervised \
-  --worktree /ws/run/vb7 --question-route record --terminal-route record --look-again "777" >/dev/null
+  --worktree /ws/run/vb7 --question-route record --terminal-route record --designer-session designer-vb7 \
+  --look-again "777" >/dev/null
 run stop vb7 >/dev/null
 if run verify-bootstrap vb7 --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/vb7 --question-route record --terminal-route record \
+     --worktree /ws/run/vb7 --question-route record --terminal-route record --designer-session designer-vb7 \
      --timeout-sec 30 --poll-interval-sec 1 >/dev/null 2>&1; then no verify-bootstrap-stopped-refused; else ok verify-bootstrap-stopped-refused; fi
 if run verify-bootstrap broken --executor-family codex --supervision-mode controller-supervised \
-     --worktree /ws/run/broken --question-route record --terminal-route record \
+     --worktree /ws/run/broken --question-route record --terminal-route record --designer-session designer-x \
      --timeout-sec 30 --poll-interval-sec 1 >/dev/null 2>&1; then no verify-bootstrap-corrupt-refused; else ok verify-bootstrap-corrupt-refused; fi
 
 # --- verify-bootstrap: required-arg / malformed-timeout validation ---
-if run verify-bootstrap vb1 --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record >/dev/null 2>&1; then no verify-bootstrap-missing-family-arg-rejected; else ok verify-bootstrap-missing-family-arg-rejected; fi
-if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record --timeout-sec abc >/dev/null 2>&1; then no verify-bootstrap-bad-timeout-rejected; else ok verify-bootstrap-bad-timeout-rejected; fi
+if run verify-bootstrap vb1 --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record --designer-session designer-vb1 >/dev/null 2>&1; then no verify-bootstrap-missing-family-arg-rejected; else ok verify-bootstrap-missing-family-arg-rejected; fi
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x --question-route record --terminal-route record --designer-session designer-vb1 --timeout-sec abc >/dev/null 2>&1; then no verify-bootstrap-bad-timeout-rejected; else ok verify-bootstrap-bad-timeout-rejected; fi
+
+# ===== #796: designer_session — the designer-of-record's harness session name (the push address) =====
+# The incident class: the designer was addressed by tmux session name, but under a Remote-Control host one
+# tmux name fronts many spawned zero-context sessions, so the notify landed in a random sibling that then
+# ruled as designer-of-record. The address now lives on the record, in the shape a session-addressed message
+# primitive (`SendMessage <name>`) takes.
+dsession(){ run designer-session "$1"; }
+
+# --- bound at start, readable, re-bindable at checkpoint (a designer handoff mid-run) ---
+run start ds1 --handoff /art/ds1/TEMP.md --designer-session "design-negemo-carrier-7a" >/dev/null
+[ "$(dsession ds1)" = "design-negemo-carrier-7a" ] && ok designer-session-start || no designer-session-start
+run checkpoint ds1 --designer-session "design-negemo-carrier-9c" >/dev/null
+[ "$(dsession ds1)" = "design-negemo-carrier-9c" ] && ok designer-session-checkpoint || no designer-session-checkpoint
+# --- the reserved `record-only` literal is a legal value (no addressable designer session) ---
+run start ds2 --designer-session record-only >/dev/null
+[ "$(dsession ds2)" = "record-only" ] && ok designer-session-record-only || no designer-session-record-only
+# --- absent / missing-record fail closed (exit 1, no output), same shape as the other getters ---
+run start ds3 >/dev/null
+if dsession ds3 >/dev/null 2>&1; then no designer-session-absent-failclosed; else ok designer-session-absent-failclosed; fi
+if dsession nonesuch >/dev/null 2>&1; then no designer-session-missing-failclosed; else ok designer-session-missing-failclosed; fi
+# --- empty value rejected; a whitespace-carrying value rejected on BOTH start and checkpoint (it is an
+#     ADDRESS handed to a message primitive as one argument, not free text) ---
+if run checkpoint ds3 --designer-session "" >/dev/null 2>&1; then no designer-session-empty-rejected; else ok designer-session-empty-rejected; fi
+if run checkpoint ds3 --designer-session "claude-rc, the RC host" >/dev/null 2>&1; then no designer-session-whitespace-rejected; else ok designer-session-whitespace-rejected; fi
+if run start ds4 --designer-session "two words" >/dev/null 2>&1; then no designer-session-whitespace-start-rejected; else ok designer-session-whitespace-start-rejected; fi
+# the rejected binds left nothing behind
+if dsession ds3 >/dev/null 2>&1; then no designer-session-rejected-no-write; else ok designer-session-rejected-no-write; fi
+# --- surplus arg rejected ---
+if run designer-session ds1 oops >/dev/null 2>&1; then no surplus-designersession-rejected; else ok surplus-designersession-rejected; fi
+# --- status surfaces it ---
+printf '%s\n' "$(run status ds1)" | grep -qx 'designer_session=design-negemo-carrier-9c' \
+  && ok status-designer-session || no status-designer-session
+# --- ambient env must not leak into write_record (same rule as the other fields) ---
+run start ds5 --handoff /art/ds5/TEMP.md >/dev/null
+DESIGNER_SESSION="evil-sibling" run checkpoint ds5 --handoff /art/ds5/TEMP2.md >/dev/null
+if dsession ds5 >/dev/null 2>&1; then no ambient-no-designer-session-leak; else ok ambient-no-designer-session-leak; fi
+# --- legacy record (none of the new fields) reads as absent, not corrupt ---
+if run designer-session legacy >/dev/null 2>&1; then no legacy-no-designer-session; else ok legacy-no-designer-session; fi
+
+# --- verify-bootstrap: a MISMATCHED designer_session fails IMMEDIATELY (the executor bound a different
+#     designer than the one dispatched — its notifies would reach the wrong session) ---
+run create vb9 --handoff /art/vb9/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb9 --question-route record --terminal-route record --designer-session designer-other \
+  --look-again "999" >/dev/null
+VB9_START=$(date +%s)
+if run verify-bootstrap vb9 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb9 --question-route record --terminal-route record --designer-session designer-vb9 \
+     --timeout-sec 30 --poll-interval-sec 1 >"$TMP/vb9.out" 2>&1; then no verify-bootstrap-wrong-dsession; else ok verify-bootstrap-wrong-dsession; fi
+VB9_ELAPSED=$(( $(date +%s) - VB9_START ))
+[ "$VB9_ELAPSED" -lt 10 ] && ok verify-bootstrap-wrong-dsession-failfast || no "verify-bootstrap-wrong-dsession-failfast (took ${VB9_ELAPSED}s)"
+grep -q "designer_session mismatch" "$TMP/vb9.out" && ok verify-bootstrap-wrong-dsession-message || no verify-bootstrap-wrong-dsession-message
+
+# --- verify-bootstrap: an UNBOUND designer_session never passes — it times out like a missing look-again
+#     receipt, so a dispatch can't complete with the designer's address unrecorded ---
+run create vb10 --handoff /art/vb10/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb10 --question-route record --terminal-route record --look-again "1010" >/dev/null
+if run verify-bootstrap vb10 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb10 --question-route record --terminal-route record --designer-session designer-vb10 \
+     --timeout-sec 2 --poll-interval-sec 1 >"$TMP/vb10.out" 2>&1; then no verify-bootstrap-unbound-dsession; else ok verify-bootstrap-unbound-dsession; fi
+grep -q "never reached the full expected state" "$TMP/vb10.out" && ok verify-bootstrap-unbound-dsession-message || no verify-bootstrap-unbound-dsession-message
+
+# --- verify-bootstrap: --designer-session is REQUIRED (and validated like the bind-side flag) ---
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x \
+     --question-route record --terminal-route record >/dev/null 2>&1; then no verify-bootstrap-missing-dsession-arg-rejected; else ok verify-bootstrap-missing-dsession-arg-rejected; fi
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x \
+     --question-route record --terminal-route record --designer-session "two words" >/dev/null 2>&1; then no verify-bootstrap-bad-dsession-arg-rejected; else ok verify-bootstrap-bad-dsession-arg-rejected; fi
 
 # ===== #673: derive the session handle at `start` from the instance's self-identity seam =====
 # The incident class: a hand-written `tmux:<name>` handle made self-reap refuse AND the janitor report-only,

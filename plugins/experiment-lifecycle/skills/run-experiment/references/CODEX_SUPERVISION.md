@@ -53,7 +53,8 @@ makes that check explicit and deterministic instead of a habit a designer might 
 1. Immediately after its own thread/session creation succeeds, start the record — the same
    `run_supervision_record.sh start <run-id> --handoff <TEMP.md> --session-handle <opaque> --worktree
    <path> --executor-family codex --supervision-mode <mode> --question-route <route> --terminal-route
-   <route>` call §1 already requires, just moved to the FIRST thing the executor does, not something
+   <route> --designer-session <the harness session name START.md names, or record-only>` call §1 already
+   requires, just moved to the FIRST thing the executor does, not something
    deferred until after provisioning.
 2. Arm its own watcher/liveness mechanism (§4's controller-supervised blocking wait, or a real
    autonomous-detached wake if the host actually has one) and bind the bootstrap receipt in the same or a
@@ -65,8 +66,8 @@ makes that check explicit and deterministic instead of a habit a designer might 
 
 **The designer's side — before treating dispatch as complete:** run `run_supervision_record.sh
 verify-bootstrap <run-id> --executor-family codex --supervision-mode <expected mode> --worktree <expected
-path> --question-route <expected route> --terminal-route <expected route> [--timeout-sec N]
-[--poll-interval-sec N]`. This polls the record (bounded by `--timeout-sec`, default 300s) until it is
+path> --question-route <expected route> --terminal-route <expected route> --designer-session <your own
+harness session name, or record-only> [--timeout-sec N] [--poll-interval-sec N]`. This polls the record (bounded by `--timeout-sec`, default 300s) until it is
 active/desired-active AND every named field matches EXACTLY AND a look-again receipt is bound — the full
 bootstrap contract, not merely "a thread exists." A record whose bound fields actively mismatch what the
 designer expected (wrong worktree, wrong family, wrong mode, wrong route) fails **immediately**, not after
@@ -115,6 +116,26 @@ researcher after the fact. Only a question that fails one of those two checks �
 design clearance, the Presentation lock, raising a cost ceiling, anything that alters the experiment's meaning —
 travels onward to the researcher. And a question whose answer is checkable from the records or the live state ("is X
 the baseline?", "does Y exist?") is never asked through this channel at all: whoever holds it verifies it directly.
+
+**`designer_session`** (set at `start`/`checkpoint` via `--designer-session`, read back via the
+`designer-session` getter) is the designer-of-record's own **harness session name** — the address a
+session-addressed message primitive delivers into that session's context (`SendMessage <name>`), which is what
+an executor pushes its `ask-question` notify to. It exists because a tmux session name is not a session under a
+Remote Control host: one tmux name fronts many spawned zero-context sessions, so a `send-keys` notify lands in
+whichever sibling holds the keyboard — on 2026-08-30 a sibling with no run context consumed a designer-of-record
+question that way (automated-researcher#796). The reserved literal **`record-only`** is the honest binding for a
+substrate with no addressable designer session: there is no push and the designer's own `has-question` poll is
+what surfaces a question. `verify-bootstrap` (§2) requires the field bound and matching, so a dispatch cannot
+complete with the designer's address unrecorded. **The record — not `START.md` — is the address of record:**
+the brief's line is the dispatch-time seed the executor binds at `start`, after which a designer handoff or a
+relaunch under a new name is published by `checkpoint --designer-session <new name>` alone (the brief is never
+reissued). So the executor resolves the address with the `designer-session` getter immediately before *each*
+notify rather than reusing the brief's copy or the value it once bound — a sender that caches past a mid-run
+rebind reproduces exactly the "notify reaches a session that no longer holds the run" failure this field
+exists to end. It is deliberately **not** folded into `question_route`:
+that field names the *transport* and stays uninterpreted (default `record` — poll this file, correctly so),
+while `designer_session` names the *recipient* the push on top of that transport is addressed to. Improvising
+the recipient was the whole defect — the transport was already durable and right.
 
 **`question_route`** and **`terminal_state_route`** (set at `start`/`checkpoint` via `--question-route` /
 `--terminal-route`, read back via the `question-route`/`terminal-route` getters) are opaque pointers naming
