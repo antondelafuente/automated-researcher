@@ -17,6 +17,14 @@
 #     an unresolvable --default-branch reads as UNKNOWN (inspection needed), not silently merged/unmerged
 #   - a worktree with an INITIALIZED submodule is excluded from tier1 even when merged+clean+old, since
 #     `git worktree remove` unconditionally refuses it (merge-gate final-review MED)
+#   - --scratch-glob, the non-git scratch prune (automated-researcher#792): a stale entry reaches tier1 and
+#     is actually deleted; a fresh one is silent; a dir whose OWN mtime is old but that carries a freshly
+#     written file is silent (the TREE's newest mtime is the fact); a symlink and a swept repo's own
+#     worktree route to tier3 and survive a real --reap-tier1; --dry-run deletes nothing; and every unsafe
+#     --scratch-glob shape (relative, wildcard in the directory part, root-level, trailing slash) is
+#     rejected up front so the delete scope stays statically bounded
+#   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
+#     report's section both name what was actually removed, and a tier-3 entry never appears there
 # -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
 # `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
 # vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
@@ -496,7 +504,7 @@ assert any(i['path'] == '$TMP/wt-race-submodule' for i in results['tier1']), \
 subprocess.run(['git', '-C', '$TMP/wt-race-submodule', '-c', 'protocol.file.allow=always',
                 'submodule', 'update', '--init', '-q'], check=True)
 
-ws.do_reap(reap_plan, False, 'main')
+ws.do_reap(reap_plan, False, 'main', args.min_age_days, set(), int(time.time()))
 "
 if [ -d "$TMP/wt-race-submodule" ]; then ok "reap re-verification: worktree that gained an initialized submodule mid-run is SKIPPED, not force-removed"; else no "reap re-verification: worktree with a newly-initialized submodule was WRONGLY removed (submodule safety gate not re-checked before --force)"; fi
 
@@ -580,7 +588,7 @@ with contextlib.redirect_stdout(buf):
     ws.render_text(results)
 out = buf.getvalue()
 
-assert '[8 worktrees, same root cause] inspection needed: shared root cause' in out, 'shared reason not collapsed:\n' + out
+assert '[8 entries, same root cause] inspection needed: shared root cause' in out, 'shared reason not collapsed:\n' + out
 assert out.count('git -C /wt/') == 2, 'collapsed entries must not repeat action commands: ' + out
 assert 'distinct reason 0' in out and 'distinct reason 1' in out, 'distinct (non-repeated) reasons must still render individually: ' + out
 
@@ -593,9 +601,113 @@ buf2 = io.StringIO()
 with contextlib.redirect_stdout(buf2):
     ws.render_text(results2)
 out2 = buf2.getvalue()
-assert '[5 worktrees, same root cause] inspection needed: boundary root cause' in out2, \
+assert '[5 entries, same root cause] inspection needed: boundary root cause' in out2, \
     'group exactly at collapse_at was not collapsed (off-by-one on the inclusive threshold):\n' + out2
 " && ok "report ergonomics: a reason shared by most of a tier collapses; distinct reasons still render individually; a group exactly at the collapse threshold still collapses" || no "report ergonomics: collapse behavior check failed"
+
+# 8. --scratch-glob: the non-git scratch prune (automated-researcher#792). The disk-fill incident's third
+#    bucket was `*-repro.*` / per-session dirs under /tmp that nothing ever deleted. Covered here:
+#    stale -> tier1 and actually deleted; fresh -> silent; a dir whose OWN mtime is old but which carries a
+#    freshly-written file -> silent (the tree's newest mtime is the fact, not the directory's); a symlink,
+#    and anything protecting a swept checkout, -> tier3 and never deleted; --dry-run deletes nothing; and
+#    the pattern validation that keeps the delete scope statically bounded.
+SCRATCH="$TMP/scratchroot"; mkdir -p "$SCRATCH"
+
+mk_old(){ # mk_old <dir> — a scratch dir whose whole tree is 40 days old
+  mkdir -p "$1"; echo payload > "$1/data.bin"
+  touch -d "$OLD_DATE" "$1/data.bin"; touch -d "$OLD_DATE" "$1"
+}
+mk_old "$SCRATCH/stale-repro.aaa"
+mk_old "$SCRATCH/stale2-repro.bbb"
+mk_old "$SCRATCH/dryrun-repro.ccc"
+
+mkdir -p "$SCRATCH/fresh-repro.ddd"; echo payload > "$SCRATCH/fresh-repro.ddd/data.bin"
+
+# old directory mtime, FRESH file inside — the case a naive `stat` of the directory would delete
+mk_old "$SCRATCH/live-repro.eee"; echo busy > "$SCRATCH/live-repro.eee/active.log"
+touch -d "$OLD_DATE" "$SCRATCH/live-repro.eee"
+
+# symlink whose target is old: must be reported, never followed and never deleted
+mk_old "$TMP/link-target-dir"
+ln -s "$TMP/link-target-dir" "$SCRATCH/linked-repro.fff"
+
+# A real linked worktree of a SWEPT repo, sitting inside the scratch root: protected, never rm -rf'd.
+# Given novel untracked content deliberately, so it is NOT tier-1-eligible as a WORKTREE either -- otherwise
+# `git worktree remove` would legitimately reap it and this assertion could never tell the scratch-side
+# protection working from the worktree path removing it for unrelated, correct reasons.
+g "$REPO" worktree add -q -b scratch-guard "$SCRATCH/checkout-repro.ggg" main
+echo novel-guard-content-not-on-main > "$SCRATCH/checkout-repro.ggg/guard-note.txt"
+
+GLOB="$SCRATCH/*-repro.*"
+
+python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null > "$TMP/scratch.json"
+has_path_in "d['tier1']" "$SCRATCH/stale-repro.aaa"     < "$TMP/scratch.json" && ok "scratch: stale entry is tier1" || no "scratch: stale entry is tier1"
+has_path_in "d['tier1']" "$SCRATCH/fresh-repro.ddd"     < "$TMP/scratch.json" && no "scratch: fresh entry must be SILENT, not tier1" || ok "scratch: fresh entry is silent"
+has_path_in "d['tier1']" "$SCRATCH/live-repro.eee"      < "$TMP/scratch.json" && no "scratch: old dir mtime with a fresh file inside must NOT be tier1 (tree newest-mtime, not dir mtime)" || ok "scratch: actively-written tree with an old dir mtime is silent"
+has_path_in "d['tier3']" "$SCRATCH/linked-repro.fff"    < "$TMP/scratch.json" && ok "scratch: symlink entry routes to tier3" || no "scratch: symlink entry routes to tier3"
+has_path_in "d['tier1']" "$SCRATCH/linked-repro.fff"    < "$TMP/scratch.json" && no "scratch: symlink entry must never be tier1" || ok "scratch: symlink entry never tier1"
+has_path_in "d['tier3']" "$SCRATCH/checkout-repro.ggg"  < "$TMP/scratch.json" && ok "scratch: a swept repo's worktree inside the glob routes to tier3 (protected)" || no "scratch: protected checkout must route to tier3"
+# Kind-scoped on purpose: this path is legitimately reported TWICE (once as a git worktree with untracked
+# content, once as a scratch match), so a first-match-wins reason check would read the worktree entry.
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+e = [x for x in d['tier3'] if x['path'] == '$SCRATCH/checkout-repro.ggg' and x['kind'] == 'scratch']
+assert e and 'protected path' in e[0]['reason'], d['tier3']
+" < "$TMP/scratch.json" && ok "scratch: protected reason names the protection" || no "scratch: protected reason names the protection"
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+e = [x for x in d['tier1'] if x['path'] == '$SCRATCH/stale-repro.aaa'][0]
+assert e['kind'] == 'scratch', e
+assert e['action']['kind'] == 'delete', e
+assert e['action']['commands'] == ['rm -rf -- $SCRATCH/stale-repro.aaa'], e
+" < "$TMP/scratch.json" && ok "scratch: tier1 entry carries kind=scratch + a delete action" || no "scratch: tier1 entry shape"
+
+# --dry-run touches nothing, and records dry-run outcomes in the report
+python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --dry-run --json 2>/dev/null > "$TMP/scratch-dry.json"
+[ -d "$SCRATCH/dryrun-repro.ccc" ] && ok "scratch: --dry-run deleted nothing" || no "scratch: --dry-run DELETED a scratch dir"
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+outs = {r['path']: r['outcome'] for r in d['reaped']}
+assert outs.get('$SCRATCH/stale-repro.aaa') == 'dry-run', d['reaped']
+" < "$TMP/scratch-dry.json" && ok "scratch: --dry-run reports a dry-run outcome per planned deletion" || no "scratch: --dry-run outcome record"
+
+# The real reap. `|| true`: this repo still carries the LOCKED tier-1 worktree from step 5, whose removal
+# genuinely fails every run, so the sweep legitimately exits non-zero here — that exit code is already
+# asserted in step 5 and must not abort this script under `set -e`.
+python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --json 2>/dev/null > "$TMP/scratch-reap.json" || true
+[ -d "$SCRATCH/stale-repro.aaa" ]    && no "scratch: stale entry NOT deleted by --reap-tier1" || ok "scratch: stale entry deleted by --reap-tier1"
+[ -d "$SCRATCH/fresh-repro.ddd" ]    && ok "scratch: fresh entry survives --reap-tier1" || no "scratch: fresh entry was deleted"
+[ -d "$SCRATCH/live-repro.eee" ]     && ok "scratch: actively-written entry survives --reap-tier1" || no "scratch: actively-written entry was deleted"
+[ -L "$SCRATCH/linked-repro.fff" ]   && ok "scratch: symlink survives --reap-tier1" || no "scratch: symlink was deleted"
+[ -d "$TMP/link-target-dir" ]        && ok "scratch: symlink TARGET survives --reap-tier1" || no "scratch: symlink target was deleted"
+[ -d "$SCRATCH/checkout-repro.ggg" ] && ok "scratch: protected checkout survives --reap-tier1" || no "scratch: protected checkout was rm -rf'd"
+
+# the report says what it removed (the #792 acceptance bar), in both output modes
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+outs = {r['path']: r for r in d['reaped']}
+r = outs.get('$SCRATCH/stale-repro.aaa')
+assert r and r['outcome'] == 'deleted' and r['kind'] == 'scratch', d['reaped']
+assert '$SCRATCH/checkout-repro.ggg' not in outs, 'a tier-3 entry must never appear in reaped: ' + str(d['reaped'])
+" < "$TMP/scratch-reap.json" && ok "scratch: --json report lists what was removed" || no "scratch: --json reaped record"
+
+mk_old "$SCRATCH/text-repro.hhh"
+python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 2>/dev/null > "$TMP/scratch-reap.txt" || true
+grep -q '^## Reaped' "$TMP/scratch-reap.txt" && ok "scratch: human report carries a Reaped section" || no "scratch: human report Reaped section"
+grep -q "^- \[scratch\] $SCRATCH/text-repro.hhh" "$TMP/scratch-reap.txt" && ok "scratch: human report names the deleted path" || no "scratch: human report names the deleted path"
+
+# pattern validation — the delete scope must stay statically bounded
+for bad in "relative/*-repro.*" "/tmp/*/inner-*" "/*" "$SCRATCH/repro/"; do
+  if python3 "$SWEEP" --repo "$REPO" --scratch-glob "$bad" >/dev/null 2>&1; then
+    no "scratch: unsafe --scratch-glob '$bad' was accepted"
+  else
+    ok "scratch: unsafe --scratch-glob '$bad' rejected"
+  fi
+done
 
 if [ "$fails" = 0 ]; then echo "smoke: all groups passed"; else echo "smoke: FAILURES present (see FAIL lines above)"; fi
 exit "$fails"

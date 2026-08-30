@@ -757,6 +757,24 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   by design, so a plain `remove` would refuse every time). **Keep the branch ref** — the content already
   landed via squash-merge, so the ref is cheap and preserves recoverability; this never touches the shared
   checkout beyond that one call.
+- **Archive and delete your own scratch dir — the LAST unreaped bucket (automated-researcher#792).** Your
+  out-of-worktree scratch root (the `work/<exp>` dir your driver wrote into) is the one thing close never
+  had a delete side for. It is not durable anywhere: unlike the worktree, nothing about it landed on `main`.
+  A 2026-08-30 measurement found 52G across 74 such dirs on one 225G box against ~7G of genuinely durable
+  data; at ~1 experiment/day that structurally fills the disk in about two months and halts every
+  concurrent run. Right after the worktree teardown above, run
+  `scripts/reap_scratch.sh <run-id> <your scratch dir>`: it re-checks the same clean-close guard, requires
+  the dir's basename to equal `<run-id>` (the `work/<exp>` convention IS the binding that keeps a
+  clean-closed run from naming a peer's scratch), then **`rclone copy` → `rclone check` → only then
+  `rm -rf`** — the same "tear down after a verified upload" pattern the completion boundary above already
+  demands of compute, applied to the workspace. **On a check failure it leaves the directory alone and
+  exits non-zero: say so on the run's ledger line** rather than deleting anyway or silently retrying. The
+  archive destination is your instance's **`EXPERIMENT_SCRATCH_ARCHIVE_DEST`** seam (an rclone destination
+  root; per-run archives land at `<root>/<run-id>`) — **unset → a logged no-op that deletes nothing**, since
+  there is nowhere to make the scratch durable, and that is a wiring gap for the retro, not a licence to
+  skip the archive. Fires **only on a clean close**, same as the two steps around it: a parked/blocked/
+  crashed run keeps its scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop
+  for whatever this step never got to run on.
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:
@@ -983,6 +1001,10 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
   verified AND `log-experiment` has merged the record, gated on the same clean-close `is-closed` check as
   session reap, right before it (`reap_worktree.sh`). A parked/blocked/crashed run keeps its worktree for forensics.
+- **Archive and delete your own scratch dir at a clean close (#792)** — the last bucket with no delete side, and the
+  one that is durable NOWHERE until you archive it: `reap_scratch.sh <run-id> <scratch dir>` does
+  `rclone copy` → `rclone check` → `rm -rf`, never `rm -rf` without a verified archive. A failed check leaves the dir
+  and goes on the ledger line; an unconfigured `EXPERIMENT_SCRATCH_ARCHIVE_DEST` is a logged no-op, not a bare delete.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +
