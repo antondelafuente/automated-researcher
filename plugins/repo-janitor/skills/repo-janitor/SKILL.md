@@ -1,6 +1,6 @@
 ---
 name: repo-janitor
-description: Deterministic weekly sweep of git worktrees + the shared checkout, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Use when worktrees/repo state have accumulated silently (abandoned worktrees from interrupted runs, agent scratch left in a persistent tree, a shared checkout drifting behind origin) and need a backstop sweep — running the janitor on demand, or wiring it as a scheduled instance sweep. Report-only by default; no state, no auto-reap, no lease model.
+description: Deterministic weekly sweep of git worktrees + the shared checkout + non-git scratch globs, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Use when worktrees/repo/disk state have accumulated silently (abandoned worktrees from interrupted runs, agent scratch left in a persistent tree, unreaped repro/temp dirs, a shared checkout drifting behind origin) and need a backstop sweep — running the janitor on demand, or wiring it as a scheduled instance sweep. Report-only by default; no state, no lease model.
 ---
 
 # repo-janitor — the worktree/repo backstop sweep
@@ -30,7 +30,7 @@ Key flags: `--worktree-root <path>` (derive owner ids for tier-2 routing; omit a
 owner — see below), `--owner-depth N` (default 1), `--min-age-days N` (default 7, the tier-1 age bar),
 `--default-branch <name>` (default `main`), `--fetch` (do a read-only `git fetch origin` per repo before
 comparing — see "Freshness" below), `--json` (machine-readable; see "The report" below), `--reap-tier1`
-+ `--dry-run` (see "The reap action").
++ `--dry-run` (see "The reap action"), `--scratch-glob <glob>` (repeatable; see "Non-git scratch" below).
 
 ## The three tiers
 
@@ -109,6 +109,57 @@ An in-progress branch (unmerged, recently touched) or a worktree that just merge
 grace window is **silent** — it appears in no tier. It isn't a problem, and if it's still sitting there
 next week the same recompute will flag it then.
 
+## Non-git scratch (`--scratch-glob`)
+
+Worktrees were never the whole leak. The 2026-08-30 disk-fill (automated-researcher#792) had four growing
+buckets on one 225G box at 198G used, and only two of them were git: per-experiment executor scratch, dead
+worktrees, generated dashboard bundles, and ~15G of `*-repro.*` / per-session temp dirs that nothing had
+ever deleted. Durable data was ~7G. Each closed experiment left ~3–6G behind with nothing on the delete
+side, so at ~1 experiment/day the disk structurally fills in about two months and the pipeline halts.
+
+`--scratch-glob '<absolute glob>'` (repeatable) ages out that last bucket in the same sweep, on the same
+terms as everything else here: an entry whose tree hasn't been written to for `--min-age-days` is **tier
+1**; a fresher one is **silent**; anything whose age can't be read, or that trips a path guard, is **tier
+3** — reported, never deleted. There is no tier 2: scratch has no per-worktree owner concept to route to.
+Deletion still only happens under `--reap-tier1`, which is still the deliberate instance opt-in described
+below — a bare sweep reports and nothing else.
+
+- **Age is the TREE's newest mtime, never the directory's own.** A directory's mtime only moves when an
+  entry is added or removed at that level, so an actively-written tree can carry a weeks-old directory
+  mtime; stat'ing the directory would read a live repro dir as stale and delete it. Symlinks are `lstat`'d
+  and never followed, so a link into a live tree can neither rescue nor condemn an entry. A tree larger
+  than the scan cap, or one with an unreadable subdirectory, reads UNKNOWN → tier 3, never reaped.
+- **The delete scope is statically bounded, and that is the safety story.** Unlike `git worktree remove`,
+  nothing underneath an `rm -rf` will refuse a bad target — so a `--scratch-glob`'s *directory* part must
+  be absolute, wildcard-free, normalized, and not `/`: only the last path segment may glob. Every
+  deletable entry is therefore a direct child of one parent directory the researcher wrote out in full.
+  An unsafe pattern is rejected **up front**, before a single fact is computed, not discovered mid-sweep.
+- **Path guards, all fail-closed to tier 3:** a symlink (deleting it would leave its target, or the link
+  is standing in for real content), a path resolving through a symlinked ancestor, anything that is /
+  contains / lives inside a swept repo or worktree, `$HOME`, or the cwd, and anything **repository-like**
+  — either a `.git` entry (an ordinary checkout/worktree) or a bare repository, which carries no `.git` at
+  all because its gitdir IS its top level (`HEAD` beside `objects/` / `refs/` / `packed-refs` / `config`).
+  Both route to `--repo`, where git's own refusals apply; neither is ever scratch.
+- **"Not a repository" must be positively established, from the entry's own top-level listing.** The guard
+  reads which NAMES are present; it never asks whether those names resolve, and an entry whose listing
+  can't be read is UNKNOWN → tier 3, never "not a repository". A checkout whose `.git` is a *dangling
+  symlink* is still a checkout — and is the one least likely to have its contents pushed anywhere. For the
+  same reason the bare-repo signature is deliberately wider than git's own `is_git_directory()` check:
+  that predicate is calibrated for "can git operate here", this one for "may this be destroyed", so a
+  half-cloned or atypical bare repo lands on the reporting side. The cost is that a scratch dir holding a
+  top-level `HEAD` beside one of those names gets reported instead of reaped.
+- **An entry that IS, or CONTAINS, a mount point is never reapable** — the bound is a *path* bound, so it
+  has to hold across mounts too. `shutil.rmtree` (like `rm -rf`) deletes a bind mount's contents *through*
+  the mount and only then raises `EBUSY` on the mount point itself, so the delete-failed path arrives after
+  the mounted data is already gone. Established from `/proc/self/mountinfo` and nothing else: for a bind
+  mount whose source is on the *same* filesystem, `os.path.ismount()` is False and `st_dev` is identical on
+  both sides, so `ismount` / `st_dev` / `-xdev` / `--one-file-system` all wave it through. An unreadable or
+  unparseable mount table is UNKNOWN → tier 3, never "there are no mounts". An **ancestor** mount blocks
+  nothing — a scratch root sitting on its own volume is the normal layout; only the entry itself, or
+  something strictly below it, blocks.
+- **Every fact is recomputed immediately before the delete**, exactly like the worktree reap: a repro dir
+  written to in the gap between classification and reaping is skipped, not deleted on a stale reading.
+
 ## The report
 
 Default output is human-readable text, grouped by tier (tier 2 sub-grouped by owner). Every entry carries
@@ -123,11 +174,21 @@ collapses that group into one summary line plus a flat path list instead of repe
 action per entry, so the shared root cause isn't buried in noise. `--json` is unaffected — every entry is
 always listed individually there for a machine consumer to group however it needs.
 
-`--json` emits `{"tier1": [...], "tier2": {"<owner>": [...]}, "tier3": [...]}` — each entry has `repo`,
-`path`, `branch`, `owner`, `tier`, `reason`, and `action` (`{"kind": "remove"|"prune"|"inspect",
-"commands": [...]}`). An instance's messaging wrapper iterates this (one message per tier-2 owner key, one
-combined message for tier 3) — **the sweep never sends anything itself**; delivery is instance work (see
-"What the instance supplies" below). The report is silent when there's nothing to flag.
+`--json` emits `{"tier1": [...], "tier2": {"<owner>": [...]}, "tier3": [...], "reaped": [...]}` — each
+tier entry has `repo`, `path`, `branch`, `owner`, `tier`, `kind` (`"worktree"` or `"scratch"`), `reason`,
+and `action` (`{"kind": "remove"|"prune"|"delete"|"inspect", "commands": [...]}`). An instance's messaging
+wrapper iterates this (one message per tier-2 owner key, one combined message for tier 3) — **the sweep
+never sends anything itself**; delivery is instance work (see "What the instance supplies" below). The
+report is silent when there's nothing to flag.
+
+**`reaped` — what the sweep actually removed** (automated-researcher#792). A reaping sweep that prints
+only what it *classified* leaves the reader inferring the deletions from a stderr log, where a skip (the
+safety net firing correctly) reads identically to a removal. Each record is `{"path", "kind", "outcome",
+"detail"}` with `outcome` in `removed` / `pruned` / `deleted` / `dry-run` / `skipped` / `failed`; the human
+report renders the same information under a `## Reaped` section, grouped so the removals lead. It is empty
+without `--reap-tier1`. Because the report now states removals, it is emitted **after** the reap runs — the
+live per-action stderr log inside the reap is unchanged, so a human watching a long sweep still sees each
+action as it happens.
 
 ## Freshness (`--fetch`)
 
@@ -144,17 +205,28 @@ deleting, as a defense against the state changing mid-sweep — including whethe
 gained an initialized submodule, re-checked the same as at classification, not just status/identity/HEAD) +
 a best-effort `git branch -d` — `--force` is added to the `remove` whenever the content-identity bar above
 (not plain mergedness) is what qualified the entry, since that path's byte-identical dirty/untracked residue
-is exactly what a bare `remove` refuses.
+is exactly what a bare `remove` refuses — and stale `--scratch-glob` entries via `rm -rf`, each re-guarded
+and re-aged immediately before the delete (see "Non-git scratch" above).
 `--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
 anything.
 
-**A scheduled/standing invocation of this sweep must never pass `--reap-tier1`.** Deletion happens only on
-researcher approval, or on deterministic tier-1 evidence the researcher has explicitly, separately
-blanket-approved for that instance — `--reap-tier1` exists for the latter case, wired as a deliberate,
-documented instance-level opt-in, never this product's default behavior. Without that opt-in every sweep,
-scheduled or on-demand, is report-only. The very first sweep on a new instance is expected to be an
-on-demand run against whatever debt has already accumulated, reviewed and executed in-chat from the
-printed/JSON'd commands — spending judgment once on the backlog rather than automating it.
+**Report-only is the default, and it is the ONLY mode for tiers 2 and 3 — there is no flag that deletes
+them.** `--reap-tier1` acts on tier 1 alone: deterministic evidence, no one asked. **A standing/scheduled
+invocation passes it only when the researcher has explicitly, separately blanket-approved the deterministic
+bucket for that instance** — automated-researcher#792 is exactly that decision for the instance whose disk
+filled, and the flag exists for it. Absent that opt-in every sweep, scheduled or on-demand, reports and
+deletes nothing; the opt-in is instance wiring (a documented flag on the timer), never this product's
+default behavior. The very first sweep on a new instance is expected to be an on-demand run against
+whatever debt has already accumulated, reviewed and executed in-chat from the printed/JSON'd commands —
+spending judgment once on the backlog rather than automating it. Roll a newly-opted-in timer out with
+`--dry-run` for a cycle first, same as `gpu-job`'s pod reaper: the `## Reaped` section then reads as
+exactly the list of things the next real sweep will delete.
+
+**Scratch deletions are NOT recoverable** the way a worktree reap is (below) — `~/work`-style executor
+scratch has no `main` behind it. That is why the scratch bar is "nothing has written here in a week" and
+why the archive-then-delete step belongs at the point the scratch is *created*
+(`run-experiment`'s close-time `reap_scratch.sh`, which uploads to the artifact store and verifies before
+deleting). This sweep is the backstop for what that step missed, not a substitute for it.
 
 **Recovering from a reap.** Tier-1's own definition makes this non-destructive of content by construction:
 `merged` means every commit on the worktree's branch already lives in the default branch's history, and
@@ -176,7 +248,9 @@ gc` for ship-change worktrees specifically; run this sweep as the broader backst
 
 This plugin owns the classification + report format only. An instance wires:
 
-- **Which repo(s) and worktree root** to point `--repo`/`--worktree-root` at.
+- **Which repo(s) and worktree root** to point `--repo`/`--worktree-root` at, and **which scratch globs**
+  (if any) to pass as `--scratch-glob`. Those globs are pure instance values — the temp-dir layout, the
+  per-session scratch root, the uid in a path — so the product ships the mechanism and none of the paths.
 - **`REPO_JANITOR_LIVE_SESSIONS_CMD`** — a command that prints one live session id per line (mirroring
   `gpu-job`'s `GPU_JOB_*_CMD` provider-seam pattern). **Unset ⇒ every owner reads as not-live** — the
   fail-safe default: nothing is silently routed to tier 2 without this wired, everything instead surfaces
@@ -186,7 +260,8 @@ This plugin owns the classification + report format only. An instance wires:
   aggregation. Whatever isn't resolved just reappears next sweep.
 - **The schedule** — the weekly timer (or on-demand invocation) that runs the sweep. **Never pass
   `--reap-tier1` from the standing timer** unless the researcher has explicitly, separately decided to
-  blanket-approve the deterministic bucket for that instance.
+  blanket-approve the deterministic bucket for that instance (automated-researcher#792 is that decision on
+  the instance it was filed from; it is not inherited by any other deployment).
 
 ## Smoke
 
@@ -198,5 +273,8 @@ of a linked worktree checked out on it, a locked (un-removable) tier-1 worktree 
 other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass, a
 fail-closed novel-content case, a chmod-only mode-mismatch case, and an untracked-symlink mode-mismatch
 case), the per-path submodule-fact degradation on an unmapped gitlink (including a tab-quoted path carrying
-a genuinely initialized submodule, which the NUL-safe fallback parse must still find), and the human
-report's same-reason collapsing.
+a genuinely initialized submodule, which the NUL-safe fallback parse must still find), the human
+report's same-reason collapsing, and `--scratch-glob` end to end (stale reaches tier 1 and is really
+deleted; fresh is silent; an old directory mtime with a freshly-written file inside is silent; a symlink,
+its target, and a swept repo's own worktree all survive a real `--reap-tier1`; `--dry-run` deletes nothing;
+every unsafe glob shape is rejected up front; and the `## Reaped` / `reaped` records name what was removed).

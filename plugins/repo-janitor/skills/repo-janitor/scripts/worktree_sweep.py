@@ -12,6 +12,11 @@ checkout, how far behind/ahead of origin?), then route each flagged entry into e
   tier 3 (researcher residual)          — everything flagged that isn't tier 1 and has no live owner to ask,
                                             plus the shared/main checkout's own drift (it has no "owner").
 
+The same sweep also prunes NON-GIT SCRATCH the box accumulates outside any worktree (--scratch-glob,
+automated-researcher#792): repro/audit temp dirs and per-session scratch that nothing has ever deleted.
+Same tiering, same age bar, same fail-closed discipline — a stale entry is tier 1, a fresh one is silent,
+and anything whose age can't be read (or that trips a path-safety guard) is tier 3, never reaped.
+
 STATE: none. Every sweep recomputes every fact from scratch — the git state IS the state (#364 pinned
 out-of-scope: no database of past reports). DELETION: `--reap-tier1` performs it, but this flag is a
 deliberate researcher opt-in an instance's timer must not pass by default (#364 pinned out-of-scope: no
@@ -29,9 +34,11 @@ Seams (mirroring gpu-job's GPU_JOB_*_CMD provider-seam pattern — instance-supp
 Session enumeration + message delivery are instance work; this script's contract ends at the report.
 """
 import argparse
+import glob as globlib
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -40,6 +47,24 @@ import time
 DEFAULT_MIN_AGE_DAYS = 7
 DEFAULT_OWNER_DEPTH = 1
 DEFAULT_DEFAULT_BRANCH = "main"
+
+# Scratch-scan safety constants (automated-researcher#792).
+GLOB_META = "*?["
+# An entry whose tree exceeds this many stat'd nodes reads UNKNOWN rather than being walked to the end:
+# the age fact would cost an unbounded scan, and an unbounded scan inside a weekly sweep is its own
+# failure mode. UNKNOWN routes to tier 3 (reported, never reaped) exactly like every other failed fact.
+SCRATCH_WALK_NODE_CAP = 200_000
+# Names at an entry's OWN top level that make it repository-like. `.git` covers a normal checkout, a
+# linked worktree (where `.git` is a file), and a submodule; a BARE repository has no `.git` at all
+# because its gitdir IS its top level, so it is recognized by the fixtures that sit there instead.
+SCRATCH_CHECKOUT_MARKER = ".git"
+SCRATCH_BARE_HEAD = "HEAD"
+SCRATCH_BARE_COMPANIONS = frozenset({"objects", "refs", "packed-refs", "config"})
+# The Linux mount table — the only authoritative answer to "is there a mount at or under this path"
+# (see mount_points_at_or_under for why nothing st_dev-based can answer it), plus the TEST seam that
+# points the guard at a fixture: creating a real bind mount needs root, so the smoke injects a table.
+SCRATCH_MOUNTINFO = "/proc/self/mountinfo"
+SCRATCH_MOUNTINFO_ENV = "REPO_JANITOR_MOUNTINFO"
 
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
@@ -516,13 +541,267 @@ def prune_action(repo):
     return {"kind": "prune", "commands": [gitcmd("-C", repo, "worktree", "prune")]}
 
 
+def delete_action(path):
+    return {"kind": "delete", "commands": [shlex.join(["rm", "-rf", "--", path])]}
+
+
+# --- non-git scratch (automated-researcher#792) -------------------------------------------------------
+# The disk-fill incident had FOUR growing buckets, only two of which are worktrees: `*-repro.*` audit
+# dirs and per-session scratch under /tmp accounted for 15G with nothing on the delete side. They are
+# swept here rather than in a second tool because they share every property that makes this sweep safe:
+# no state, recomputed facts, one age bar, report-only unless the researcher opted the instance in.
+#
+# THE DELETION SCOPE IS STATICALLY BOUNDED, and that is the whole safety story for an `rm -rf` this
+# script issues without git's own refusals standing behind it: a --scratch-glob's DIRECTORY part must be
+# absolute, wildcard-free, and not `/` — so every deletable entry is a direct child of one explicitly
+# named parent directory the researcher wrote out in full. Everything else is a fail-closed guard on top
+# of that (symlinks, symlinked ancestors, anything that looks like a repo, anything protecting a swept
+# repo / $HOME / the cwd), and any guard that trips reports to tier 3 instead of deleting.
+#
+# THE GUARDS ARE POSITIVE ESTABLISHMENT, NOT RECOGNITION. Each one answers "can this entry be ESTABLISHED
+# as safely deletable scratch", so every fact it needs must be readable and every fact it cannot read is
+# UNKNOWN -> tier 3. Written the other way round — "delete unless I recognize a repository" — the guard is
+# only ever as good as its list of recognized shapes, and each review round finds one more shape missing
+# (a bare repo, then a dangling `.git` symlink). That asymmetry is deliberate: the worst outcome on this
+# side is an entry that gets reported and reaped by hand, and on the other side an unrecoverable delete.
+#
+# THE BOUND IS A PATH BOUND, NOT A FILESYSTEM BOUND, so it must also hold across MOUNT POINTS: an entry
+# that IS, or CONTAINS, a mount point is never established as safely deletable (round-3 code-review
+# Finding 1). `shutil.rmtree` deletes a bind mount's contents through the mount and only THEN raises
+# EBUSY on the mount point, so the failure this loop relies on arrives after the mounted data is gone.
+# Established from the mount table alone — for a same-filesystem bind mount `os.path.ismount()` is False
+# and `st_dev` matches on both sides, so ismount/st_dev/`-xdev` guards all pass it silently. An ancestor
+# mount blocks nothing (a scratch root on its own volume is the normal layout); only the entry itself or
+# something strictly below it does.
+
+def scratch_pattern_parent(pattern):
+    """(parent, error) — the wildcard-free directory every match of `pattern` must be a DIRECT child of,
+    or (None, "<why>") if the pattern isn't safe to expand into deletions."""
+    if not pattern.startswith("/"):
+        return None, "must be an absolute path"
+    parent, _, leaf = pattern.rpartition("/")
+    if not leaf:
+        return None, "must not end in '/' (name the entries, not their parent)"
+    if not parent:
+        return None, "must not match direct children of the filesystem root"
+    if any(c in parent for c in GLOB_META):
+        return None, "the directory part must be wildcard-free (only the last path segment may glob)"
+    if parent != os.path.normpath(parent):
+        return None, "the directory part must be a normalized absolute path (no '.', '..', or '//')"
+    return parent, None
+
+
+def newest_mtime(path):
+    """The most recent mtime anywhere in `path` (the entry itself for a file; the whole tree for a
+    directory), or None (UNKNOWN) on any stat/walk failure or once the node cap is hit.
+
+    The TREE's newest mtime, never the directory's own: a scratch dir's top-level mtime only moves when
+    an entry is added or removed at that level, so an actively-written tree can carry a weeks-old
+    directory mtime — using it would read a live dir as stale and delete it. Symlinks are stat'd with
+    lstat and never followed, so a link into a live tree can neither rescue nor condemn this entry."""
+    walk_failed = []
+    try:
+        newest = os.lstat(path).st_mtime
+        if not os.path.isdir(path) or os.path.islink(path):
+            return newest
+        nodes = 0
+        for root, dirs, files in os.walk(path, followlinks=False, onerror=walk_failed.append):
+            for name in dirs + files:
+                nodes += 1
+                if nodes > SCRATCH_WALK_NODE_CAP:
+                    return None
+                st = os.lstat(os.path.join(root, name))
+                if st.st_mtime > newest:
+                    newest = st.st_mtime
+            if walk_failed:
+                return None  # an unreadable subdirectory is a SHORT READ, never "nothing newer down there"
+    except OSError:
+        return None
+    return None if walk_failed else newest
+
+
+def unescape_mountinfo(field):
+    r"""Decode mountinfo's octal escapes. The kernel writes \040 for a space, \011 for a tab, \012 for a
+    newline and \134 for a backslash, so a mount point carrying any of them compares against the wrong
+    string unless it is decoded first (and the space escape is also what keeps the line splittable)."""
+    out = []
+    i = 0
+    while i < len(field):
+        esc = field[i + 1:i + 4]
+        if field[i] == "\\" and len(esc) == 3 and all(c in "01234567" for c in esc):
+            out.append(chr(int(esc, 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def mount_points_at_or_under(path):
+    """(hits, None) — every mount point that IS `path` or sits strictly below it — or (None, "<why>")
+    when the mount table cannot be read or parsed, which is UNKNOWN and never "there are no mounts".
+
+    THE MOUNT TABLE IS THE ONLY SOURCE THAT ANSWERS THIS. For a bind mount whose source is on the SAME
+    filesystem — precisely the "bind-mounted dataset beneath a scratch dir" case — `os.path.ismount()`
+    returns False and `st_dev` is IDENTICAL on both sides of the mount point, so an ismount/st_dev guard
+    (and equally `rm --one-file-system` or `find -xdev`, which rest on that same st_dev fact) waves it
+    straight through. `/proc/self/mountinfo` lists it; field 5 of each line is the mount point.
+
+    Only the entry ITSELF or something strictly below it counts: an ANCESTOR being a mount point blocks
+    nothing, because a scratch root sitting on its own volume is the normal layout."""
+    table = os.environ.get(SCRATCH_MOUNTINFO_ENV) or SCRATCH_MOUNTINFO
+    try:
+        # surrogateescape: mount points are bytes, and a non-UTF-8 one must read as UNKNOWN-free data
+        # rather than raise a UnicodeDecodeError this function's OSError handler would not catch.
+        with open(table, "r", errors="surrogateescape") as fh:
+            lines = fh.read().splitlines()
+    except OSError as e:  # noqa: BLE001 - unreadable is UNKNOWN, and UNKNOWN never reaches a delete
+        return None, f"'{table}' could not be read ({e.__class__.__name__}: {e})"
+    prefix = path.rstrip(os.sep) + os.sep
+    hits = []
+    for line in lines:
+        fields = line.split()
+        mp = unescape_mountinfo(fields[4]) if len(fields) >= 5 else ""
+        if not mp.startswith("/"):
+            # A table that doesn't parse establishes nothing, so it is UNKNOWN like an unreadable one —
+            # never "this line lists no mount", which would silently shrink the set being checked.
+            return None, f"'{table}' has a line whose mount-point field is not an absolute path"
+        if mp == path or mp.startswith(prefix):
+            hits.append(mp)
+    return hits, None
+
+
+def scratch_path_blocker(path, parent, protected):
+    """A one-line reason this entry must never be auto-deleted, or None if none applies. Every check here
+    is about the PATH, not its age — an aged-out entry that trips any of them is reported, never reaped.
+
+    `protected` is (exact_or_ancestor, trees). The two relations are deliberately different: for EVERY
+    protected path, `path` must be neither the path itself nor an ancestor of it (deleting it would take
+    the protected thing with it) — but only for `trees` (the swept repos and their worktrees) does living
+    INSIDE also block. `$HOME` and the cwd are in the first set alone on purpose: a scratch root is
+    routinely under one or both of them (`~/work/...`, a sweep launched from `/tmp`), so treating "inside"
+    as a blocker there would silently disqualify every match the researcher configured the glob for."""
+    exact_or_ancestor, trees = protected
+    if os.path.dirname(path) != parent:
+        return f"not a direct child of the pattern's directory '{parent}'"
+    if os.path.islink(path):
+        return "is a symlink (deleting it would leave its target, or the link is standing in for real content)"
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return "its real path could not be resolved"
+    if real != path:
+        return f"resolves through a symlinked ancestor to '{real}'"
+    for prot in exact_or_ancestor:
+        if real == prot or prot.startswith(real + os.sep):
+            return f"it is, or contains, a protected path ('{prot}')"
+    for prot in trees:
+        if real.startswith(prot + os.sep):
+            return f"it lives inside a swept checkout ('{prot}')"
+    # "Repository-like entries are never scratch" is decided from the entry's OWN TOP-LEVEL LISTING —
+    # from which names are present — and an unreadable listing is UNKNOWN, never "not a repository".
+    # This is the invariant, and the two rounds of review that landed here (round-1 Finding 3: a bare
+    # repo; round-2 Finding 1: a DANGLING `.git` symlink) were the same hole in two shapes, because the
+    # old check asked `os.path.exists()`, which answers "does this name RESOLVE to something" — the wrong
+    # question for an `rm -rf` target. A checkout whose `.git` symlink dangles (its gitdir moved, or the
+    # linked worktree's admin dir was pruned) answers False and would have been deleted, and that is
+    # exactly the checkout least likely to have its contents pushed anywhere. Presence of the NAME is what
+    # this decision may rest on: nothing about resolving it can make a `.git` entry not a repository.
+    if os.path.isdir(path):  # a plain-file match (adapter dumps, *-repro.log) is never a repository
+        try:
+            names = set(os.listdir(path))
+        except OSError as e:  # noqa: BLE001 - unreadable is UNKNOWN, and UNKNOWN never reaches `rm -rf`
+            return (f"its own top-level listing could not be read ({e.__class__.__name__}: {e}) — an "
+                    "entry whose contents cannot be read is never established as non-repository")
+        if SCRATCH_CHECKOUT_MARKER in names:
+            return ("it contains a .git entry (a checkout/worktree, not scratch — sweep it via --repo "
+                    "instead)")
+        # A bare repo's gitdir IS its top level. Deliberately BROADER than git's own is_git_directory()
+        # trio (HEAD + objects/ + refs/): that predicate is calibrated for "can git operate here", while
+        # this one chooses between reporting an entry and destroying it, so a half-cloned, reftable, or
+        # otherwise atypical bare repo must still land on the reporting side. The cost of the wider net is
+        # that a scratch dir holding a top-level `HEAD` beside one of these names gets REPORTED instead of
+        # reaped — an unrecoverable object database is not a fair trade for that.
+        if SCRATCH_BARE_HEAD in names and (names & SCRATCH_BARE_COMPANIONS):
+            companions = ", ".join(sorted(names & SCRATCH_BARE_COMPANIONS))
+            return (f"it looks like a BARE git repository (HEAD beside {companions} at its root, no .git) "
+                    "— not scratch; sweep it via --repo or move it out of the glob's reach")
+        # FINAL check, and the one no filesystem-boundary test can make: a delete that crosses a MOUNT
+        # POINT destroys the mounted data, and it does so BEFORE it fails. `shutil.rmtree` (like `rm -rf`)
+        # unlinks a bind mount's contents THROUGH the mount and only then raises EBUSY on the mount point
+        # itself — so the loud failure the reap loop relies on arrives after the loss is already done
+        # (round-3 code-review Finding 1). A mounted dataset is by definition not this glob's scratch, so
+        # mount-freedom is POSITIVELY established from the mount table and an unreadable/unparseable table
+        # is UNKNOWN -> tier 3, exactly like every other fact this guard cannot read.
+        mounts, mount_err = mount_points_at_or_under(real)
+        if mount_err:
+            return (f"its mount-freedom could not be established ({mount_err}) — deleting through a mount "
+                    "destroys the mounted data, so an unreadable mount table is never 'there are no mounts'")
+        if mounts:
+            return (f"it is, or contains, a mount point ('{mounts[0]}') — deleting through a mount destroys "
+                    "the mounted data, which is not scratch")
+    return None
+
+
+def scan_scratch(args, now_ts, protected, results, reap_plan):
+    """Classify every --scratch-glob match: stale -> tier 1 (+ reap plan), fresh -> silent, unreadable or
+    path-guard-tripped -> tier 3. Never tier 2: scratch has no per-worktree owner concept to route to."""
+    seen = set()
+    for pattern in args.scratch_glob:
+        parent, err = scratch_pattern_parent(pattern)
+        if err:
+            # Unreachable via the CLI (main() rejects these up front); kept so a future caller of this
+            # function can't turn a malformed pattern into an unbounded delete scope.
+            results["tier3"].append({
+                "repo": None, "path": pattern, "branch": None, "owner": None, "tier": 3, "kind": "scratch",
+                "reason": f"inspection needed: unsafe --scratch-glob ({err})",
+                "action": {"kind": "inspect", "commands": []},
+            })
+            continue
+        try:
+            matches = sorted(globlib.glob(pattern))
+        except OSError as e:  # noqa: BLE001 - an unreadable parent is UNKNOWN, never "nothing to do"
+            results["tier3"].append({
+                "repo": None, "path": pattern, "branch": None, "owner": None, "tier": 3, "kind": "scratch",
+                "reason": f"inspection needed: could not expand --scratch-glob ({e})",
+                "action": {"kind": "inspect", "commands": [shlex.join(["ls", "-la", parent])]},
+            })
+            continue
+        for path in matches:
+            if path in seen:
+                continue  # two patterns can legitimately overlap; classify (and plan) each entry once
+            seen.add(path)
+            base = {"repo": None, "path": path, "branch": None, "owner": None, "kind": "scratch"}
+            blocker = scratch_path_blocker(path, parent, protected)
+            if blocker:
+                results["tier3"].append(dict(base, tier=3, reason=f"scratch, but not auto-reapable: {blocker}",
+                                             action={"kind": "inspect", "commands": [shlex.join(["ls", "-la", path])]}))
+                continue
+            newest = newest_mtime(path)
+            if newest is None:
+                results["tier3"].append(dict(
+                    base, tier=3,
+                    reason="inspection needed: could not read this scratch entry's newest mtime "
+                           f"(unreadable, or larger than the {SCRATCH_WALK_NODE_CAP}-node scan cap)",
+                    action={"kind": "inspect", "commands": [shlex.join(["ls", "-la", path])]}))
+                continue
+            age_days = (now_ts - int(newest)) // 86400
+            if age_days < args.min_age_days:
+                continue  # still fresh — silent, exactly like an in-progress worktree
+            entry = dict(base, tier=1,
+                         reason=f"stale scratch (nothing written for {age_days}d, matched '{pattern}') — safe to reap",
+                         action=delete_action(path))
+            results["tier1"].append(entry)
+            reap_plan.append(dict(entry, kind="scratch", parent=parent, age_days=age_days))
+
+
 def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
     repo = os.path.abspath(os.path.expanduser(repo))
 
     entries = parse_worktrees(repo)
     if entries is None:
         results["tier3"].append({
-            "repo": repo, "path": repo, "branch": None, "owner": None, "tier": 3,
+            "repo": repo, "path": repo, "branch": None, "owner": None, "tier": 3, "kind": "worktree",
             "reason": "inspection needed: `git worktree list` failed for this repo",
             "action": inspect_action(repo),
         })
@@ -566,7 +845,9 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     owner = owner_of(path, args.worktree_root, args.owner_depth)
     liveness = owner_live_status(owner, live, seam_failed)  # "live" | "not_live" | "unknown"
 
-    base = {"repo": repo, "path": path, "branch": branch, "owner": owner}
+    # "kind" distinguishes a git worktree entry from a --scratch-glob entry (automated-researcher#792) —
+    # every entry carries it, so a machine consumer never has to infer the class from a null `repo`.
+    base = {"repo": repo, "path": path, "branch": branch, "owner": owner, "kind": "worktree"}
 
     if not is_main and e.get("prunable"):
         entry = dict(base, tier=1, reason="prunable (administrative record only, working directory missing)",
@@ -696,12 +977,22 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
 
 
-def do_reap(reap_plan, dry_run, default_branch):
-    """Returns the count of ACTUAL failures (a prune/remove that genuinely didn't happen) — a defensive
-    skip (state changed, owner now live) is the safety net working as intended, not a failure, and is not
-    counted (code-review Finding 5: callers need to distinguish "nothing needed doing" from "a requested
-    reap didn't happen")."""
+def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts):
+    """Returns (fails, reaped). `fails` counts ACTUAL failures (a prune/remove/delete that genuinely
+    didn't happen) — a defensive skip (state changed, owner now live) is the safety net working as
+    intended, not a failure, and is not counted (code-review Finding 5: callers need to distinguish
+    "nothing needed doing" from "a requested reap didn't happen").
+
+    `reaped` is the per-item outcome record the REPORT then prints (automated-researcher#792's acceptance
+    bar: "report lists what it removed"). Each item is
+    {"path", "kind", "outcome": "removed"|"pruned"|"deleted"|"dry-run"|"skipped"|"failed", "detail"} —
+    the stderr log lines below are live progress for a human watching a long sweep; this is the same
+    information in the machine-readable place a scheduled sweep's consumer actually reads."""
     fails = 0
+    reaped = []
+
+    def record(item, outcome, detail=""):
+        reaped.append({"path": item["path"], "kind": item["kind"], "outcome": outcome, "detail": detail})
 
     # Prune items are handled per-REPO, not per-item: `git worktree prune` prunes every stale record for
     # that repo in one call, and (round-3 code-review Finding 4) a per-record failure inside that single
@@ -717,24 +1008,31 @@ def do_reap(reap_plan, dry_run, default_branch):
         if dry_run:
             for it in items:
                 log(f"DRY-RUN would prune: {it['path']}")
+                record(it, "dry-run", "would prune")
             continue
         rc, _, err = run_git(["worktree", "prune"], cwd=repo)
         if rc != 0:
             log(f"prune command FAILED for {repo}: {err.strip()}")
             fails += len(items)
+            for it in items:
+                record(it, "failed", f"prune command failed for {repo}: {err.strip()}")
             continue
         post_entries = parse_worktrees(repo)
         if post_entries is None:
             log(f"prune ran but could not re-list {repo} to verify — treating all {len(items)} planned prune(s) as unverified")
             fails += len(items)
+            for it in items:
+                record(it, "failed", f"prune ran but {repo} could not be re-listed to verify")
             continue
         still_listed = {e["path"] for e in post_entries}
         for it in items:
             if it["path"] in still_listed:
                 log(f"PRUNE FAILED (still listed after prune): {it['path']}")
                 fails += 1
+                record(it, "failed", "still listed after prune")
             else:
                 log(f"pruned {it['path']}")
+                record(it, "pruned")
 
     for item in reap_plan:
         if item["kind"] != "remove":
@@ -751,6 +1049,7 @@ def do_reap(reap_plan, dry_run, default_branch):
         liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
+            record(item, "skipped", f"owner '{owner}' liveness is now '{liveness_now}'")
             continue
         dirty, untracked, ignored = status_facts(path)
         # Re-check the submodule safety gate too (round-2 Codex review, automated-researcher#537): classification
@@ -782,9 +1081,11 @@ def do_reap(reap_plan, dry_run, default_branch):
                       and has_submodule_now is False)
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
+            record(item, "skipped", "git state changed since classification")
             continue
         if dry_run:
             log(f"DRY-RUN would remove: path={path} branch={branch} head={item.get('head')}")
+            record(item, "dry-run", f"would remove (branch={branch}, head={item.get('head')})")
             continue
         # --force is required whenever this reap is riding the content-identity bar rather than git's own
         # clean bar (Codex review, automated-researcher#537 round 1): a bare `worktree remove` unconditionally
@@ -794,8 +1095,10 @@ def do_reap(reap_plan, dry_run, default_branch):
         if rc != 0:
             log(f"REMOVE FAILED: path={path}: {err.strip()}")
             fails += 1
+            record(item, "failed", err.strip())
             continue
         log(f"REMOVED: path={path} branch={branch} head={item.get('head')}")
+        record(item, "removed", f"branch={branch} head={item.get('head')}")
         # NEVER delete the ref matching the configured default branch name (round-3 code-review Finding
         # 2): a linked worktree can legitimately be checked out ON the default branch itself, and deleting
         # that ref would break every other worktree/operation depending on it existing.
@@ -805,7 +1108,53 @@ def do_reap(reap_plan, dry_run, default_branch):
                 log(f"branch delete failed (non-fatal): {branch}: {err2.strip()}")
         elif branch:
             log(f"NOT deleting branch ref '{branch}' — matches the configured default branch name")
-    return fails
+
+    # Scratch deletions (automated-researcher#792). Same defense-in-depth shape as the worktree loop:
+    # every classification-time fact is recomputed immediately before the `rm -rf`, because the sweep can
+    # take minutes and a repro dir that went live in the gap must not be deleted on a stale reading.
+    # Unlike `git worktree remove`, nothing underneath us will refuse a bad delete, so the path guards are
+    # re-run in full here rather than trusted from classification.
+    for item in reap_plan:
+        if item["kind"] != "scratch":
+            continue
+        path = item["path"]
+        if not os.path.exists(path):
+            log(f"SKIPPED (already gone since classification): {path}")
+            record(item, "skipped", "already gone since classification")
+            continue
+        blocker = scratch_path_blocker(path, item["parent"], protected)
+        if blocker:
+            log(f"SKIPPED (path guard tripped since classification: {blocker}): {path}")
+            record(item, "skipped", f"path guard: {blocker}")
+            continue
+        newest = newest_mtime(path)
+        if newest is None:
+            log(f"SKIPPED (newest mtime unreadable at reap time): {path}")
+            record(item, "skipped", "newest mtime unreadable at reap time")
+            continue
+        age_now = (now_ts - int(newest)) // 86400
+        if age_now < min_age_days:
+            log(f"SKIPPED (written to since classification — now {age_now}d old): {path}")
+            record(item, "skipped", f"written to since classification (now {age_now}d old)")
+            continue
+        if dry_run:
+            log(f"DRY-RUN would delete scratch: {path} ({age_now}d old)")
+            record(item, "dry-run", f"would delete ({age_now}d old)")
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+            else:
+                os.unlink(path)
+        except OSError as e:  # noqa: BLE001 - a failed delete is reported, never retried or escalated
+            log(f"SCRATCH DELETE FAILED: {path}: {e}")
+            fails += 1
+            record(item, "failed", str(e))
+            continue
+        log(f"DELETED scratch: {path} ({age_now}d old)")
+        record(item, "deleted", f"{age_now}d old")
+
+    return fails, reaped
 
 
 def render_group(lines, entries):
@@ -820,6 +1169,14 @@ def render_group(lines, entries):
     a strict `>` left that boundary case uncollapsed. Order-preserving: reasons render in first-seen order,
     and entries within an uncollapsed reason render in their original order."""
     collapse_at = max(REPORT_COLLAPSE_MIN_COUNT, len(entries) * REPORT_COLLAPSE_FRACTION)
+
+    def label(it):
+        # A --scratch-glob entry has no branch (automated-researcher#792) — rendering the worktree shape's
+        # `[(detached)]` for it would read as a git fact that was checked and came back empty.
+        if it.get("kind") == "scratch":
+            return it["path"]
+        return f"{it['path']} [{it['branch'] or '(detached)'}]"
+
     by_reason = {}
     order = []
     for it in entries:
@@ -829,20 +1186,40 @@ def render_group(lines, entries):
     for reason in order:
         group = by_reason[reason]
         if len(group) >= collapse_at:
-            lines.append(f"- [{len(group)} worktrees, same root cause] {reason}")
+            lines.append(f"- [{len(group)} entries, same root cause] {reason}")
             for it in group:
-                lines.append(f"    {it['path']} [{it['branch'] or '(detached)'}]")
+                lines.append(f"    {label(it)}")
         else:
             for it in group:
-                lines.append(f"- {it['path']} [{it['branch'] or '(detached)'}] — {it['reason']}")
+                lines.append(f"- {label(it)} — {it['reason']}")
                 for c in it["action"]["commands"]:
                     lines.append(f"    $ {c}")
+
+
+def render_reaped(lines, reaped):
+    """The what-was-actually-removed section (automated-researcher#792): a reaping sweep that only prints
+    what it CLASSIFIED leaves the reader inferring the deletions from a stderr log, and a skip (the safety
+    net firing) looks identical to a removal. Outcomes are grouped so the removals lead."""
+    order = ["removed", "pruned", "deleted", "dry-run", "skipped", "failed"]
+    by_outcome = {}
+    for it in reaped:
+        by_outcome.setdefault(it["outcome"], []).append(it)
+    lines.append(f"\n## Reaped ({len(reaped)})")
+    for outcome in order + sorted(k for k in by_outcome if k not in order):
+        group = by_outcome.get(outcome)
+        if not group:
+            continue
+        lines.append(f"### {outcome} ({len(group)})")
+        for it in group:
+            detail = f" — {it['detail']}" if it["detail"] else ""
+            lines.append(f"- [{it['kind']}] {it['path']}{detail}")
 
 
 def render_text(results):
     lines = []
     t1, t2, t3 = results["tier1"], results["tier2"], results["tier3"]
-    if not t1 and not t2 and not t3:
+    reaped = results.get("reaped") or []
+    if not t1 and not t2 and not t3 and not reaped:
         print("[janitor] sweep clean — nothing to report", file=sys.stderr)
         return
     if t1:
@@ -857,6 +1234,8 @@ def render_text(results):
     if t3:
         lines.append(f"\n## Tier 3 — researcher residual ({len(t3)})")
         render_group(lines, t3)
+    if reaped:
+        render_reaped(lines, reaped)
     print("\n".join(lines))
 
 
@@ -871,6 +1250,10 @@ def build_parser():
     p.add_argument("--json", action="store_true", help="machine-readable output instead of the human report")
     p.add_argument("--reap-tier1", action="store_true", help="perform tier-1 deletions after reporting")
     p.add_argument("--dry-run", action="store_true", help="with --reap-tier1: log removals without performing them")
+    p.add_argument("--scratch-glob", action="append", default=[], metavar="GLOB",
+                   help="absolute glob of non-git scratch entries to age out alongside the worktrees "
+                        "(repeatable; only the LAST path segment may contain wildcards). Same "
+                        "--min-age-days bar, same report-only-unless---reap-tier1 rule")
     return p
 
 
@@ -910,24 +1293,60 @@ def main(argv=None):
         die("--default-branch must be a short local branch name (no '/') — "
             "not a remote shorthand, qualified ref, or nested branch name")
 
+    # --scratch-glob patterns are validated UP FRONT, before a single fact is computed (automated-
+    # researcher#792): an unsafe pattern is the one input that could widen an `rm -rf`'s blast radius, so
+    # it must be a hard, pre-flight failure — never a per-entry surprise discovered mid-sweep.
+    for pattern in args.scratch_glob:
+        if not pattern.strip():
+            die("--scratch-glob value(s) must not be empty/whitespace-only")
+        _, err = scratch_pattern_parent(pattern)
+        if err:
+            die(f"--scratch-glob '{pattern}' is not safe to expand into deletions: {err}")
+
     live, seam_failed = load_live_sessions()
     now_ts = int(time.time())
-    results = {"tier1": [], "tier2": {}, "tier3": []}
+    results = {"tier1": [], "tier2": {}, "tier3": [], "reaped": []}
     reap_plan = []
 
     for repo in args.repo:
         process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan)
+
+    # Protected paths for the scratch scan (see scratch_path_blocker for what each set means): every swept
+    # repo and every worktree it lists — a scratch glob must never be able to `rm -rf` a checkout out from
+    # under the sweep that is classifying it — plus $HOME and the cwd. Only computed when there is a
+    # scratch scan to guard; nothing else consumes it, and enumerating worktrees costs a git call per repo.
+    trees = set()
+    protected = (set(), trees)
+    if args.scratch_glob:
+        for repo in args.repo:
+            repo_abs = os.path.abspath(os.path.expanduser(repo))
+            trees.add(os.path.realpath(repo_abs))
+            for e in parse_worktrees(repo_abs) or []:
+                trees.add(os.path.realpath(e["path"]))
+        protected[0].update(trees)
+        for p in (os.path.expanduser("~"), os.getcwd()):
+            try:
+                protected[0].add(os.path.realpath(p))
+            except OSError:
+                pass
+        scan_scratch(args, now_ts, protected, results, reap_plan)
+
+    fails = 0
+    if args.reap_tier1:
+        # Reap BEFORE emitting the report, so the report can state what was actually removed rather than
+        # only what was classified (automated-researcher#792's acceptance bar). The live stderr log inside
+        # do_reap is unchanged, so a human watching a long sweep still sees each action as it happens.
+        fails, results["reaped"] = do_reap(reap_plan, args.dry_run, args.default_branch,
+                                           args.min_age_days, protected, now_ts)
 
     if args.json:
         print(json.dumps(results, indent=2, sort_keys=True))
     else:
         render_text(results)
 
-    if args.reap_tier1:
-        fails = do_reap(reap_plan, args.dry_run, args.default_branch)
-        if fails:
-            log(f"{fails} reap action(s) FAILED — exiting non-zero (see FAILED lines above)")
-            sys.exit(1)
+    if fails:
+        log(f"{fails} reap action(s) FAILED — exiting non-zero (see FAILED lines above)")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
