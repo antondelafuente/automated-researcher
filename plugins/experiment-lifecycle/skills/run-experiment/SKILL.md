@@ -763,18 +763,24 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   A 2026-08-30 measurement found 52G across 74 such dirs on one 225G box against ~7G of genuinely durable
   data; at ~1 experiment/day that structurally fills the disk in about two months and halts every
   concurrent run. Right after the worktree teardown above, run
-  `scripts/reap_scratch.sh <run-id> <your scratch dir>`: it re-checks the same clean-close guard, requires
-  the dir's basename to equal `<run-id>` (the `work/<exp>` convention IS the binding that keeps a
-  clean-closed run from naming a peer's scratch), then **`rclone copy` → `rclone check` → only then
-  `rm -rf`** — the same "tear down after a verified upload" pattern the completion boundary above already
-  demands of compute, applied to the workspace. **On a check failure it leaves the directory alone and
-  exits non-zero: say so on the run's ledger line** rather than deleting anyway or silently retrying. The
-  archive destination is your instance's **`EXPERIMENT_SCRATCH_ARCHIVE_DEST`** seam (an rclone destination
-  root; per-run archives land at `<root>/<run-id>`) — **unset → a logged no-op that deletes nothing**, since
-  there is nowhere to make the scratch durable, and that is a wiring gap for the retro, not a licence to
-  skip the archive. Fires **only on a clean close**, same as the two steps around it: a parked/blocked/
-  crashed run keeps its scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop
-  for whatever this step never got to run on.
+  `scripts/reap_scratch.sh <run-id> <your scratch dir>`: it re-checks the same clean-close guard, then
+  **`rclone copy` → `rclone check` → only then `rm -rf`** — the same "tear down after a verified upload"
+  pattern the completion boundary above already demands of compute, applied to the workspace. **On a check
+  failure it leaves the directory alone and exits non-zero: say so on the run's ledger line** rather than
+  deleting anyway or silently retrying. Two instance seams bound it, and **either one unset → a logged
+  no-op that deletes nothing** (a wiring gap for the retro, never a licence to delete):
+  - **`EXPERIMENT_SCRATCH_ROOT`** — the absolute local directory your instance creates per-run scratch dirs
+    under. **The delete target is derived, not taken from you:** the only path this ever `rm -rf`s for
+    `<run-id>` is `<root>/<run-id>`, a direct child of that one root and nothing else at any depth. The
+    `<scratch dir>` argument is checked *against* that derivation, so a mistyped, stale, or peer path is
+    refused rather than archived-and-deleted. (A basename alone is not a binding — it would make every
+    directory named `<run-id>` anywhere on the box deletable.)
+  - **`EXPERIMENT_SCRATCH_ARCHIVE_DEST`** — an rclone destination root; per-run archives land at
+    `<root>/<run-id>`, re-derived for the verification instead of reused from the copy.
+
+  Fires **only on a clean close**, same as the two steps around it: a parked/blocked/crashed run keeps its
+  scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop for whatever this step
+  never got to run on.
 - **Reap your session — the TERMINAL action (free the process, symmetric with pod-teardown).** A finished executor
   session is a ~300–530 MB zombie until reaped; on a small box a batch day of them OOMs the cross-family audits. As the
   VERY LAST thing — once the close is durably done and self-audited — reap your own session:
@@ -1003,8 +1009,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   session reap, right before it (`reap_worktree.sh`). A parked/blocked/crashed run keeps its worktree for forensics.
 - **Archive and delete your own scratch dir at a clean close (#792)** — the last bucket with no delete side, and the
   one that is durable NOWHERE until you archive it: `reap_scratch.sh <run-id> <scratch dir>` does
-  `rclone copy` → `rclone check` → `rm -rf`, never `rm -rf` without a verified archive. A failed check leaves the dir
-  and goes on the ledger line; an unconfigured `EXPERIMENT_SCRATCH_ARCHIVE_DEST` is a logged no-op, not a bare delete.
+  `rclone copy` → `rclone check` → `rm -rf`, never `rm -rf` without a verified archive. The delete target is DERIVED
+  (`EXPERIMENT_SCRATCH_ROOT` + the run-id), never the path you passed. A failed check leaves the dir and goes on the
+  ledger line; either seam unconfigured (`EXPERIMENT_SCRATCH_ROOT` / `..._ARCHIVE_DEST`) is a logged no-op, not a delete.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

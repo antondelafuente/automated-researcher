@@ -3,11 +3,13 @@
 # Behavior the deterministic JSON/syntax checks can't catch, and the properties the incident turns on:
 #   - the happy path: verified archive THEN delete, copy addressed at "<root>/<run-id>" with -L
 #   - the clean-close guard (active / stopped / unknown run-ids never reap, rclone never invoked)
-#   - the run-id<->scratch BINDING (a basename that isn't the run-id is refused — no peer scratch)
+#   - the DERIVED delete target: only "<EXPERIMENT_SCRATCH_ROOT>/<run-id>" is ever reapable — a basename
+#     that isn't the run-id is refused (no peer scratch), and so is a same-named dir under a DIFFERENT
+#     root, which a basename-only binding would have accepted (round-1 code-review Finding 2)
 #   - NO DELETE WITHOUT A VERIFIED ARCHIVE: copy failure, `Can't follow symlink` NOTICE on an exit-0
 #     copy, `rclone check` failure, and a destination listing that doesn't show the run-id all leave the
 #     directory in place and exit non-zero
-#   - the unset-seam / no-rclone NO-OPs (exit 0, nothing deleted, nothing invoked)
+#   - the unset-seam NO-OPs — archive dest, scratch root, no rclone (exit 0, nothing deleted/invoked)
 #   - path-sanity refusals: a symlinked scratch dir, the run's own bound worktree, and a cwd inside it
 #   - the destination probe matches the run-id LITERALLY (a '.' in a run-id is not a regex wildcard
 #     that could pass the gate against a different, similarly-named archive prefix)
@@ -56,6 +58,9 @@ export RCLONE_LOG="$TMP/rclone.log"
 export STUB_STORE="$TMP/store"
 mkdir -p "$STUB_STORE"
 export EXPERIMENT_SCRATCH_ARCHIVE_DEST="stub:bucket/archive/work"
+# The instance-declared LOCAL scratch root: the only directory whose direct children are ever reapable.
+export EXPERIMENT_SCRATCH_ROOT="$TMP/work"
+mkdir -p "$EXPERIMENT_SCRATCH_ROOT"
 
 rclone_calls(){ [ -f "$RCLONE_LOG" ] && wc -l < "$RCLONE_LOG" | tr -d ' ' || echo 0; }
 reset_log(){ : > "$RCLONE_LOG"; }
@@ -73,8 +78,8 @@ if bash "$R" h1 "$s" >/dev/null 2>&1; then ok happy-exit0; else no happy-exit0; 
 [ -d "$s" ] && no happy-scratch-deleted || ok happy-scratch-deleted
 grep -q "^copy $s stub:bucket/archive/work/h1 -L$" "$RCLONE_LOG" && ok happy-copy-derived-dest-with-L \
   || no "happy-copy-derived-dest-with-L ($(grep '^copy' "$RCLONE_LOG"))"
-grep -q "^check $s stub:bucket/archive/work/h1 --one-way$" "$RCLONE_LOG" && ok happy-check-derived-dest \
-  || no "happy-check-derived-dest ($(grep '^check' "$RCLONE_LOG"))"
+grep -q "^check $s stub:bucket/archive/work/h1 --one-way -L$" "$RCLONE_LOG" && ok happy-check-derived-dest-with-L \
+  || no "happy-check-derived-dest-with-L ($(grep '^check' "$RCLONE_LOG"))"
 grep -q "^lsf stub:bucket/archive/work/$" "$RCLONE_LOG" && ok happy-lsf-lists-parent-prefix \
   || no "happy-lsf-lists-parent-prefix ($(grep '^lsf' "$RCLONE_LOG"))"
 
@@ -102,12 +107,28 @@ if bash "$R" g_unknown "$s" >/dev/null 2>&1; then no guard-unknown-refused; else
 [ -d "$s" ] && ok guard-unknown-scratch-kept || no guard-unknown-scratch-kept
 [ "$(rclone_calls)" = 0 ] && ok guard-unknown-no-rclone || no guard-unknown-no-rclone
 
-# --- run-id<->scratch binding: a dir that isn't named for the run is never reaped ------------------
+# --- the delete target is DERIVED: only "<EXPERIMENT_SCRATCH_ROOT>/<run-id>" is ever reapable ---------
 rec create b1 >/dev/null; rec close b1 >/dev/null
 peer=$(mkscratch someone-elses-run); reset_log
 if bash "$R" b1 "$peer" >/dev/null 2>&1; then no binding-peer-refused; else ok binding-peer-refused; fi
 [ -d "$peer" ] && ok binding-peer-scratch-kept || no binding-peer-scratch-kept
 [ "$(rclone_calls)" = 0 ] && ok binding-peer-no-rclone || no binding-peer-no-rclone
+
+# Round-1 code-review Finding 2: the basename check alone accepted ANY dir named for the run, anywhere on
+# the box. A same-named dir under a different root — a second checkout's work dir, a copy, a peer's tree —
+# is not this run's scratch and must be refused without a byte being copied or deleted.
+rec create b2 >/dev/null; rec close b2 >/dev/null
+elsewhere="$TMP/elsewhere/b2"; mkdir -p "$elsewhere"; echo payload > "$elsewhere/out.txt"; reset_log
+if bash "$R" b2 "$elsewhere" >/dev/null 2>&1; then no binding-other-root-refused; else ok binding-other-root-refused; fi
+[ -d "$elsewhere" ] && ok binding-other-root-kept || no binding-other-root-kept
+[ "$(rclone_calls)" = 0 ] && ok binding-other-root-no-rclone || no binding-other-root-no-rclone
+
+# ...and a correctly-named dir NESTED below the root is not a direct child of it, so it is not the derived
+# target either — the delete scope is exactly one path deep, not "anywhere under the root".
+rec create b3 >/dev/null; rec close b3 >/dev/null
+nested="$TMP/work/nested/b3"; mkdir -p "$nested"; echo payload > "$nested/out.txt"; reset_log
+if bash "$R" b3 "$nested" >/dev/null 2>&1; then no binding-nested-refused; else ok binding-nested-refused; fi
+[ -d "$nested" ] && ok binding-nested-kept || no binding-nested-kept
 
 # --- no delete without a verified archive ----------------------------------------------------------
 rec create f_copy >/dev/null; rec close f_copy >/dev/null
@@ -136,6 +157,21 @@ s=$(mkscratch n1); reset_log
 if env -u EXPERIMENT_SCRATCH_ARCHIVE_DEST bash "$R" n1 "$s" >/dev/null 2>&1; then ok noseam-exit0; else no noseam-exit0; fi
 [ -d "$s" ] && ok noseam-scratch-kept || no noseam-scratch-kept
 [ "$(rclone_calls)" = 0 ] && ok noseam-no-rclone || no noseam-no-rclone
+
+rec create n3 >/dev/null; rec close n3 >/dev/null
+s=$(mkscratch n3); reset_log
+if env -u EXPERIMENT_SCRATCH_ROOT bash "$R" n3 "$s" >/dev/null 2>&1; then ok noroot-exit0; else no noroot-exit0; fi
+[ -d "$s" ] && ok noroot-scratch-kept || no noroot-scratch-kept
+[ "$(rclone_calls)" = 0 ] && ok noroot-no-rclone || no noroot-no-rclone
+
+# A root that is set but unusable is a LOUD failure, not a no-op: the seam was configured, so a target the
+# script cannot derive from it is a wiring error the caller must see — never a silent skip.
+rec create n4 >/dev/null; rec close n4 >/dev/null
+s=$(mkscratch n4); reset_log
+if EXPERIMENT_SCRATCH_ROOT="relative/work" bash "$R" n4 "$s" >/dev/null 2>&1; then no relroot-refused; else ok relroot-refused; fi
+[ -d "$s" ] && ok relroot-scratch-kept || no relroot-scratch-kept
+if EXPERIMENT_SCRATCH_ROOT="$TMP/no-such-root" bash "$R" n4 "$s" >/dev/null 2>&1; then no missingroot-refused; else ok missingroot-refused; fi
+[ -d "$s" ] && ok missingroot-scratch-kept || no missingroot-scratch-kept
 
 rec create n2 >/dev/null; rec close n2 >/dev/null
 s=$(mkscratch n2); reset_log

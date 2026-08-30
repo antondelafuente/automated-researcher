@@ -16,11 +16,18 @@
 #   1. CLEAN-CLOSE GUARD: only reap if the run-supervision record is a clean close
 #      (`run_supervision_record.sh is-closed` = closed AND NOT stopped) — a parked/blocked/crashed run
 #      keeps its scratch in place for forensics (repo-janitor's sweep is the backstop for that residue).
-#   2. RUN-ID<->SCRATCH BINDING: <scratch-dir>'s basename must equal <run-id>. This is the `work/<exp>`
-#      convention the incident describes (one scratch dir per experiment, named for it), and it is what
-#      ties the two arguments together: without it a clean-closed run-id could be paired with ANY path,
-#      including a live peer's scratch — the same hole reap_worktree.sh's round-2 review closed with the
-#      record's `worktree_path` field. It is also what makes gate 5's destination independent (below).
+#   2. THE DELETE TARGET IS DERIVED, NOT SUPPLIED — and the deletable set is statically bounded to ONE
+#      path per run: "<EXPERIMENT_SCRATCH_ROOT>/<run-id>". A basename check alone is NOT a binding (round-1
+#      code-review Finding 2): it makes every directory anywhere on the box named <run-id> deletable, so a
+#      caller that passed the wrong path — a second checkout's `work/<id>`, an archive copy, a same-named
+#      dir under someone else's root — got an `rm -rf` and a "verified" archive of the wrong tree. So the
+#      instance declares the ONE scratch root it creates these dirs under; the target is derived from that
+#      root plus the run-id, and the <scratch-dir> argument is checked AGAINST that derivation rather than
+#      trusted. This is the same invariant repo-janitor's `--scratch-glob` states for its own `rm -rf`
+#      (delete scope statically bounded to direct children of one root the researcher wrote out in full),
+#      and the same shape as gate 5's re-derived destination: nothing an `rm -rf` or an archive addresses
+#      is ever a value this script accepted from its caller. It is also what keeps a clean-closed run-id
+#      from ever naming a live peer's scratch — a peer's dir is named for the PEER's run-id.
 #   3. PATH SANITY: <scratch-dir> must be a real directory (never a symlink — deleting through one
 #      destroys the target while leaving the link), must not be the calling shell's own cwd or an
 #      ancestor of it, must not be $HOME, and must sit at least one level below the filesystem root.
@@ -29,6 +36,11 @@
 #      the silent data-loss swallow gpu-job's r2_copy exists to catch (#295). A copy failure, a check
 #      failure, or an absent destination listing all leave the directory in place and exit non-zero, so
 #      the caller records it on the run's ledger line instead of silently losing the scratch.
+#      THE VERIFICATION MUST SEE EXACTLY WHAT THE COPY SAW, so `rclone check` carries -L too (round-1
+#      code-review Finding 1): without it rclone skips source symlinks while listing, and `--one-way`
+#      ignores their copies at the destination as extras — so every byte that reached the store only
+#      BECAUSE the copy followed a link would be deleted locally without ever having been verified. An
+#      asymmetric verify is the exact failure mode gate 5 exists to prevent, one argument over.
 #   5. THE VERIFY DESTINATION IS RE-DERIVED, NOT REUSED (#729): `rclone copy "$src" "$D"` followed by
 #      `rclone check "$src" "$D"` verifies the wrong destination against itself and passes green — it
 #      proves the copy happened, never that it happened to the INTENDED target. Here the destination is
@@ -36,11 +48,15 @@
 #      directory), and the store is additionally probed by LISTING THE PARENT PREFIX and matching the
 #      run-id in it — never a single-file/single-dir `rclone lsf` of the destination itself, which exits
 #      0 on a missing path (gpu-job's r2_exists incident).
-#   6. UNSET SEAM -> A LOGGED NO-OP, NEVER A DELETE. With no archive destination configured (or no
-#      rclone on PATH) there is nowhere to make the scratch durable, so nothing is deleted and the run
-#      reports the wiring gap in its retro — the same shape as reap_session.sh's unset-seam no-op.
+#   6. UNSET SEAM -> A LOGGED NO-OP, NEVER A DELETE. With no scratch root declared there is no bounded
+#      delete target to derive; with no archive destination configured (or no rclone on PATH) there is
+#      nowhere to make the scratch durable. Either way nothing is deleted and the run reports the wiring
+#      gap in its retro — the same shape as reap_session.sh's unset-seam no-op.
 #
-# WHAT THE INSTANCE SUPPLIES:
+# WHAT THE INSTANCE SUPPLIES (both are instance values, so the product ships neither path):
+#   EXPERIMENT_SCRATCH_ROOT — the absolute LOCAL directory this instance creates per-run scratch dirs
+#   under (e.g. "<home>/work"). It bounds what may ever be deleted: the only reapable path for run <id>
+#   is "<root>/<id>", nothing else, at any depth. Unset -> no-op (6).
 #   EXPERIMENT_SCRATCH_ARCHIVE_DEST — an rclone destination ROOT for archived executor scratch (e.g.
 #   "<remote>:<bucket>/archive/work"). Per-run archives land at "<root>/<run-id>". Unset -> no-op (6).
 #
@@ -74,10 +90,22 @@ fi
 [ -d "$scratch" ] || die "scratch path '$scratch' is not a directory"
 scratch_real=$(cd "$scratch" && pwd -P) || die "could not resolve '$scratch'"
 
-# Gate 2 — run-id<->scratch binding. The `work/<exp>` convention IS the binding: a clean-closed run-id can
-# only ever name the scratch dir that carries its own name, never a peer's.
-scratch_name=${scratch_real##*/}
-[ "$scratch_name" = "$id" ] || die "refusing to reap '$scratch_real': its basename '$scratch_name' does not equal run-id '$id' — this script only reaps the scratch dir named for the run (the work/<exp> convention), never an unrelated path"
+# Gate 2 — the delete target is DERIVED from (declared root, run-id), and the argument is checked against
+# it. Unset root -> no-op, because without a declared root there is no bounded delete scope to derive and
+# the only remaining "binding" would be a basename, which is not one (see the CONTRACT block).
+scratch_root=${EXPERIMENT_SCRATCH_ROOT:-}
+if [ -z "${scratch_root// /}" ]; then
+  say "NO-OP: EXPERIMENT_SCRATCH_ROOT is unset — scratch '$scratch_real' left in place (without a declared scratch root there is no bounded delete target to derive, and a basename alone would make every dir named '$id' on this box deletable). Report this wiring gap in the retro."
+  exit 0
+fi
+case "$scratch_root" in
+  /*) : ;;
+  *) die "EXPERIMENT_SCRATCH_ROOT must be an ABSOLUTE path (got '$scratch_root') — a relative root would make the delete target depend on the caller's cwd" ;;
+esac
+root_real=$(cd "$scratch_root" 2>/dev/null && pwd -P) || die "EXPERIMENT_SCRATCH_ROOT '$scratch_root' is not a readable directory — refusing to derive a delete target from a root that does not resolve"
+[ "$root_real" != "/" ] || die "refusing to use '/' as EXPERIMENT_SCRATCH_ROOT: a scratch root is never the filesystem root"
+expected="$root_real/$id"
+[ "$scratch_real" = "$expected" ] || die "refusing to reap '$scratch_real': run '$id''s scratch dir is '$expected' (derived from EXPERIMENT_SCRATCH_ROOT + the run-id) and this path is not it — this script only ever deletes the one derived path, never a caller-supplied one"
 
 # Gate 3b — never delete $HOME, a root-level directory, or a directory the calling shell is standing in
 # (or under). A shell whose cwd vanishes mid-close produces confusing downstream failures, and the two
@@ -138,7 +166,10 @@ fi
 
 # Verification, part 1: every source file exists at the destination with matching size/hash. --one-way so
 # a previous partial attempt's leftovers at the destination are not themselves reported as differences.
-if ! rclone check "$scratch_real" "$dest" --one-way; then
+# -L MUST match the copy's -L: without it rclone skips source symlinks while listing, and --one-way then
+# ignores their copies at the destination as extras — so link-followed bytes would be deleted locally
+# having never been verified at all (round-1 code-review Finding 1).
+if ! rclone check "$scratch_real" "$dest" --one-way -L; then
   die "ARCHIVE CHECK FAILED (rclone check '$scratch_real' vs '$dest'): scratch left in place. Record this on the run's ledger line."
 fi
 

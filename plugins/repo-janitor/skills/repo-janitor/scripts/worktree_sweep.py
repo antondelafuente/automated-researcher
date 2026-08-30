@@ -622,6 +622,14 @@ def scratch_path_blocker(path, parent, protected):
             return f"it lives inside a swept checkout ('{prot}')"
     if os.path.exists(os.path.join(path, ".git")):
         return "it contains a .git entry (a checkout/worktree, not scratch — sweep it via --repo instead)"
+    # A BARE repository has no `.git` entry at all: its object database sits at the top level (round-1
+    # code-review Finding 3). `.git`-only detection would classify a stale bare mirror/clone as ordinary
+    # scratch and hand it to `rm -rf` — the one thing the "repository-like entries are never scratch"
+    # invariant above exists to prevent, and the one whose loss is unrecoverable. The signature is git's
+    # own is_git_directory() check: HEAD plus objects/ plus refs/ at the root.
+    if all(os.path.exists(os.path.join(path, n)) for n in ("HEAD", "objects", "refs")):
+        return ("it looks like a BARE git repository (HEAD + objects/ + refs/ at its root, no .git) — "
+                "not scratch; sweep it via --repo or move it out of the glob's reach")
     return None
 
 

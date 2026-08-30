@@ -136,8 +136,10 @@ below — a bare sweep reports and nothing else.
   An unsafe pattern is rejected **up front**, before a single fact is computed, not discovered mid-sweep.
 - **Path guards, all fail-closed to tier 3:** a symlink (deleting it would leave its target, or the link
   is standing in for real content), a path resolving through a symlinked ancestor, anything that is /
-  contains / lives inside a swept repo or worktree, `$HOME`, or the cwd, and anything carrying a `.git`
-  entry (that's a checkout — sweep it via `--repo`, where git's own refusals apply).
+  contains / lives inside a swept repo or worktree, `$HOME`, or the cwd, and anything **repository-like**
+  — either a `.git` entry (an ordinary checkout/worktree) or the bare-repo signature `HEAD` + `objects/` +
+  `refs/` at the top level, which carries no `.git` at all. Both route to `--repo`, where git's own
+  refusals apply; neither is ever scratch.
 - **Every fact is recomputed immediately before the delete**, exactly like the worktree reap: a repro dir
   written to in the gap between classification and reaping is skipped, not deleted on a stale reading.
 

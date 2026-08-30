@@ -19,8 +19,9 @@
 #     `git worktree remove` unconditionally refuses it (merge-gate final-review MED)
 #   - --scratch-glob, the non-git scratch prune (automated-researcher#792): a stale entry reaches tier1 and
 #     is actually deleted; a fresh one is silent; a dir whose OWN mtime is old but that carries a freshly
-#     written file is silent (the TREE's newest mtime is the fact); a symlink and a swept repo's own
-#     worktree route to tier3 and survive a real --reap-tier1; --dry-run deletes nothing; and every unsafe
+#     written file is silent (the TREE's newest mtime is the fact); a symlink, a swept repo's own worktree,
+#     and an aged-out BARE repository (no `.git` entry — HEAD + objects/ + refs/ at its root) all route to
+#     tier3 and survive a real --reap-tier1; --dry-run deletes nothing; and every unsafe
 #     --scratch-glob shape (relative, wildcard in the directory part, root-level, trailing slash) is
 #     rejected up front so the delete scope stays statically bounded
 #   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
@@ -638,6 +639,12 @@ ln -s "$TMP/link-target-dir" "$SCRATCH/linked-repro.fff"
 g "$REPO" worktree add -q -b scratch-guard "$SCRATCH/checkout-repro.ggg" main
 echo novel-guard-content-not-on-main > "$SCRATCH/checkout-repro.ggg/guard-note.txt"
 
+# A BARE repository, fully aged out so every age fact says "reap me": it carries no `.git` entry at all
+# (HEAD + objects/ + refs/ sit at its top level), so a `.git`-only repo guard would hand a whole object
+# database to `rm -rf`. Round-1 code-review Finding 3 — the loss here is unrecoverable, unlike scratch.
+git init --bare -q "$SCRATCH/bare-repro.iii"
+find "$SCRATCH/bare-repro.iii" -exec touch -d "$OLD_DATE" {} +
+
 GLOB="$SCRATCH/*-repro.*"
 
 python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null > "$TMP/scratch.json"
@@ -647,6 +654,8 @@ has_path_in "d['tier1']" "$SCRATCH/live-repro.eee"      < "$TMP/scratch.json" &&
 has_path_in "d['tier3']" "$SCRATCH/linked-repro.fff"    < "$TMP/scratch.json" && ok "scratch: symlink entry routes to tier3" || no "scratch: symlink entry routes to tier3"
 has_path_in "d['tier1']" "$SCRATCH/linked-repro.fff"    < "$TMP/scratch.json" && no "scratch: symlink entry must never be tier1" || ok "scratch: symlink entry never tier1"
 has_path_in "d['tier3']" "$SCRATCH/checkout-repro.ggg"  < "$TMP/scratch.json" && ok "scratch: a swept repo's worktree inside the glob routes to tier3 (protected)" || no "scratch: protected checkout must route to tier3"
+has_path_in "d['tier3']" "$SCRATCH/bare-repro.iii"      < "$TMP/scratch.json" && ok "scratch: an aged-out BARE repo routes to tier3" || no "scratch: aged-out bare repo must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/bare-repro.iii"      < "$TMP/scratch.json" && no "scratch: a bare repo must never be tier1 (no .git entry, but still a repository)" || ok "scratch: bare repo never tier1"
 # Kind-scoped on purpose: this path is legitimately reported TWICE (once as a git worktree with untracked
 # content, once as a scratch match), so a first-match-wins reason check would read the worktree entry.
 python3 -c "
@@ -692,6 +701,7 @@ python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --json 2>/de
 [ -L "$SCRATCH/linked-repro.fff" ]   && ok "scratch: symlink survives --reap-tier1" || no "scratch: symlink was deleted"
 [ -d "$TMP/link-target-dir" ]        && ok "scratch: symlink TARGET survives --reap-tier1" || no "scratch: symlink target was deleted"
 [ -d "$SCRATCH/checkout-repro.ggg" ] && ok "scratch: protected checkout survives --reap-tier1" || no "scratch: protected checkout was rm -rf'd"
+[ -d "$SCRATCH/bare-repro.iii/objects" ] && ok "scratch: aged-out bare repo survives --reap-tier1" || no "scratch: aged-out bare repo was rm -rf'd"
 
 # the report says what it removed (the #792 acceptance bar), in both output modes
 python3 -c "
