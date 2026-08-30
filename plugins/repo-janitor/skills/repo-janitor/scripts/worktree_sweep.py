@@ -595,7 +595,15 @@ def newest_mtime(path):
 
 def scratch_path_blocker(path, parent, protected):
     """A one-line reason this entry must never be auto-deleted, or None if none applies. Every check here
-    is about the PATH, not its age — an aged-out entry that trips any of them is reported, never reaped."""
+    is about the PATH, not its age — an aged-out entry that trips any of them is reported, never reaped.
+
+    `protected` is (exact_or_ancestor, trees). The two relations are deliberately different: for EVERY
+    protected path, `path` must be neither the path itself nor an ancestor of it (deleting it would take
+    the protected thing with it) — but only for `trees` (the swept repos and their worktrees) does living
+    INSIDE also block. `$HOME` and the cwd are in the first set alone on purpose: a scratch root is
+    routinely under one or both of them (`~/work/...`, a sweep launched from `/tmp`), so treating "inside"
+    as a blocker there would silently disqualify every match the researcher configured the glob for."""
+    exact_or_ancestor, trees = protected
     if os.path.dirname(path) != parent:
         return f"not a direct child of the pattern's directory '{parent}'"
     if os.path.islink(path):
@@ -606,9 +614,12 @@ def scratch_path_blocker(path, parent, protected):
         return "its real path could not be resolved"
     if real != path:
         return f"resolves through a symlinked ancestor to '{real}'"
-    for prot in protected:
-        if real == prot or prot.startswith(real + os.sep) or real.startswith(prot + os.sep):
-            return f"it is, contains, or lives inside a protected path ('{prot}')"
+    for prot in exact_or_ancestor:
+        if real == prot or prot.startswith(real + os.sep):
+            return f"it is, or contains, a protected path ('{prot}')"
+    for prot in trees:
+        if real.startswith(prot + os.sep):
+            return f"it lives inside a swept checkout ('{prot}')"
     if os.path.exists(os.path.join(path, ".git")):
         return "it contains a .git entry (a checkout/worktree, not scratch — sweep it via --repo instead)"
     return None
@@ -1182,19 +1193,22 @@ def main(argv=None):
     for repo in args.repo:
         process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan)
 
-    # Protected paths for the scratch scan: every swept repo and every worktree it lists (a scratch glob
-    # must never be able to `rm -rf` a checkout out from under the sweep that is classifying it), plus
-    # $HOME and the cwd. Only computed when there is a scratch scan to guard — nothing else consumes it.
-    protected = set()
+    # Protected paths for the scratch scan (see scratch_path_blocker for what each set means): every swept
+    # repo and every worktree it lists — a scratch glob must never be able to `rm -rf` a checkout out from
+    # under the sweep that is classifying it — plus $HOME and the cwd. Only computed when there is a
+    # scratch scan to guard; nothing else consumes it, and enumerating worktrees costs a git call per repo.
+    trees = set()
+    protected = (set(), trees)
     if args.scratch_glob:
         for repo in args.repo:
             repo_abs = os.path.abspath(os.path.expanduser(repo))
-            protected.add(os.path.realpath(repo_abs))
+            trees.add(os.path.realpath(repo_abs))
             for e in parse_worktrees(repo_abs) or []:
-                protected.add(os.path.realpath(e["path"]))
+                trees.add(os.path.realpath(e["path"]))
+        protected[0].update(trees)
         for p in (os.path.expanduser("~"), os.getcwd()):
             try:
-                protected.add(os.path.realpath(p))
+                protected[0].add(os.path.realpath(p))
             except OSError:
                 pass
         scan_scratch(args, now_ts, protected, results, reap_plan)

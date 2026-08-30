@@ -504,7 +504,7 @@ assert any(i['path'] == '$TMP/wt-race-submodule' for i in results['tier1']), \
 subprocess.run(['git', '-C', '$TMP/wt-race-submodule', '-c', 'protocol.file.allow=always',
                 'submodule', 'update', '--init', '-q'], check=True)
 
-ws.do_reap(reap_plan, False, 'main', args.min_age_days, set(), int(time.time()))
+ws.do_reap(reap_plan, False, 'main', args.min_age_days, (set(), set()), int(time.time()))
 "
 if [ -d "$TMP/wt-race-submodule" ]; then ok "reap re-verification: worktree that gained an initialized submodule mid-run is SKIPPED, not force-removed"; else no "reap re-verification: worktree with a newly-initialized submodule was WRONGLY removed (submodule safety gate not re-checked before --force)"; fi
 
@@ -663,6 +663,14 @@ assert e['kind'] == 'scratch', e
 assert e['action']['kind'] == 'delete', e
 assert e['action']['commands'] == ['rm -rf -- $SCRATCH/stale-repro.aaa'], e
 " < "$TMP/scratch.json" && ok "scratch: tier1 entry carries kind=scratch + a delete action" || no "scratch: tier1 entry shape"
+
+# The cwd (and $HOME) protect themselves and their ANCESTORS, never their contents: a scratch root is
+# routinely under one or both, so a containment-based guard there would silently disqualify every match
+# the glob was configured for. Running the sweep from inside the scratch root must change nothing.
+(cd "$SCRATCH" && python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null) > "$TMP/scratch-cwd.json"
+has_path_in "d['tier1']" "$SCRATCH/stale2-repro.bbb" < "$TMP/scratch-cwd.json" \
+  && ok "scratch: a sweep run from inside the scratch root still classifies its entries (cwd protects itself, not its contents)" \
+  || no "scratch: cwd inside the scratch root wrongly disqualified every entry"
 
 # --dry-run touches nothing, and records dry-run outcomes in the report
 python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --dry-run --json 2>/dev/null > "$TMP/scratch-dry.json"
