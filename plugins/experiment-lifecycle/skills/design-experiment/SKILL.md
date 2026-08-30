@@ -389,7 +389,9 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
 - **Exact input paths + scripts to adapt**, with filename caveats (a filename can lie about its contents — verify by
   content, not name). Point at battle-tested worked-example drivers; don't make the executor write from scratch.
 - **Use the `run-experiment` skill** for the loop + gates. **Cost ceiling** + who the **designer-of-record** is (so the
-  executor can route design-intent questions back to you).
+  executor can route design-intent questions back to you) — and, in the template's designer-of-record section,
+  your **harness session name** as the executor's push address, generated per the "Designer address" rule in
+  Step 4, never a hand-written fleet/tmux name.
 - **The resume contract (so a model-free supervisor can relaunch a dead run):** the `START` template's
   resilience wording tells the executor to checkpoint run state to disk (pod ids, what's collected, decision
   rules — not only the conversation), keep a standing `TEMP.md` successor handoff current, and write a
@@ -485,13 +487,36 @@ point. *How* you spawn it is the instance's implementation of the contract:
   NOT make dispatch complete** (automated-researcher#628): before falling into the healthy zero-turn wait loop
   below, run `run_supervision_record.sh verify-bootstrap <run-id> --executor-family codex
   --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
-  --terminal-route <expected route>` and treat a non-zero exit (missing record, a mismatched field, or a timeout)
+  --terminal-route <expected route> --designer-session <your harness session name, or record-only>`
+  and treat a non-zero exit (missing record, a mismatched field, or a timeout)
   as `needs-attention`, not a normal wait — reported against the executor you already named. That poll is
   bounded but can run to its full default 300s or fail, so it must never be what the announcement waits on.
   See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default,
   the supervision-bootstrap receipt (§2), the durable question/answer inbox,
   the hardened wait pattern, and the coordination-surface/visibility contract (§7).
 - **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
+
+**Designer address — resolve YOUR OWN harness session name; never assume one (automated-researcher#796).** The
+executor needs a *stable address* for you, not a description of you. Look your own up through the harness's own
+self-identity listing (Claude Code: the name `ListAgents` shows for this session — the same name `SendMessage
+<name>` delivers into), exactly as the peer-coordination rule requires everywhere else: **never** a fleet-shaped
+guess (`claude-1..4`) and never the tmux session name. A tmux name is not a session under a Remote Control host
+(`claude rc … --spawn worktree`): it is a HOST fronting many spawned zero-context sessions. Real incident
+(2026-08-30, `depv1-negemo-qwen-chat-carrier-emotion-1`): the brief named the tmux session `claude-rc` as
+designer-of-record, the executor's DESIGN-budget notify was keyed into that name, an RC-spawned sibling with no
+run context received it, ruled as designer-of-record and consumed the question — the session actually
+supervising the run found the inbox already cleared. Two designers-of-record by construction; same ruling both
+times only by luck. So at dispatch:
+1. **Write that name into `START.md`'s designer-of-record section** (the template generates the line from it) —
+   it is the executor's `--designer-session` bind.
+2. **Verify it landed on the record** rather than trusting the brief: `--designer-session <your harness session
+   name>` is a required argument of `verify-bootstrap` below, matched EXACTLY against what the executor bound.
+3. **No addressable session on this substrate?** Say so on the record — the reserved literal `record-only` —
+   and own the polling: with no push, `has-question` on your heartbeat cadence is the only thing that surfaces
+   a question. Never substitute a `send-keys`-to-a-tmux-name push for the address you don't have.
+4. **If the designer role moves mid-run** (you hand off, or you are relaunched under a new name), re-bind it —
+   `run_supervision_record.sh checkpoint <run-id> --designer-session <new name>` — before the executor's next
+   question, or its notify goes to a session that no longer holds the run.
 
 Why fresh-context dispatch is the default:
 - **It tests the brief's self-sufficiency on every real run** — the product's core promise ("hand an agent a brief, it
@@ -661,7 +686,9 @@ session, including every heartbeat tick.
 
 **Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you — through
 the durable question/answer inbox on the run-supervision record where the instance uses one,
-`has-question`/`answer-question`), but you **do not drive it** mid-run (that defeats the self-sufficiency test) — you
+`has-question`/`answer-question`, with its push notify addressed to the `designer_session` you bound at dispatch;
+a `record-only` binding means **no** push exists, so your own `has-question` poll is the only thing that surfaces
+a question), but you **do not drive it** mid-run (that defeats the self-sufficiency test) — you
 review at the synthesis pass. The heartbeat nudge above is bounded health supervision, not driving: it pokes an idle
 session back to life, it does not answer design questions or steer the method — a real question still routes back to
 you as a load-bearing flag, same as always.

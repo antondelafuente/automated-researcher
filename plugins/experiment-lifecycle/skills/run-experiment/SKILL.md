@@ -45,7 +45,19 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   (automated-researcher#664).** Every load-bearing flag goes to the designer-of-record named in `START.md` — through
   the durable question/answer inbox where your instance uses one (`ask-question` / `has-answer` / `consume-question`
   on the run-supervision record, `references/CODEX_SUPERVISION.md` §3), otherwise however the brief says to reach
-  them. That channel is a line to the **designer**, not a relay to the researcher: the designer is expected to
+  them.
+- **Address the designer by the harness session name the brief gives you — never by a tmux name
+  (automated-researcher#796).** `START.md`'s designer-of-record section carries a `designer_session`; bind it
+  verbatim at `start` (`--designer-session <name>`), and push your notify to THAT address with your substrate's
+  session-addressed message primitive (Claude Code: `SendMessage <designer_session>`), *after* the question is
+  durably recorded by `ask-question`. **Do not `tmux send-keys` a session name**: under a Remote Control host one
+  tmux name fronts many spawned zero-context sessions, so the push lands in whichever sibling holds the keyboard
+  — on 2026-08-30 (`depv1-negemo-qwen-chat-carrier-emotion-1`) exactly that happened, and the sibling ruled as
+  designer-of-record and consumed the question before the supervising session saw it. If `designer_session` is
+  the literal `record-only`, or your substrate has no such primitive, **the record IS the channel** — the
+  designer polls `has-question`; do not improvise another push. Either way the question is already durable
+  before the notify, so a lost notify costs latency, not the question — keep working on everything the gap
+  doesn't block rather than idling on a reply. That channel is a line to the **designer**, not a relay to the researcher: the designer is expected to
   *answer* it under the two-check rule (does the answer stay inside the already-cleared cost envelope, and does it
   leave unchanged what is being measured?), forwarding only what fails one of those checks. So route up and keep
   working — you flag, you do not rule, and you do not address the researcher over the designer's head. (The
@@ -209,9 +221,12 @@ Three obligations, maintained continuously (not at close):
   > **Claude Code / this instance:** the helper is `run_supervision_record.sh` in this skill's `scripts/`
   > (record root `${AAR_RUN_SUPERVISION_DIR:-~/.config/run-supervision}`). At run start, from **inside your own
   > worktree**: `start <run-id> --handoff <TEMP.md path> --worktree <this worktree's
-  > path>` (marks the run **desired-active**, binds the run-id→session handle — see below — and binds
+  > path> --designer-session <the name from START.md>` (marks the run **desired-active**, binds the
+  > run-id→session handle — see below — binds
   > this run-id to your own worktree path, the binding `reap_worktree.sh` checks at close so a clean-closed
-  > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2).
+  > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2,
+  > and binds the designer's push address so your questions reach the session actually supervising this run,
+  > `automated-researcher#796`).
   > **Do not hand-write the session handle.** Its *shape* is instance-owned (a tmux name / systemd unit /
   > pid-file path) but it is not yours to choose: the instance's teardown seams compare the recorded value
   > against the current session's OWN identity, so a plausible near-miss — `tmux:run-x` where the seam derives

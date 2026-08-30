@@ -1,3 +1,26 @@
+- experiment-lifecycle 0.4.4 (2026-08-30): the designer-of-record gets a stable ADDRESS on the
+  run-supervision record, so an executor's question reaches the session actually supervising the run (#796).
+  Peer addressing assumed one tmux session name = one long-lived context (the claude-1..4 fleet). Under a
+  Remote Control host (`claude rc --spawn worktree`) a tmux name fronts MANY spawned zero-context sessions:
+  on 2026-08-30 (`depv1-negemo-qwen-chat-carrier-emotion-1`) the brief named tmux session `claude-rc` as
+  designer-of-record, the executor's DESIGN-budget notify was keyed into that name, an RC-spawned sibling with
+  no run context received it, ruled as designer-of-record and consumed the question — the session holding the
+  run's heartbeat found the inbox already cleared. Two designers-of-record by construction; same ruling both
+  times only by luck. `run_supervision_record.sh` gains a `designer_session` field (`--designer-session` on
+  `start`/`checkpoint`, a `designer-session` getter, a `status` line): the designer's own harness session name
+  — the address a session-addressed message primitive takes (`SendMessage <name>`, the name `ListAgents` shows)
+  — validated as a single whitespace-free token because it is an ADDRESS handed to that primitive, not free
+  text, with one reserved literal `record-only` for a substrate that has no addressable designer session.
+  `verify-bootstrap` gains a REQUIRED `--designer-session`, matched exactly and fail-fast like its five
+  siblings, so a dispatch can no longer complete with the designer's address unrecorded (breaking for existing
+  callers, deliberately: an optional check is the state that let the address live only as free text in
+  `START.md`). `design-experiment` Step 4 now requires the designer to resolve its OWN harness name by lookup —
+  never a fleet-shaped guess, never the tmux name — write it into `START.md`, verify it landed, own the polling
+  when it binds `record-only`, and re-bind on a mid-run designer handoff; `run-experiment` tells the executor to
+  bind it verbatim at `start` and push its `ask-question` notify to that address, never `tmux send-keys` to a
+  session name. The question stays durable before the notify, so a lost push costs latency, not the question.
+  Slice 1 of #796 only: the executor's own harness address, heartbeat survivability under RC, the handoff path,
+  and the instance-side fleet retirement are separate slices.
 - experiment-lifecycle 0.3.84 (2026-08-02): makes `design-experiment` prove the kickoff actually SUBMITTED
   before dispatch counts as done (#659). A real dispatch's tmux `send-keys <prompt> Enter` raced the fresh
   executor session's startup prompts, the Enter got consumed, the kickoff sat unsent in the input box, and the
