@@ -47,7 +47,12 @@
 #      re-derived from <run-id> (the same identifier gate 1 just cleared, and gate 2 pinned to this
 #      directory), and the store is additionally probed by LISTING THE PARENT PREFIX and matching the
 #      run-id in it — never a single-file/single-dir `rclone lsf` of the destination itself, which exits
-#      0 on a missing path (gpu-job's r2_exists incident).
+#      0 on a missing path (gpu-job's r2_exists incident). That probe has a PRECONDITION: it can only
+#      pass if the copy had bytes to write, since rclone creates no empty destination directories. A
+#      scratch tree holding no files therefore takes an explicit branch — deleted with "nothing to
+#      archive" logged, never run through a probe that could only report a false failure and strand it
+#      locally forever (round-2 code-review Finding 2). The invariant is that no BYTES are deleted
+#      without a verified archive; a tree with no bytes has nothing to verify and nothing to lose.
 #   6. UNSET SEAM -> A LOGGED NO-OP, NEVER A DELETE. With no scratch root declared there is no bounded
 #      delete target to derive; with no archive destination configured (or no rclone on PATH) there is
 #      nowhere to make the scratch durable. Either way nothing is deleted and the run reports the wiring
@@ -146,6 +151,28 @@ fi
 while [ "${dest_root%/}" != "$dest_root" ]; do dest_root=${dest_root%/}; done
 [ -n "$dest_root" ] || die "EXPERIMENT_SCRATCH_ARCHIVE_DEST resolved to an empty destination root"
 dest="$dest_root/$id"
+
+# Gate 4/5 PRECONDITION — does this tree hold anything the archive must carry? `rclone copy` creates no
+# empty directories at the destination, so for a scratch tree with no files there is nothing for the
+# parent-listing probe to find and the probe CANNOT pass (round-2 code-review Finding 2). Left as-is, the
+# gate that exists to catch "the copy went nowhere" would instead strand every empty scratch dir on the
+# box forever — the exact residue #792 is about, failing the issue's acceptance bar ("a closed experiment
+# leaves no scratch dir unless the check failed"). The invariant is that no BYTES are deleted without a
+# verified archive; a tree with no bytes has nothing to verify and nothing to lose, so it is deleted with
+# that stated explicitly rather than archived through a probe that can only ever report a false failure.
+# Anything that is not a directory counts as content, symlinks included: the -L copy turns them into
+# files at the destination. A find that fails (an unreadable subdirectory is a SHORT READ, never "no
+# files down there") is treated as NON-empty, so the full archive-and-verify path runs and can only
+# refuse to delete.
+find_rc=0
+tree_content=$(find "$scratch_real" -mindepth 1 ! -type d -print -quit 2>/dev/null) || find_rc=$?
+[ "$find_rc" = 0 ] || tree_content="unreadable-tree-assume-content"
+if [ -z "$tree_content" ]; then
+  say "scratch '$scratch_real' holds no files — nothing to archive (and rclone copy would create no destination prefix to verify). Deleting the empty tree."
+  rm -rf -- "$scratch_real" || die "empty scratch delete failed ('rm -rf $scratch_real') — delete it by hand"
+  say "done — empty scratch removed; nothing was archived because there was nothing to archive"
+  exit 0
+fi
 
 say "archiving scratch '$scratch_real' -> '$dest' before deleting it"
 

@@ -137,9 +137,17 @@ below — a bare sweep reports and nothing else.
 - **Path guards, all fail-closed to tier 3:** a symlink (deleting it would leave its target, or the link
   is standing in for real content), a path resolving through a symlinked ancestor, anything that is /
   contains / lives inside a swept repo or worktree, `$HOME`, or the cwd, and anything **repository-like**
-  — either a `.git` entry (an ordinary checkout/worktree) or the bare-repo signature `HEAD` + `objects/` +
-  `refs/` at the top level, which carries no `.git` at all. Both route to `--repo`, where git's own
-  refusals apply; neither is ever scratch.
+  — either a `.git` entry (an ordinary checkout/worktree) or a bare repository, which carries no `.git` at
+  all because its gitdir IS its top level (`HEAD` beside `objects/` / `refs/` / `packed-refs` / `config`).
+  Both route to `--repo`, where git's own refusals apply; neither is ever scratch.
+- **"Not a repository" must be positively established, from the entry's own top-level listing.** The guard
+  reads which NAMES are present; it never asks whether those names resolve, and an entry whose listing
+  can't be read is UNKNOWN → tier 3, never "not a repository". A checkout whose `.git` is a *dangling
+  symlink* is still a checkout — and is the one least likely to have its contents pushed anywhere. For the
+  same reason the bare-repo signature is deliberately wider than git's own `is_git_directory()` check:
+  that predicate is calibrated for "can git operate here", this one for "may this be destroyed", so a
+  half-cloned or atypical bare repo lands on the reporting side. The cost is that a scratch dir holding a
+  top-level `HEAD` beside one of those names gets reported instead of reaped.
 - **Every fact is recomputed immediately before the delete**, exactly like the worktree reap: a repro dir
   written to in the gap between classification and reaping is skipped, not deleted on a stale reading.
 

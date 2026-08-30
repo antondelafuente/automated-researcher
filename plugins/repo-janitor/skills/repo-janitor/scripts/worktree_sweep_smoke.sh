@@ -22,6 +22,8 @@
 #     written file is silent (the TREE's newest mtime is the fact); a symlink, a swept repo's own worktree,
 #     and an aged-out BARE repository (no `.git` entry — HEAD + objects/ + refs/ at its root) all route to
 #     tier3 and survive a real --reap-tier1; --dry-run deletes nothing; and every unsafe
+#     repository-like entries NEVER reach tier 1 whether or not their repo marker resolves: a bare repo, a
+#     bare repo missing refs/, and a checkout whose `.git` is a DANGLING SYMLINK all route to tier 3; an
 #     --scratch-glob shape (relative, wildcard in the directory part, root-level, trailing slash) is
 #     rejected up front so the delete scope stays statically bounded
 #   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
@@ -645,6 +647,23 @@ echo novel-guard-content-not-on-main > "$SCRATCH/checkout-repro.ggg/guard-note.t
 git init --bare -q "$SCRATCH/bare-repro.iii"
 find "$SCRATCH/bare-repro.iii" -exec touch -d "$OLD_DATE" {} +
 
+# A checkout whose `.git` is a DANGLING SYMLINK — its gitdir moved, or the linked worktree's admin dir was
+# pruned. `os.path.exists()` answers False for it, so a resolution-based repo guard would classify a whole
+# working tree as ordinary scratch and `rm -rf` it (round-2 code-review Finding 1); this is also precisely
+# the checkout least likely to have its contents pushed anywhere. Name presence is the fact, not
+# resolvability. Also aged out fully, so nothing but the repo guard can keep it out of tier 1.
+mk_old "$SCRATCH/dangling-repro.jjj"
+ln -s "$TMP/gitdir-that-was-moved-away" "$SCRATCH/dangling-repro.jjj/.git"
+touch -h -d "$OLD_DATE" "$SCRATCH/dangling-repro.jjj/.git"
+touch -d "$OLD_DATE" "$SCRATCH/dangling-repro.jjj"
+
+# A bare repo missing `refs/` — half-cloned, or an atypical layout. git's own is_git_directory() trio
+# would say "not a repository" and hand its object database to `rm -rf`; the guard is deliberately broader
+# than that trio because it is choosing between reporting an entry and destroying it.
+mkdir -p "$SCRATCH/partial-repro.kkk/objects"
+echo "ref: refs/heads/main" > "$SCRATCH/partial-repro.kkk/HEAD"
+find "$SCRATCH/partial-repro.kkk" -exec touch -d "$OLD_DATE" {} +
+
 GLOB="$SCRATCH/*-repro.*"
 
 python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null > "$TMP/scratch.json"
@@ -656,6 +675,10 @@ has_path_in "d['tier1']" "$SCRATCH/linked-repro.fff"    < "$TMP/scratch.json" &&
 has_path_in "d['tier3']" "$SCRATCH/checkout-repro.ggg"  < "$TMP/scratch.json" && ok "scratch: a swept repo's worktree inside the glob routes to tier3 (protected)" || no "scratch: protected checkout must route to tier3"
 has_path_in "d['tier3']" "$SCRATCH/bare-repro.iii"      < "$TMP/scratch.json" && ok "scratch: an aged-out BARE repo routes to tier3" || no "scratch: aged-out bare repo must route to tier3"
 has_path_in "d['tier1']" "$SCRATCH/bare-repro.iii"      < "$TMP/scratch.json" && no "scratch: a bare repo must never be tier1 (no .git entry, but still a repository)" || ok "scratch: bare repo never tier1"
+has_path_in "d['tier3']" "$SCRATCH/dangling-repro.jjj" < "$TMP/scratch.json" && ok "scratch: a checkout with a DANGLING .git symlink routes to tier3" || no "scratch: dangling .git symlink must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/dangling-repro.jjj" < "$TMP/scratch.json" && no "scratch: a dangling .git symlink must never be tier1 (name presence is the fact, not resolvability)" || ok "scratch: dangling .git symlink never tier1"
+has_path_in "d['tier3']" "$SCRATCH/partial-repro.kkk" < "$TMP/scratch.json" && ok "scratch: a bare repo missing refs/ still routes to tier3" || no "scratch: partial bare repo must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/partial-repro.kkk" < "$TMP/scratch.json" && no "scratch: a bare repo missing refs/ must never be tier1 (the guard is broader than git's is_git_directory trio)" || ok "scratch: partial bare repo never tier1"
 # Kind-scoped on purpose: this path is legitimately reported TWICE (once as a git worktree with untracked
 # content, once as a scratch match), so a first-match-wins reason check would read the worktree entry.
 python3 -c "
@@ -702,6 +725,8 @@ python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --json 2>/de
 [ -d "$TMP/link-target-dir" ]        && ok "scratch: symlink TARGET survives --reap-tier1" || no "scratch: symlink target was deleted"
 [ -d "$SCRATCH/checkout-repro.ggg" ] && ok "scratch: protected checkout survives --reap-tier1" || no "scratch: protected checkout was rm -rf'd"
 [ -d "$SCRATCH/bare-repro.iii/objects" ] && ok "scratch: aged-out bare repo survives --reap-tier1" || no "scratch: aged-out bare repo was rm -rf'd"
+[ -L "$SCRATCH/dangling-repro.jjj/.git" ] && ok "scratch: checkout with a dangling .git symlink survives --reap-tier1" || no "scratch: checkout with a dangling .git symlink was rm -rf'd"
+[ -d "$SCRATCH/partial-repro.kkk/objects" ] && ok "scratch: bare repo missing refs/ survives --reap-tier1" || no "scratch: bare repo missing refs/ was rm -rf'd"
 
 # the report says what it removed (the #792 acceptance bar), in both output modes
 python3 -c "

@@ -54,6 +54,12 @@ GLOB_META = "*?["
 # the age fact would cost an unbounded scan, and an unbounded scan inside a weekly sweep is its own
 # failure mode. UNKNOWN routes to tier 3 (reported, never reaped) exactly like every other failed fact.
 SCRATCH_WALK_NODE_CAP = 200_000
+# Names at an entry's OWN top level that make it repository-like. `.git` covers a normal checkout, a
+# linked worktree (where `.git` is a file), and a submodule; a BARE repository has no `.git` at all
+# because its gitdir IS its top level, so it is recognized by the fixtures that sit there instead.
+SCRATCH_CHECKOUT_MARKER = ".git"
+SCRATCH_BARE_HEAD = "HEAD"
+SCRATCH_BARE_COMPANIONS = frozenset({"objects", "refs", "packed-refs", "config"})
 
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
@@ -546,6 +552,13 @@ def delete_action(path):
 # named parent directory the researcher wrote out in full. Everything else is a fail-closed guard on top
 # of that (symlinks, symlinked ancestors, anything that looks like a repo, anything protecting a swept
 # repo / $HOME / the cwd), and any guard that trips reports to tier 3 instead of deleting.
+#
+# THE GUARDS ARE POSITIVE ESTABLISHMENT, NOT RECOGNITION. Each one answers "can this entry be ESTABLISHED
+# as safely deletable scratch", so every fact it needs must be readable and every fact it cannot read is
+# UNKNOWN -> tier 3. Written the other way round — "delete unless I recognize a repository" — the guard is
+# only ever as good as its list of recognized shapes, and each review round finds one more shape missing
+# (a bare repo, then a dangling `.git` symlink). That asymmetry is deliberate: the worst outcome on this
+# side is an entry that gets reported and reaped by hand, and on the other side an unrecoverable delete.
 
 def scratch_pattern_parent(pattern):
     """(parent, error) — the wildcard-free directory every match of `pattern` must be a DIRECT child of,
@@ -620,16 +633,34 @@ def scratch_path_blocker(path, parent, protected):
     for prot in trees:
         if real.startswith(prot + os.sep):
             return f"it lives inside a swept checkout ('{prot}')"
-    if os.path.exists(os.path.join(path, ".git")):
-        return "it contains a .git entry (a checkout/worktree, not scratch — sweep it via --repo instead)"
-    # A BARE repository has no `.git` entry at all: its object database sits at the top level (round-1
-    # code-review Finding 3). `.git`-only detection would classify a stale bare mirror/clone as ordinary
-    # scratch and hand it to `rm -rf` — the one thing the "repository-like entries are never scratch"
-    # invariant above exists to prevent, and the one whose loss is unrecoverable. The signature is git's
-    # own is_git_directory() check: HEAD plus objects/ plus refs/ at the root.
-    if all(os.path.exists(os.path.join(path, n)) for n in ("HEAD", "objects", "refs")):
-        return ("it looks like a BARE git repository (HEAD + objects/ + refs/ at its root, no .git) — "
-                "not scratch; sweep it via --repo or move it out of the glob's reach")
+    # "Repository-like entries are never scratch" is decided from the entry's OWN TOP-LEVEL LISTING —
+    # from which names are present — and an unreadable listing is UNKNOWN, never "not a repository".
+    # This is the invariant, and the two rounds of review that landed here (round-1 Finding 3: a bare
+    # repo; round-2 Finding 1: a DANGLING `.git` symlink) were the same hole in two shapes, because the
+    # old check asked `os.path.exists()`, which answers "does this name RESOLVE to something" — the wrong
+    # question for an `rm -rf` target. A checkout whose `.git` symlink dangles (its gitdir moved, or the
+    # linked worktree's admin dir was pruned) answers False and would have been deleted, and that is
+    # exactly the checkout least likely to have its contents pushed anywhere. Presence of the NAME is what
+    # this decision may rest on: nothing about resolving it can make a `.git` entry not a repository.
+    if os.path.isdir(path):  # a plain-file match (adapter dumps, *-repro.log) is never a repository
+        try:
+            names = set(os.listdir(path))
+        except OSError as e:  # noqa: BLE001 - unreadable is UNKNOWN, and UNKNOWN never reaches `rm -rf`
+            return (f"its own top-level listing could not be read ({e.__class__.__name__}: {e}) — an "
+                    "entry whose contents cannot be read is never established as non-repository")
+        if SCRATCH_CHECKOUT_MARKER in names:
+            return ("it contains a .git entry (a checkout/worktree, not scratch — sweep it via --repo "
+                    "instead)")
+        # A bare repo's gitdir IS its top level. Deliberately BROADER than git's own is_git_directory()
+        # trio (HEAD + objects/ + refs/): that predicate is calibrated for "can git operate here", while
+        # this one chooses between reporting an entry and destroying it, so a half-cloned, reftable, or
+        # otherwise atypical bare repo must still land on the reporting side. The cost of the wider net is
+        # that a scratch dir holding a top-level `HEAD` beside one of these names gets REPORTED instead of
+        # reaped — an unrecoverable object database is not a fair trade for that.
+        if SCRATCH_BARE_HEAD in names and (names & SCRATCH_BARE_COMPANIONS):
+            companions = ", ".join(sorted(names & SCRATCH_BARE_COMPANIONS))
+            return (f"it looks like a BARE git repository (HEAD beside {companions} at its root, no .git) "
+                    "— not scratch; sweep it via --repo or move it out of the glob's reach")
     return None
 
 

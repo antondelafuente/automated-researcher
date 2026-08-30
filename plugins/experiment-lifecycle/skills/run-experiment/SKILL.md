@@ -1012,6 +1012,8 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   `rclone copy` → `rclone check` → `rm -rf`, never `rm -rf` without a verified archive. The delete target is DERIVED
   (`EXPERIMENT_SCRATCH_ROOT` + the run-id), never the path you passed. A failed check leaves the dir and goes on the
   ledger line; either seam unconfigured (`EXPERIMENT_SCRATCH_ROOT` / `..._ARCHIVE_DEST`) is a logged no-op, not a delete.
+  What may never be deleted unverified is BYTES: a scratch tree holding no files has nothing to archive (and `rclone`
+  creates no empty destination prefix to verify), so it is removed with that stated, not stranded forever.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

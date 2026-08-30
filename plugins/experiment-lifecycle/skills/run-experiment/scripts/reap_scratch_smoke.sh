@@ -13,6 +13,9 @@
 #   - path-sanity refusals: a symlinked scratch dir, the run's own bound worktree, and a cwd inside it
 #   - the destination probe matches the run-id LITERALLY (a '.' in a run-id is not a regex wildcard
 #     that could pass the gate against a different, similarly-named archive prefix)
+#   - an EMPTY scratch tree still completes rather than being stranded forever by a probe that cannot
+#     pass for it (round-2 code-review Finding 2), while a tree holding only a SYMLINK is not empty and
+#     still goes through the full archive-and-verify path
 # rclone is stubbed on PATH — nothing is uploaded and no network is touched.
 set -uo pipefail
 
@@ -44,7 +47,13 @@ case "${1:-}" in
   copy)
     [ "${STUB_COPY_NOTICE:-0}" = 1 ] && echo "NOTICE: big.bin: Can't follow symlink, skipping"
     if [ "${STUB_COPY_RC:-0}" = 0 ] && [ "${STUB_SKIP_STORE:-0}" != 1 ]; then
-      mkdir -p "$STUB_STORE/${3##*/}"
+      # Real rclone creates NO empty directories at the destination, so a source tree holding no files
+      # produces no destination prefix at all and the parent-listing probe cannot find it. The stub
+      # models that rather than always materializing the prefix — otherwise the empty-tree case
+      # (round-2 code-review Finding 2) would assert the fix's mechanism instead of reproducing the bug.
+      if find "$2" -mindepth 1 ! -type d -print -quit 2>/dev/null | grep -q .; then
+        mkdir -p "$STUB_STORE/${3##*/}"
+      fi
     fi
     exit "${STUB_COPY_RC:-0}" ;;
   check) exit "${STUB_CHECK_RC:-0}" ;;
@@ -214,6 +223,24 @@ reset_log
 if STUB_SKIP_STORE=1 bash "$R" "run.x" "$s" >/dev/null 2>&1; then no lsf-literal-match; else ok lsf-literal-match; fi
 [ -d "$s" ] && ok lsf-literal-scratch-kept || no lsf-literal-scratch-kept
 rm -rf "$STUB_STORE/runax"
+
+# --- an EMPTY scratch tree still completes (round-2 code-review Finding 2) ---------------------------
+# `rclone copy` creates no empty directories, so the destination-listing probe cannot pass for a tree with
+# no files — it would strand every empty scratch dir on the box forever, which is the residue #792 exists
+# to remove. Nothing is archived (there are no bytes), and rclone is never called for it.
+rec create e1 >/dev/null; rec close e1 >/dev/null
+s="$TMP/work/e1"; mkdir -p "$s/sub/deeper"; reset_log
+if bash "$R" e1 "$s" >/dev/null 2>&1; then ok empty-exit0; else no empty-exit0; fi
+[ -d "$s" ] && no empty-scratch-deleted || ok empty-scratch-deleted
+[ "$(rclone_calls)" = 0 ] && ok empty-no-rclone || no empty-no-rclone
+
+# ...but a tree whose only content is a SYMLINK is NOT empty: the -L copy turns it into a file at the
+# destination, so it must take the full archive-and-verify path rather than the delete-outright branch.
+rec create e2 >/dev/null; rec close e2 >/dev/null
+s="$TMP/work/e2"; mkdir -p "$s"; ln -s "$TMP/store" "$s/link"; reset_log
+if STUB_SKIP_STORE=1 bash "$R" e2 "$s" >/dev/null 2>&1; then no symlink-only-verified; else ok symlink-only-verified; fi
+[ -d "$s" ] && ok symlink-only-scratch-kept || no symlink-only-scratch-kept
+grep -q '^copy ' "$RCLONE_LOG" && ok symlink-only-archive-attempted || no symlink-only-archive-attempted
 
 # --- argument validation ----------------------------------------------------------------------------
 if bash "$R" only-one-arg >/dev/null 2>&1; then no args-refused; else ok args-refused; fi
