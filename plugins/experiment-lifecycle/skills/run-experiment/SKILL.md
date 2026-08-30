@@ -778,6 +778,15 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   - **`EXPERIMENT_SCRATCH_ARCHIVE_DEST`** — an rclone destination root; per-run archives land at
     `<root>/<run-id>`, re-derived for the verification instead of reused from the copy.
 
+  That derived path is a **path** bound, so it also has to hold across mounts: **a scratch dir that is, or
+  contains, a mount point is refused outright and left in place** (say so on the ledger line). `rm -rf`
+  deletes a bind mount's contents *through* the mount and only then fails with `EBUSY` on the mount point,
+  so the non-zero exit you'd act on arrives after the mounted dataset is already destroyed. Mount-freedom
+  is read from `/proc/self/mountinfo` — a same-filesystem bind mount has an identical `st_dev` on both
+  sides, so nothing else sees it — and a platform with no readable mount table is another **logged no-op
+  that deletes nothing**, since mount-freedom can't be established there. An *ancestor* mount is fine: a
+  scratch root on its own volume is the normal layout.
+
   Fires **only on a clean close**, same as the two steps around it: a parked/blocked/crashed run keeps its
   scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop for whatever this step
   never got to run on.
@@ -1013,7 +1022,10 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   (`EXPERIMENT_SCRATCH_ROOT` + the run-id), never the path you passed. A failed check leaves the dir and goes on the
   ledger line; either seam unconfigured (`EXPERIMENT_SCRATCH_ROOT` / `..._ARCHIVE_DEST`) is a logged no-op, not a delete.
   What may never be deleted unverified is BYTES: a scratch tree holding no files has nothing to archive (and `rclone`
-  creates no empty destination prefix to verify), so it is removed with that stated, not stranded forever.
+  creates no empty destination prefix to verify), so it is removed with that stated, not stranded forever. And the
+  derived path bounds the delete only if nothing is MOUNTED inside it — a scratch dir that is, or contains, a mount
+  point is refused (`rm -rf` destroys the mounted data before it fails), read from the mount table, with no readable
+  mount table another no-op.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

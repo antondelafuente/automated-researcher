@@ -60,6 +60,11 @@ SCRATCH_WALK_NODE_CAP = 200_000
 SCRATCH_CHECKOUT_MARKER = ".git"
 SCRATCH_BARE_HEAD = "HEAD"
 SCRATCH_BARE_COMPANIONS = frozenset({"objects", "refs", "packed-refs", "config"})
+# The Linux mount table — the only authoritative answer to "is there a mount at or under this path"
+# (see mount_points_at_or_under for why nothing st_dev-based can answer it), plus the TEST seam that
+# points the guard at a fixture: creating a real bind mount needs root, so the smoke injects a table.
+SCRATCH_MOUNTINFO = "/proc/self/mountinfo"
+SCRATCH_MOUNTINFO_ENV = "REPO_JANITOR_MOUNTINFO"
 
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
@@ -559,6 +564,15 @@ def delete_action(path):
 # only ever as good as its list of recognized shapes, and each review round finds one more shape missing
 # (a bare repo, then a dangling `.git` symlink). That asymmetry is deliberate: the worst outcome on this
 # side is an entry that gets reported and reaped by hand, and on the other side an unrecoverable delete.
+#
+# THE BOUND IS A PATH BOUND, NOT A FILESYSTEM BOUND, so it must also hold across MOUNT POINTS: an entry
+# that IS, or CONTAINS, a mount point is never established as safely deletable (round-3 code-review
+# Finding 1). `shutil.rmtree` deletes a bind mount's contents through the mount and only THEN raises
+# EBUSY on the mount point, so the failure this loop relies on arrives after the mounted data is gone.
+# Established from the mount table alone — for a same-filesystem bind mount `os.path.ismount()` is False
+# and `st_dev` matches on both sides, so ismount/st_dev/`-xdev` guards all pass it silently. An ancestor
+# mount blocks nothing (a scratch root on its own volume is the normal layout); only the entry itself or
+# something strictly below it does.
 
 def scratch_pattern_parent(pattern):
     """(parent, error) — the wildcard-free directory every match of `pattern` must be a DIRECT child of,
@@ -604,6 +618,57 @@ def newest_mtime(path):
     except OSError:
         return None
     return None if walk_failed else newest
+
+
+def unescape_mountinfo(field):
+    r"""Decode mountinfo's octal escapes. The kernel writes \040 for a space, \011 for a tab, \012 for a
+    newline and \134 for a backslash, so a mount point carrying any of them compares against the wrong
+    string unless it is decoded first (and the space escape is also what keeps the line splittable)."""
+    out = []
+    i = 0
+    while i < len(field):
+        esc = field[i + 1:i + 4]
+        if field[i] == "\\" and len(esc) == 3 and all(c in "01234567" for c in esc):
+            out.append(chr(int(esc, 8)))
+            i += 4
+        else:
+            out.append(field[i])
+            i += 1
+    return "".join(out)
+
+
+def mount_points_at_or_under(path):
+    """(hits, None) — every mount point that IS `path` or sits strictly below it — or (None, "<why>")
+    when the mount table cannot be read or parsed, which is UNKNOWN and never "there are no mounts".
+
+    THE MOUNT TABLE IS THE ONLY SOURCE THAT ANSWERS THIS. For a bind mount whose source is on the SAME
+    filesystem — precisely the "bind-mounted dataset beneath a scratch dir" case — `os.path.ismount()`
+    returns False and `st_dev` is IDENTICAL on both sides of the mount point, so an ismount/st_dev guard
+    (and equally `rm --one-file-system` or `find -xdev`, which rest on that same st_dev fact) waves it
+    straight through. `/proc/self/mountinfo` lists it; field 5 of each line is the mount point.
+
+    Only the entry ITSELF or something strictly below it counts: an ANCESTOR being a mount point blocks
+    nothing, because a scratch root sitting on its own volume is the normal layout."""
+    table = os.environ.get(SCRATCH_MOUNTINFO_ENV) or SCRATCH_MOUNTINFO
+    try:
+        # surrogateescape: mount points are bytes, and a non-UTF-8 one must read as UNKNOWN-free data
+        # rather than raise a UnicodeDecodeError this function's OSError handler would not catch.
+        with open(table, "r", errors="surrogateescape") as fh:
+            lines = fh.read().splitlines()
+    except OSError as e:  # noqa: BLE001 - unreadable is UNKNOWN, and UNKNOWN never reaches a delete
+        return None, f"'{table}' could not be read ({e.__class__.__name__}: {e})"
+    prefix = path.rstrip(os.sep) + os.sep
+    hits = []
+    for line in lines:
+        fields = line.split()
+        mp = unescape_mountinfo(fields[4]) if len(fields) >= 5 else ""
+        if not mp.startswith("/"):
+            # A table that doesn't parse establishes nothing, so it is UNKNOWN like an unreadable one —
+            # never "this line lists no mount", which would silently shrink the set being checked.
+            return None, f"'{table}' has a line whose mount-point field is not an absolute path"
+        if mp == path or mp.startswith(prefix):
+            hits.append(mp)
+    return hits, None
 
 
 def scratch_path_blocker(path, parent, protected):
@@ -661,6 +726,20 @@ def scratch_path_blocker(path, parent, protected):
             companions = ", ".join(sorted(names & SCRATCH_BARE_COMPANIONS))
             return (f"it looks like a BARE git repository (HEAD beside {companions} at its root, no .git) "
                     "— not scratch; sweep it via --repo or move it out of the glob's reach")
+        # FINAL check, and the one no filesystem-boundary test can make: a delete that crosses a MOUNT
+        # POINT destroys the mounted data, and it does so BEFORE it fails. `shutil.rmtree` (like `rm -rf`)
+        # unlinks a bind mount's contents THROUGH the mount and only then raises EBUSY on the mount point
+        # itself — so the loud failure the reap loop relies on arrives after the loss is already done
+        # (round-3 code-review Finding 1). A mounted dataset is by definition not this glob's scratch, so
+        # mount-freedom is POSITIVELY established from the mount table and an unreadable/unparseable table
+        # is UNKNOWN -> tier 3, exactly like every other fact this guard cannot read.
+        mounts, mount_err = mount_points_at_or_under(real)
+        if mount_err:
+            return (f"its mount-freedom could not be established ({mount_err}) — deleting through a mount "
+                    "destroys the mounted data, so an unreadable mount table is never 'there are no mounts'")
+        if mounts:
+            return (f"it is, or contains, a mount point ('{mounts[0]}') — deleting through a mount destroys "
+                    "the mounted data, which is not scratch")
     return None
 
 

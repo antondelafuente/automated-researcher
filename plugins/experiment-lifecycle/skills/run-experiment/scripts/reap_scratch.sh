@@ -31,6 +31,14 @@
 #   3. PATH SANITY: <scratch-dir> must be a real directory (never a symlink — deleting through one
 #      destroys the target while leaving the link), must not be the calling shell's own cwd or an
 #      ancestor of it, must not be $HOME, and must sit at least one level below the filesystem root.
+#      AND IT MUST NOT BE, OR CONTAIN, A MOUNT POINT (round-3 code-review Finding 1). Gate 2's bound is a
+#      PATH bound, and a mount underneath the derived path escapes it: `rm -rf` deletes a bind mount's
+#      contents THROUGH the mount and only THEN fails with EBUSY on the mount point itself, so the loud
+#      non-zero exit this script's callers rely on arrives after the mounted data is already destroyed.
+#      Mount-freedom is established from /proc/self/mountinfo and nothing else: for a bind mount whose
+#      source is on the same filesystem, `ismount`/`st_dev`/`rm --one-file-system` all read it as ordinary
+#      scratch. An unreadable table is UNKNOWN, and UNKNOWN never reaches a delete (gate 6's shape). An
+#      ANCESTOR mount blocks nothing — a scratch root on its own volume is the normal layout.
 #   4. ARCHIVE-BEFORE-DELETE, and NO DELETE WITHOUT A VERIFIED ARCHIVE. Copy follows symlinks (-L) and
 #      treats rclone's `Can't follow symlink` NOTICE as an INCOMPLETE copy even when rclone exits 0 —
 #      the silent data-loss swallow gpu-job's r2_copy exists to catch (#295). A copy failure, a check
@@ -132,6 +140,33 @@ if [ -n "$recorded_wt" ]; then
   recorded_real=$(cd "$recorded_wt" 2>/dev/null && pwd -P) || recorded_real=""
   [ -n "$recorded_real" ] && [ "$scratch_real" = "$recorded_real" ] && \
     die "refusing to reap '$scratch_real': it is run '$id''s bound worktree — use reap_worktree.sh for that, never an rm -rf"
+fi
+
+# Gate 3c — NEVER DELETE THROUGH A MOUNT POINT. Placed here so BOTH `rm -rf` sites below (the empty-tree
+# branch and the post-verify delete) sit behind it. `rm -rf` unlinks a bind mount's contents through the
+# mount and only afterwards fails with EBUSY on the mount point, so "it exits non-zero, the caller records
+# it" is no protection at all — the mounted dataset is gone by then. The mount table is the only source
+# that sees it: a same-filesystem bind mount has an IDENTICAL st_dev on both sides, so `--one-file-system`
+# and every `ismount` check read it as ordinary scratch. `printf -v` (not `$(printf)`) so a mount point
+# ending in an escaped newline keeps it, and so this doesn't fork once per mounted filesystem.
+mountinfo=${REAP_SCRATCH_MOUNTINFO:-/proc/self/mountinfo}
+if [ -r "$mountinfo" ]; then
+  while read -r _ _ _ _ mp _; do
+    printf -v mp '%b' "$mp"   # mountinfo octal-escapes spaces/tabs/newlines/backslashes in mount points
+    case "$mp" in
+      /*) : ;;
+      # A table that does not parse establishes nothing — treating the line as "lists no mount" would
+      # silently shrink the set being checked, which is the one thing this gate must never do.
+      *) die "refusing to reap '$scratch_real': '$mountinfo' has a line whose mount-point field is not an absolute path — mount-freedom cannot be established from a table that does not parse, and nothing is deleted without it" ;;
+    esac
+    case "$mp" in
+      "$scratch_real"|"$scratch_real"/*)
+        die "refusing to reap '$scratch_real': it is, or contains, a mount point ('$mp') — deleting through a mount destroys the mounted data, not scratch. Record this on the run's ledger line." ;;
+    esac
+  done < "$mountinfo"
+else
+  say "NO-OP: cannot enumerate mount points on this platform ('$mountinfo' unreadable) — scratch '$scratch_real' left in place (mount-free cannot be established, and nothing may be deleted without it). Report this wiring gap in the retro."
+  exit 0
 fi
 
 # Gate 6 — unset seam / no rclone: a logged NO-OP. Nothing is archived, so nothing may be deleted.

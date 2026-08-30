@@ -16,6 +16,10 @@
 #   - an EMPTY scratch tree still completes rather than being stranded forever by a probe that cannot
 #     pass for it (round-2 code-review Finding 2), while a tree holding only a SYMLINK is not empty and
 #     still goes through the full archive-and-verify path
+#   - NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1): a scratch dir that IS, or
+#     CONTAINS, a mount point is refused with rclone never invoked (including when the mount point's path
+#     carries mountinfo's `\040` space escape), an ANCESTOR mount blocks nothing, and an unreadable mount
+#     table is UNKNOWN -> the logged no-op, never a delete
 # rclone is stubbed on PATH — nothing is uploaded and no network is touched.
 set -uo pipefail
 
@@ -70,6 +74,24 @@ export EXPERIMENT_SCRATCH_ARCHIVE_DEST="stub:bucket/archive/work"
 # The instance-declared LOCAL scratch root: the only directory whose direct children are ever reapable.
 export EXPERIMENT_SCRATCH_ROOT="$TMP/work"
 mkdir -p "$EXPERIMENT_SCRATCH_ROOT"
+
+# Every case below except the mount-guard block runs against the box's REAL mount table, which on a Linux
+# runner lists nothing at or under $TMP. On a platform without /proc/self/mountinfo the guard would
+# (correctly) read UNKNOWN and no-op every case, so point the seam at a synthetic single-root table there
+# instead — the rest of this smoke then exercises the same path it does on Linux.
+if [ ! -r /proc/self/mountinfo ]; then
+  echo "27 2 8:1 / / rw - ext4 /dev/root rw" > "$TMP/mountinfo-baseline"
+  export REAP_SCRATCH_MOUNTINFO="$TMP/mountinfo-baseline"
+fi
+
+# mkmountinfo <file> <mount-point>... — a mountinfo fixture (a real `mount --bind` needs root). Field 5 is
+# the mount point; the caller passes it already octal-escaped where it needs to be.
+mkmountinfo(){
+  local f=$1; shift
+  echo "27 2 8:1 / / rw - ext4 /dev/root rw" > "$f"
+  local n=28
+  for mp in "$@"; do echo "$n 27 0:$n / $mp rw - tmpfs tmpfs rw" >> "$f"; n=$((n+1)); done
+}
 
 rclone_calls(){ [ -f "$RCLONE_LOG" ] && wc -l < "$RCLONE_LOG" | tr -d ' ' || echo 0; }
 reset_log(){ : > "$RCLONE_LOG"; }
@@ -241,6 +263,51 @@ s="$TMP/work/e2"; mkdir -p "$s"; ln -s "$TMP/store" "$s/link"; reset_log
 if STUB_SKIP_STORE=1 bash "$R" e2 "$s" >/dev/null 2>&1; then no symlink-only-verified; else ok symlink-only-verified; fi
 [ -d "$s" ] && ok symlink-only-scratch-kept || no symlink-only-scratch-kept
 grep -q '^copy ' "$RCLONE_LOG" && ok symlink-only-archive-attempted || no symlink-only-archive-attempted
+
+# --- never delete through a mount point (round-3 code-review Finding 1) -------------------------------
+# `rm -rf` deletes a bind mount's contents THROUGH the mount and only then fails with EBUSY on the mount
+# point, so the non-zero exit the caller relies on arrives after the mounted data is gone. Verified on a
+# stock Linux runner; a real `mount --bind` needs root, hence the injectable mount table.
+
+# the scratch dir IS a mount point
+rec create m1 >/dev/null; rec close m1 >/dev/null
+s=$(mkscratch m1); mkmountinfo "$TMP/mi-m1" "$s"; reset_log
+if REAP_SCRATCH_MOUNTINFO="$TMP/mi-m1" bash "$R" m1 "$s" >/dev/null 2>&1; then no mount-at-target-refused; else ok mount-at-target-refused; fi
+[ -d "$s" ] && ok mount-at-target-kept || no mount-at-target-kept
+[ "$(rclone_calls)" = 0 ] && ok mount-at-target-no-rclone || no mount-at-target-no-rclone
+
+# the scratch dir CONTAINS a mount point — the reviewer's "bind-mounted dataset beneath scratch". Note
+# `st_dev` is IDENTICAL either side of a same-filesystem bind mount, so nothing but the table sees this.
+rec create m2 >/dev/null; rec close m2 >/dev/null
+s=$(mkscratch m2); mkdir -p "$s/dataset"; mkmountinfo "$TMP/mi-m2" "$s/dataset"; reset_log
+if REAP_SCRATCH_MOUNTINFO="$TMP/mi-m2" bash "$R" m2 "$s" >/dev/null 2>&1; then no mount-under-target-refused; else ok mount-under-target-refused; fi
+[ -d "$s/dataset" ] && ok mount-under-target-kept || no mount-under-target-kept
+[ "$(rclone_calls)" = 0 ] && ok mount-under-target-no-rclone || no mount-under-target-no-rclone
+
+# ...and the mount point's path must be OCTAL-DECODED before it is compared. The scratch root here holds a
+# space, so the table's `\040` has to decode for the entry to match the target at all: leave it raw and
+# this exact case sails through the guard and gets archived-and-deleted.
+rec create m3 >/dev/null; rec close m3 >/dev/null
+spaced="$TMP/sp ace/work"; mkdir -p "$spaced/m3"; echo payload > "$spaced/m3/out.txt"
+mkmountinfo "$TMP/mi-m3" "$TMP/sp\\040ace/work/m3"; reset_log
+if EXPERIMENT_SCRATCH_ROOT="$spaced" REAP_SCRATCH_MOUNTINFO="$TMP/mi-m3" bash "$R" m3 "$spaced/m3" >/dev/null 2>&1; then
+  no mount-octal-escape-refused; else ok mount-octal-escape-refused; fi
+[ -d "$spaced/m3" ] && ok mount-octal-escape-kept || no mount-octal-escape-kept
+[ "$(rclone_calls)" = 0 ] && ok mount-octal-escape-no-rclone || no mount-octal-escape-no-rclone
+
+# an ANCESTOR mount blocks nothing: a scratch root on its own volume is the normal layout, and `/` is an
+# ancestor of every path there is — a guard that blocked on ancestors would reap nothing, ever.
+rec create m4 >/dev/null; rec close m4 >/dev/null
+s=$(mkscratch m4); mkmountinfo "$TMP/mi-m4" "$EXPERIMENT_SCRATCH_ROOT"; reset_log
+if REAP_SCRATCH_MOUNTINFO="$TMP/mi-m4" bash "$R" m4 "$s" >/dev/null 2>&1; then ok mount-ancestor-allowed; else no mount-ancestor-allowed; fi
+[ -d "$s" ] && no mount-ancestor-scratch-deleted || ok mount-ancestor-scratch-deleted
+
+# an unreadable table is UNKNOWN, and UNKNOWN never reaches a delete: the gate-6 logged no-op shape.
+rec create m5 >/dev/null; rec close m5 >/dev/null
+s=$(mkscratch m5); reset_log
+if REAP_SCRATCH_MOUNTINFO="$TMP/no-such-mountinfo" bash "$R" m5 "$s" >/dev/null 2>&1; then ok mount-unreadable-exit0; else no mount-unreadable-exit0; fi
+[ -d "$s" ] && ok mount-unreadable-scratch-kept || no mount-unreadable-scratch-kept
+[ "$(rclone_calls)" = 0 ] && ok mount-unreadable-no-rclone || no mount-unreadable-no-rclone
 
 # --- argument validation ----------------------------------------------------------------------------
 if bash "$R" only-one-arg >/dev/null 2>&1; then no args-refused; else ok args-refused; fi

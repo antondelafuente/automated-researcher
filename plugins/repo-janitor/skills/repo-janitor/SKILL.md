@@ -148,6 +148,15 @@ below — a bare sweep reports and nothing else.
   that predicate is calibrated for "can git operate here", this one for "may this be destroyed", so a
   half-cloned or atypical bare repo lands on the reporting side. The cost is that a scratch dir holding a
   top-level `HEAD` beside one of those names gets reported instead of reaped.
+- **An entry that IS, or CONTAINS, a mount point is never reapable** — the bound is a *path* bound, so it
+  has to hold across mounts too. `shutil.rmtree` (like `rm -rf`) deletes a bind mount's contents *through*
+  the mount and only then raises `EBUSY` on the mount point itself, so the delete-failed path arrives after
+  the mounted data is already gone. Established from `/proc/self/mountinfo` and nothing else: for a bind
+  mount whose source is on the *same* filesystem, `os.path.ismount()` is False and `st_dev` is identical on
+  both sides, so `ismount` / `st_dev` / `-xdev` / `--one-file-system` all wave it through. An unreadable or
+  unparseable mount table is UNKNOWN → tier 3, never "there are no mounts". An **ancestor** mount blocks
+  nothing — a scratch root sitting on its own volume is the normal layout; only the entry itself, or
+  something strictly below it, blocks.
 - **Every fact is recomputed immediately before the delete**, exactly like the worktree reap: a repro dir
   written to in the gap between classification and reaping is skipped, not deleted on a stale reading.
 

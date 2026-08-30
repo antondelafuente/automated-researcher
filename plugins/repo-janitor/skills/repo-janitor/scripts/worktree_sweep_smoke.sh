@@ -24,6 +24,9 @@
 #     tier3 and survive a real --reap-tier1; --dry-run deletes nothing; and every unsafe
 #     repository-like entries NEVER reach tier 1 whether or not their repo marker resolves: a bare repo, a
 #     bare repo missing refs/, and a checkout whose `.git` is a DANGLING SYMLINK all route to tier 3; an
+#     entry that IS or CONTAINS a mount point routes to tier 3 and survives a real --reap-tier1 (with the
+#     mount point's `\040` space escape decoded before comparison), an ANCESTOR mount blocks nothing, and
+#     an unreadable mount table is UNKNOWN -> tier 3; and every unsafe
 #     --scratch-glob shape (relative, wildcard in the directory part, root-level, trailing slash) is
 #     rejected up front so the delete scope stays statically bounded
 #   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
@@ -616,6 +619,24 @@ assert '[5 entries, same root cause] inspection needed: boundary root cause' in 
 #    the pattern validation that keeps the delete scope statically bounded.
 SCRATCH="$TMP/scratchroot"; mkdir -p "$SCRATCH"
 
+# The mount guard reads the box's REAL mount table for every case except the mount block at the end, and
+# on a Linux runner nothing is mounted at or under $TMP. On a platform with no /proc/self/mountinfo it
+# would (correctly) read UNKNOWN and route every scratch entry to tier 3, so point the seam at a synthetic
+# single-root table there instead — the rest of this section then exercises the same path it does on Linux.
+if [ ! -r /proc/self/mountinfo ]; then
+  echo "27 2 8:1 / / rw - ext4 /dev/root rw" > "$TMP/mountinfo-baseline"
+  export REPO_JANITOR_MOUNTINFO="$TMP/mountinfo-baseline"
+fi
+
+# mkmountinfo <file> <mount-point>... — a mountinfo fixture (a real `mount --bind` needs root). Field 5 is
+# the mount point; the caller passes it already octal-escaped where it needs to be.
+mkmountinfo(){
+  local f=$1; shift
+  echo "27 2 8:1 / / rw - ext4 /dev/root rw" > "$f"
+  local n=28
+  for mp in "$@"; do echo "$n 27 0:$n / $mp rw - tmpfs tmpfs rw" >> "$f"; n=$((n+1)); done
+}
+
 mk_old(){ # mk_old <dir> — a scratch dir whose whole tree is 40 days old
   mkdir -p "$1"; echo payload > "$1/data.bin"
   touch -d "$OLD_DATE" "$1/data.bin"; touch -d "$OLD_DATE" "$1"
@@ -742,6 +763,57 @@ mk_old "$SCRATCH/text-repro.hhh"
 python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 2>/dev/null > "$TMP/scratch-reap.txt" || true
 grep -q '^## Reaped' "$TMP/scratch-reap.txt" && ok "scratch: human report carries a Reaped section" || no "scratch: human report Reaped section"
 grep -q "^- \[scratch\] $SCRATCH/text-repro.hhh" "$TMP/scratch-reap.txt" && ok "scratch: human report names the deleted path" || no "scratch: human report names the deleted path"
+
+# 8b. NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1). `shutil.rmtree` unlinks a bind
+#     mount's contents THROUGH the mount and only THEN raises EBUSY on the mount point, so the reap loop's
+#     failure handling arrives after the mounted data is already destroyed. Verified on a stock Linux
+#     runner. The mount table is the only source that sees it — for a bind mount whose source is on the
+#     same filesystem `os.path.ismount()` is False and `st_dev` is IDENTICAL either side, so ismount /
+#     st_dev / `-xdev` guards all wave it through. A real `mount --bind` needs root, hence the injected
+#     table. Runs after step 8's destructive reap so these fixtures meet exactly one `--reap-tier1`.
+mk_old "$SCRATCH/mountat-repro.lll"
+mk_old "$SCRATCH/mountsub-repro.mmm"; mkdir -p "$SCRATCH/mountsub-repro.mmm/dataset"
+touch -d "$OLD_DATE" "$SCRATCH/mountsub-repro.mmm/dataset" "$SCRATCH/mountsub-repro.mmm"
+# The entry's own name carries a SPACE, so the table's `\040` has to decode for this to match the entry at
+# all: leave the escape raw and this exact case is classified tier 1 and rm -rf'd through its mount.
+mk_old "$SCRATCH/mount esc-repro.nnn"
+mk_old "$SCRATCH/control-repro.ooo"
+mkmountinfo "$TMP/mi-scratch" \
+  "$SCRATCH" \
+  "$SCRATCH/mountat-repro.lll" \
+  "$SCRATCH/mountsub-repro.mmm/dataset" \
+  "$SCRATCH/mount\\040esc-repro.nnn"
+
+REPO_JANITOR_MOUNTINFO="$TMP/mi-scratch" python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null > "$TMP/scratch-mount.json"
+has_path_in "d['tier3']" "$SCRATCH/mountat-repro.lll" < "$TMP/scratch-mount.json" && ok "scratch: an entry that IS a mount point routes to tier3" || no "scratch: entry that is a mount point must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/mountat-repro.lll" < "$TMP/scratch-mount.json" && no "scratch: an entry that IS a mount point must never be tier1" || ok "scratch: entry that is a mount point never tier1"
+has_path_in "d['tier1']" "$SCRATCH/mountsub-repro.mmm" < "$TMP/scratch-mount.json" && no "scratch: an entry CONTAINING a mount point must never be tier1 (rmtree deletes the mounted data before failing)" || ok "scratch: entry containing a mount point never tier1"
+has_path_in "d['tier3']" "$SCRATCH/mountsub-repro.mmm" < "$TMP/scratch-mount.json" && ok "scratch: an entry CONTAINING a mount point routes to tier3" || no "scratch: entry containing a mount point must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/mount esc-repro.nnn" < "$TMP/scratch-mount.json" && no "scratch: a mount point written with mountinfo's \\040 space escape must be decoded before comparison" || ok "scratch: mount point with an octal-escaped space is decoded and blocks"
+# An ANCESTOR mount blocks nothing — the fixture table lists the scratch root itself (and `/` is an
+# ancestor of every path there is), so an ancestor-sensitive guard would reap nothing, ever.
+has_path_in "d['tier1']" "$SCRATCH/control-repro.ooo" < "$TMP/scratch-mount.json" && ok "scratch: an ancestor mount point blocks nothing (scratch root on its own volume is the normal layout)" || no "scratch: ancestor mount wrongly disqualified an entry"
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+e = [x for x in d['tier3'] if x['path'] == '$SCRATCH/mountat-repro.lll' and x['kind'] == 'scratch']
+assert e and 'mount point' in e[0]['reason'], d['tier3']
+" < "$TMP/scratch-mount.json" && ok "scratch: mount reason names the mount point" || no "scratch: mount reason names the mount point"
+
+REPO_JANITOR_MOUNTINFO="$TMP/mi-scratch" python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --json 2>/dev/null > /dev/null || true
+[ -d "$SCRATCH/mountat-repro.lll" ]       && ok "scratch: an entry that IS a mount point survives --reap-tier1" || no "scratch: an entry that IS a mount point was rm -rf'd"
+[ -d "$SCRATCH/mountsub-repro.mmm/dataset" ] && ok "scratch: the data under a nested mount point survives --reap-tier1" || no "scratch: mounted data beneath a scratch entry was DESTROYED"
+[ -d "$SCRATCH/mount esc-repro.nnn" ]     && ok "scratch: an octal-escaped mount point survives --reap-tier1" || no "scratch: an octal-escaped mount point was rm -rf'd"
+[ -d "$SCRATCH/control-repro.ooo" ]       && no "scratch: the control entry under an ancestor mount was NOT reaped" || ok "scratch: the control entry under an ancestor mount is still reaped"
+
+# An unreadable mount table is UNKNOWN, never "there are no mounts" — the same fail-closed direction every
+# other unreadable fact in this guard takes.
+mk_old "$SCRATCH/control2-repro.ppp"
+REPO_JANITOR_MOUNTINFO="$TMP/no-such-mountinfo" python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --json 2>/dev/null > "$TMP/scratch-nomi.json"
+has_path_in "d['tier3']" "$SCRATCH/control2-repro.ppp" < "$TMP/scratch-nomi.json" && ok "scratch: an unreadable mount table routes entries to tier3 (UNKNOWN, never 'no mounts')" || no "scratch: unreadable mount table must route to tier3"
+has_path_in "d['tier1']" "$SCRATCH/control2-repro.ppp" < "$TMP/scratch-nomi.json" && no "scratch: an unreadable mount table must never leave an entry tier1" || ok "scratch: unreadable mount table never tier1"
+REPO_JANITOR_MOUNTINFO="$TMP/no-such-mountinfo" python3 "$SWEEP" --repo "$REPO" --scratch-glob "$GLOB" --reap-tier1 --json 2>/dev/null > /dev/null || true
+[ -d "$SCRATCH/control2-repro.ppp" ] && ok "scratch: nothing is deleted while the mount table is unreadable" || no "scratch: an entry was deleted with mount-freedom unestablished"
 
 # pattern validation — the delete scope must stay statically bounded
 for bad in "relative/*-repro.*" "/tmp/*/inner-*" "/*" "$SCRATCH/repro/"; do
