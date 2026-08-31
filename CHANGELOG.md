@@ -1,3 +1,32 @@
+- experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
+  `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
+  (#813). Step 4 assumed the designing session is also the launching session; that broke in production
+  (RGBH1, 2026-08-31) when one family designed and a session in the other family launched and babysat,
+  because it holds the supervision machinery. Four things at that seam were undocumented or a footnote, and
+  all four failed in one launch: the executor came up on the box's interactive default model (a
+  subscription-capped model at 97% of cap) because a bare interactive launcher applied no pin — the concrete
+  launcher + pin seam lived only in the instance's own AGENTS.md; designer-of-record re-bind was a step-4
+  sub-bullet, so the launcher hand-edited the other family's merged `DESIGN.md`/`START.md` to move it; the
+  **Presentation lock — a DESIGN artifact recording the researcher's explicit word on what gets plotted — was
+  flipped from the launch side** on the strength of "launch it"; and a Codex designer reading step 4 was told
+  to dispatch itself, which is precisely the family with no supervision machinery. So the split: design owns
+  the science and the lock, launch owns the executor, the address, and the supervision, `run-experiment` is
+  unchanged. `design-experiment` keeps the design-stage PR gate and then asks "launch from this session, or
+  hand off?" — hand-off is one paste-able line (`/launch-experiment registry/<exp>`) because the merged
+  record is the whole input (researcher rule, 2026-08-31: "handoff is never needed for experiments"), and a
+  substrate without supervision machinery defaults to hand off. `launch-experiment` owns what used to be
+  step 4's launch half, moved rather than duplicated: the fresh-context dispatch contract, the #796 designer
+  address rule, #659 kickoff-submit verification, #628 `verify-bootstrap`, #292/#342/#658 two-layer
+  supervision arming as a checkable state, and the #664 decide-record-report duties (they belong to whoever
+  launched, not whoever designed). It adds the two fail-closed things the incident lacked: preconditions —
+  the record must be MERGED at the base ref with its Presentation header locked, and a missing lock is a
+  design defect the launcher never fixes from its side — and the launcher/model-pin seams
+  (`AAR_EXECUTOR_LAUNCH_CMD` / `AAR_EXECUTOR_MODEL`), resolved from instance wiring, fail-closed when unset,
+  with the pin re-read off the running executor rather than assumed. New `launch_record.sh` makes the two
+  mechanical operations scripted rather than hand-done: `preflight` (read-only merged/locked/no-drift check)
+  and `bind-designer` (the one designer-of-record seed line, rewritten atomically and idempotently, refusing
+  a missing or ambiguous line, a placeholder name, or a description in place of a harness session name),
+  covered by `launch_record_smoke.sh` against a real throwaway git repo and the shipped START template.
 - experiment-lifecycle 0.4.7 (2026-08-31): `reap_scratch.sh` no longer strands a scratch dir because of a
   dangling symlink (#811). With `-L`, rclone fails the LISTING on a symlink whose target is gone
   (`Listing error: symlink: stat …`, exit 6, "Can't retry any of the errors"), so the archive step failed
