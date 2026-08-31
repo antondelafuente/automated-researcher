@@ -66,6 +66,14 @@ decision and the later `git add` cannot disagree; a dir shipping its own `.gitig
 the common case). The ignored-file guard below still reports every excluded file by name; it just no longer
 needs them copied in to see them.
 
+That worktree is also created **sparse** (`scripts/sparse_worktree.sh`, #805): every top-level dir except
+`registry/`, plus the record dir being logged. #666 stopped the *input* dir from being copied in wholesale;
+this stops the *base tree* from being checked out wholesale — a full checkout off the base branch on every log
+run materialized all 301 registry records (5.3G, ~2.2G on disk) in `/tmp` just to commit one of them. Nothing
+the gates read moves: cone mode keeps the repo root's and `registry/`'s own `.gitignore` files, so the
+ignored-file guard and the staging copy decide exactly as before, and `git add` *refuses* a path outside the
+sparse set — so a cone that failed to cover the record dir would be a loud error, never a short commit.
+
 The driver **classifies by the registry convention** (no label needed):
 
 | the dir has… | classified as | gate |

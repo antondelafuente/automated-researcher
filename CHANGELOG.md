@@ -1,3 +1,32 @@
+- experiment-lifecycle 0.4.6 / repo-janitor 0.3.5 (2026-08-31): sparse worktrees by default — the scaffold
+  stops duplicating the whole registry into every worktree of the research repo (#805). Measured on the
+  instance 2026-08-31: of 184G used on a 225G disk, 57G was worktrees — 25 checkouts each carrying its own
+  copy of the 5.3G / 301-record `registry/` (~2.2G on disk) against 6.5G of genuinely durable research data.
+  Almost every worktree task touches ONE `registry/<exp>` dir or none, yet materialized all 301; at ~10 new
+  worktrees/day × 2.2G ≈ 20G/day, no scratch reaper (#792/#793, #804) and no disk purchase can outrun it —
+  reaping moves the intercept, sparse checkout moves the SLOPE. New helper
+  `run-experiment/scripts/sparse_worktree.sh` (the creation-side counterpart of `reap_worktree.sh`, byte-
+  identical copy shipped in `log-experiment/scripts/` for its programmatic caller): `git worktree add
+  --no-checkout` + cone-mode `sparse-checkout set` over every top-level dir EXCEPT `registry/`, plus only the
+  `registry/<exp>` record(s) the task names, then `git checkout` — measured ~90% smaller in the smoke's bulk
+  fixture. `--full` is the explicit escape hatch for the rare task that needs every record (synthesis sweeps,
+  cross-experiment viz), deliberately a flag and not a heuristic, since guessing wrong toward full is how the
+  57G accrued. `log-experiment`'s staging worktree — a fresh FULL checkout in `/tmp` on EVERY log run, the one
+  place a scaffold *script* creates a worktree — now routes through the helper with the record dir in the cone:
+  #666 stopped the input dir from being copied in wholesale, this stops the base tree from being checked out
+  wholesale. Every existing gate verdict is unchanged and re-verified (all 46 secret-scan cases + all 9
+  design-stage snapshot cases pass on the sparse tree): cone mode keeps the repo root's and `registry/`'s own
+  `.gitignore` files, which the #340 ignored-file guard and #666 staging copy both decide against, and `git
+  add` REFUSES a path outside the sparse set, so a cone that failed to cover the record dir is a loud error
+  rather than a silently short commit. Fail-closed elsewhere too: a post-`worktree add` failure removes the
+  half-created tree (branch ref kept, same reasoning as `reap_worktree.sh` gate 6), and git < 2.27 degrades
+  LOUDLY to a full checkout rather than refusing to land a research record over a disk optimization.
+  `run-experiment` (create/teardown symmetry) and `repo-janitor` (its post-reap recovery command, the other
+  half of the same disk problem) now prescribe sparse creation. Harness-spawned worktrees
+  (`claude rc … --spawn worktree`, the `.claude/worktrees/*` checkouts among the 25) are created by the Claude
+  harness, not by scaffold scripts, so this helper cannot intercept them — filed as #807 (which also has to
+  quantify that share, still unmeasured), per #805's own scope caveat. Moving the >5M registry artifacts to the
+  artifact store with pointers stays out of scope.
 - repo-janitor 0.3.4 (2026-08-31): tier 1 now admits a MERGED worktree whose every dirty/untracked path is
   a byte-and-mode-identical duplicate of the default branch, and the skill documents the daily reaping cron
   (#804). Measured on the instance the day after #793 merged: the sweep classified 22/22 worktrees as tier 3

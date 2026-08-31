@@ -47,6 +47,11 @@
 # input dir's own `.gitignore` files, which the copy materializes first precisely so the pre-copy verdict and
 # the later `git add` can never disagree (#670 review). See copy_stage_paths.
 #
+# Sparse staging worktree (#805): the /tmp worktree itself is created SPARSE via scripts/sparse_worktree.sh —
+# every top-level dir except `registry/`, plus $REL. #666 stopped the INPUT dir from being copied in wholesale;
+# this stops the BASE tree from being checked out wholesale (a full checkout of a 5.3G/301-record registry, on
+# every log run, to commit one record dir). See stage_worktree.
+#
 # Config (instance, env-overridable; NO instance defaults — fail closed):
 #   RESEARCH_REPO                    the research repo (owner/repo). REQUIRED; the input dir's origin must match it.
 #                                    Env is the OVERRIDE; if unset it is bridged from the instance profile's
@@ -75,6 +80,10 @@ note() { echo "[log-experiment] $*" >&2; }
 # product's single deterministic owner of the `check` verb.
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SNAPSHOT_HELPER="$SELF_DIR/aar_profile_snapshot.sh"
+# The sparse-worktree helper (#805) — a byte-identical copy of run-experiment/scripts/sparse_worktree.sh,
+# which owns the worktree lifecycle scripts (reap_worktree.sh is its teardown counterpart). stage_worktree
+# below is this script's only worktree-creation site.
+SPARSE_WORKTREE_HELPER="$SELF_DIR/sparse_worktree.sh"
 
 # ---- instance-profile bridge (#258): fill UNSET non-secret config from aar-profile.{toml,json} ----
 # The #245 profile (`[github] research_repo`, `base_branch`) is the config home, but nothing bridged those
@@ -421,7 +430,8 @@ esac
 # ---- dedicated worktree: stage $REL off origin/$BASE_BRANCH so the secret scan sees EXACTLY the commit set ----
 # Used by BOTH the --dry-run gate and the real push path, so the SCANNED tree IS the COMMITTED tree — there is
 # no working-tree-vs-index or stale-base skew between what we scan and what we push. cleanup + trap are armed
-# before the first worktree creation on either path.
+# before the first worktree creation on either path. SPARSE since #805 (see stage_worktree): the tree carries
+# the base rule files + $REL, not the other 300 registry records.
 WT=""; WT_PARENT=""; BRANCH="log/${SLUG}"; CREATED_BRANCH=0   # only delete the branch in cleanup if THIS run created it
 # WT_PARENT — the mktemp dir holding the worktree AND copy_stage_paths' path lists (#666) — is rm -rf'd by
 # NAME, so stage_worktree validates it is a real, non-empty path before assigning it: an empty value here
@@ -622,8 +632,29 @@ stage_worktree() {
   WT_PARENT="$(mktemp -d)" || die "could not create a temp dir for the staging worktree"
   [ -n "$WT_PARENT" ] && [ -d "$WT_PARENT" ] || { WT_PARENT=""; die "internal: mktemp -d returned an empty/non-existent path — refusing to stage (cleanup rm -rf's this dir by name)"; }
   WT="$WT_PARENT/wt"
-  git -C "$REPO_ROOT" worktree add -q -b "$BRANCH" "$WT" "origin/$BASE_BRANCH" || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
+  # SPARSE by default (#805): this worktree exists to hold the base tree's ignore/rule state plus $REL — it
+  # never needs the other 300 registry records, and being a FULL checkout off origin/$BASE_BRANCH on EVERY log
+  # run made it one of the scaffold's worktree-creation sites materializing the whole 5.3G registry (~2.2G on
+  # disk) transiently in /tmp. The cone MUST cover $REL: `git add` refuses a path outside the sparse set, and
+  # that refusal is exactly what makes a too-narrow cone loud instead of a silently short commit. Everything
+  # the gates read is still present — cone mode keeps the repo root's files and each ancestor dir's own files
+  # (so the base `.gitignore` and `registry/.gitignore` are there for check_ignored_files/copy_stage_paths),
+  # and copy_stage_paths writes $REL's bytes itself.
+  # $REL == "." (the degenerate "log the repo root" call) takes --full instead: cone mode silently DROPS a "."
+  # entry, which would leave the whole tree outside the cone and let `git add -- .` stage only part of it.
+  [ -x "$SPARSE_WORKTREE_HELPER" ] || die "missing/non-executable $SPARSE_WORKTREE_HELPER — it ships alongside log-experiment.sh; this install is incomplete"
+  # Built as one argv array because the helper takes its flags BEFORE the positionals (a bare `--full` appended
+  # after them would be read as an include path, not a flag).
+  declare -a sparse_args=(--repo "$REPO_ROOT" -b "$BRANCH")
+  [ "$REL" = "." ] && sparse_args+=(--full)
+  sparse_args+=("$WT" "origin/$BASE_BRANCH")
+  [ "$REL" = "." ] || sparse_args+=("$REL")
+  # CREATED_BRANCH is set BEFORE the call, not after: the helper can fail at the sparse/checkout step with the
+  # `-b` ref already created, and cleanup's `branch -D` must still reclaim it. Safe because the guard above
+  # proved no branch of this name pre-existed, so cleanup can only ever delete THIS run's own ref.
   CREATED_BRANCH=1
+  "$SPARSE_WORKTREE_HELPER" "${sparse_args[@]}" \
+    || die "could not create worktree/branch $BRANCH off origin/$BASE_BRANCH"
   copy_stage_paths
   # STAGE_PATHS is "$REL" (the whole dir) unless --only narrowed it (#374) — either way this `git add` sees
   # only the copy_stage_paths subset, so anything the worktree's .gitignore excludes (large artifacts stay

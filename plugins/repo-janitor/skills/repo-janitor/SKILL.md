@@ -249,6 +249,15 @@ deleting). This sweep is the backstop for what that step missed, not a substitut
 worktree add <path> <default-branch>`, or — using the SHA the sweep logs on every reap (path, branch, HEAD
 SHA) — `git branch <name> <sha>`.
 
+**Re-create it SPARSE, not full (automated-researcher#805).** Reaping and sparse checkout attack different
+halves of the same disk problem and this sweep only owns one of them: reaping moves the *intercept*, sparse
+checkout moves the *slope*. A 2026-08-31 measurement on one 225G box found 57G of worktrees — 25 checkouts
+each carrying its own copy of a 5.3G `registry/` (~2.2G on disk) against 6.5G of genuinely durable research
+data; at ~10 new worktrees/day no sweep cadence can outrun that. So when this sweep's recovery command (or any
+convention that creates a worktree of the research repo) runs, create it sparse: `experiment-lifecycle` ships
+`sparse_worktree.sh` for exactly this — every top-level dir except `registry/`, plus only the
+`registry/<exp>` record(s) the task names, with an explicit `--full` for the rare task that needs all of them.
+
 ## Relationship to `wf.sh gc` (agentic-engineering)
 
 `ship-change`'s `wf.sh gc` already reaps its own worktrees with PR-aware protections (the PR is

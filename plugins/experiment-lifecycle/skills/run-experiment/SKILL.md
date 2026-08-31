@@ -234,6 +234,11 @@ Three obligations, maintained continuously (not at close):
   > run-id can only ever reap the worktree IT bound, never a peer's, `automated-researcher#535` review round 2,
   > and binds the designer's push address so your questions reach the session actually supervising this run,
   > `automated-researcher#796`).
+  > If you are **creating** that worktree rather than being handed one, create it **sparse**:
+  > `scripts/sparse_worktree.sh [-b <branch>] <path> <committish> registry/<exp>` — every top-level dir except
+  > `registry/`, plus only the record(s) this run touches (`--full` for the rare task that needs all of them).
+  > A full checkout carries a duplicate of the entire registry, which is the disk-growth driver reaping can't
+  > outrun (`automated-researcher#805`); see the Invariants entry for the measurement.
   > **Do not hand-write the session handle.** Its *shape* is instance-owned (a tmux name / systemd unit /
   > pid-file path) but it is not yours to choose: the instance's teardown seams compare the recorded value
   > against the current session's OWN identity, so a plausible near-miss — `tmux:run-x` where the seam derives
@@ -1066,6 +1071,14 @@ through env seams; see the "three seams" note at the top of this skill.
   against the same destination variable the copy used (#729)** — a pulled driver stack's un-renamed path literal
   otherwise overwrites another experiment's closed record while every leg reports success.
 - Teardown is **unit-id-scoped** and uses the **deploying account's key** — never blanket-delete idle compute.
+- **A worktree of the research repo is created SPARSE — the create side of that same symmetry (#805).**
+  `scripts/sparse_worktree.sh [-b <branch>] <path> <committish> registry/<exp>` (counterpart of
+  `reap_worktree.sh`): every top-level dir except `registry/`, plus only the record(s) the task names. A full
+  checkout duplicates the whole registry per worktree (measured 2026-08-31: 5.3G / 301 records, ~2.2G on disk,
+  ~10 new worktrees/day) — reaping moves the intercept, sparse moves the slope, and only the second one can
+  keep up. `--full` is the explicit escape hatch for a task that genuinely needs every record (a synthesis
+  sweep, cross-experiment viz). A too-narrow cone is loud, never a short commit: `git add` refuses a path
+  outside the sparse set.
 - **Tear down your own worktree at a clean close** — the workspace member of the same teardown symmetry as
   pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
   verified AND `log-experiment` has merged the record, gated on the same clean-close `is-closed` check as
