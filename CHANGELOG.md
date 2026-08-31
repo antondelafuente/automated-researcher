@@ -23,7 +23,10 @@
   design defect the launcher never fixes from its side — and the launcher/model-pin seams
   (`AAR_EXECUTOR_LAUNCH_CMD` / `AAR_EXECUTOR_MODEL`), resolved from instance wiring, fail-closed when unset,
   with the pin re-read off the running executor rather than assumed. New `launch_record.sh` makes the two
-  mechanical operations scripted rather than hand-done: `preflight` (read-only merged/locked/no-drift check)
+  mechanical operations scripted rather than hand-done: `preflight` (read-only merged/locked/no-drift check —
+  the only difference it tolerates from the merged brief is `bind-designer`'s own edit, and it proves that by
+  RECOMPUTING that edit off the merged text rather than exempting lines that mention a designer field, so no
+  added or reworded launch instruction can ride in on one of those tokens)
   and `bind-designer` (the one designer-of-record seed line, rewritten atomically and idempotently, refusing
   a missing or ambiguous line, a placeholder name, or a description in place of a harness session name),
   covered by `launch_record_smoke.sh` against a real throwaway git repo and the shipped START template.

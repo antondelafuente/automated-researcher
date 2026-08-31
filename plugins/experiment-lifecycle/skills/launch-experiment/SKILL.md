@@ -72,9 +72,10 @@ with a `BLOCKED:` line and no side effects, when:
 - `DESIGN.md` / `START.md` / `CHECKLIST.md` are not all present **at that ref** — the design-stage PR has not
   merged, so there is nothing pre-registered to launch. Go finish `design-experiment`'s design-stage logging.
 - the working copy of any of them differs from the merged ref — you would be launching something the
-  cross-family design gate never saw. (The one exception is `START.md`'s designer-address lines, which are
-  Step 2's own output, so this check stays re-runnable after a bind — on a relaunch, or just to re-read the
-  state.)
+  cross-family design gate never saw. (The one tolerated difference is Step 2's own designer-of-record bind,
+  so this check stays re-runnable after a bind — on a relaunch, or just to re-read the state. It is allowed
+  by *recomputing* that bind off the merged text and requiring a byte match, not by exempting lines that
+  mention a designer field: an added or reworded launch instruction is drift whatever tokens it carries.)
 - `DESIGN.md`'s Presentation header carries no researcher lock
   (`## Presentation (locked with the researcher <ISO date>)`). **Never add it here** — see the rule above.
 
