@@ -17,8 +17,13 @@
 #   - the destination probe matches the run-id LITERALLY (a '.' in a run-id is not a regex wildcard
 #     that could pass the gate against a different, similarly-named archive prefix)
 #   - an EMPTY scratch tree still completes rather than being stranded forever by a probe that cannot
-#     pass for it (round-2 code-review Finding 2), while a tree holding only a SYMLINK is not empty and
-#     still goes through the full archive-and-verify path
+#     pass for it (round-2 code-review Finding 2), while a tree holding only a LIVE symlink is not empty
+#     and still goes through the full archive-and-verify path
+#   - a DANGLING symlink no longer strands the dir (#811): it is excluded + logged instead of aborting the
+#     -L listing, the SAME excludes reach `rclone check` (an exclude on the copy alone leaves the verify to
+#     abort on the entry the copy skipped), glob metacharacters in the link's name are escaped so the
+#     exclude cannot swallow real files, and a tree whose ONLY content is dangling links takes the no-bytes
+#     delete branch (after exclusion it would copy nothing, so the destination probe could never pass)
 #   - NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1): a scratch dir that IS, or
 #     CONTAINS, a mount point is refused with rclone never invoked (including when the mount point's path
 #     carries mountinfo's `\040` space escape), an ANCESTOR mount blocks nothing, and an unreadable mount
@@ -46,12 +51,38 @@ rec(){ bash "$REC" "$@"; }
 # --- stubbed rclone -------------------------------------------------------------------------------
 # `copy` materializes a marker under $STUB_STORE (so `lsf` of the parent lists it, exactly like a real
 # store would) unless STUB_SKIP_STORE=1; `check`/`copy` exit codes and the symlink NOTICE are knobs.
+# BOTH `copy` and `check` also model the #811 failure itself: with -L, rclone LISTS the source, and a
+# symlink whose target is gone makes that listing an unretryable error (exit 6) for the whole transfer
+# unless a filter covers the link. Modelling it on both verbs is what makes the copy/check exclude
+# SYMMETRY testable — an exclude passed to only one of them fails here exactly as it would in production.
+# Patterns are matched with `case`, so the script's `\`-escaping of glob metacharacters carries the same
+# meaning it does in an rclone filter (`\*` is a literal asterisk, a bare `*` is a wildcard).
 BIN="$TMP/bin"; mkdir -p "$BIN"
 cat > "$BIN/rclone" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$RCLONE_LOG"
+ex=(); prev=""
+for a in "$@"; do
+  [ "$prev" = "--exclude" ] && ex+=("$a")
+  prev=$a
+done
+listing_error(){ # <src> — non-zero (6) if an unexcluded dangling symlink is in the tree
+  local src=$1 link rel pat
+  while IFS= read -r link; do
+    [ -e "$link" ] && continue
+    rel="/${link#"$src"/}"
+    for pat in "${ex[@]}"; do
+      case "$rel" in $pat) continue 2 ;; esac
+    done
+    echo "ERROR : ${rel#/}: Listing error: symlink: stat $link: no such file or directory"
+    echo "Failed to copy: not deleting files as there were IO errors"
+    return 6
+  done < <(find "$src" -mindepth 1 -type l 2>/dev/null)
+  return 0
+}
 case "${1:-}" in
   copy)
+    listing_error "$2" || exit $?
     [ "${STUB_COPY_NOTICE:-0}" = 1 ] && echo "NOTICE: big.bin: Can't follow symlink, skipping"
     if [ "${STUB_COPY_RC:-0}" = 0 ] && [ "${STUB_SKIP_STORE:-0}" != 1 ]; then
       # Real rclone creates NO empty directories at the destination, so a source tree holding no files
@@ -63,7 +94,9 @@ case "${1:-}" in
       fi
     fi
     exit "${STUB_COPY_RC:-0}" ;;
-  check) exit "${STUB_CHECK_RC:-0}" ;;
+  check)
+    listing_error "$2" || exit $?
+    exit "${STUB_CHECK_RC:-0}" ;;
   lsf)   ls -1 "$STUB_STORE" 2>/dev/null | sed 's#$#/#'; exit 0 ;;
 esac
 exit 0
@@ -273,13 +306,61 @@ if bash "$R" e1 "$s" >/dev/null 2>&1; then ok empty-exit0; else no empty-exit0; 
 [ -d "$s" ] && no empty-scratch-deleted || ok empty-scratch-deleted
 [ "$(rclone_calls)" = 0 ] && ok empty-no-rclone || no empty-no-rclone
 
-# ...but a tree whose only content is a SYMLINK is NOT empty: the -L copy turns it into a file at the
+# ...but a tree whose only content is a LIVE SYMLINK is NOT empty: the -L copy turns it into a file at the
 # destination, so it must take the full archive-and-verify path rather than the delete-outright branch.
 rec create e2 >/dev/null; rec close e2 >/dev/null
 s="$TMP/work/e2"; mkdir -p "$s"; ln -s "$TMP/store" "$s/link"; reset_log
 if STUB_SKIP_STORE=1 bash "$R" e2 "$s" >/dev/null 2>&1; then no symlink-only-verified; else ok symlink-only-verified; fi
 [ -d "$s" ] && ok symlink-only-scratch-kept || no symlink-only-scratch-kept
 grep -q '^copy ' "$RCLONE_LOG" && ok symlink-only-archive-attempted || no symlink-only-archive-attempted
+
+# --- a DANGLING symlink is excluded + logged, never a stranded dir (#811) ----------------------------
+# The scaffold manufactures this: reap_worktree.sh removes the run worktree earlier in the same close, so
+# `work/<exp>/scripts` -> the worktree is already dead by the time this runs. With -L, rclone fails the
+# LISTING on it (exit 6) and gate 4 refused, leaving multi-GB dirs on the box forever (2 of 27 observed).
+rec create d1 >/dev/null; rec close d1 >/dev/null
+s=$(mkscratch d1); mkdir -p "$s/sub"
+ln -s "$TMP/store" "$s/live"                  # target exists -> archived by -L, untouched by the fix
+ln -s "$TMP/gone-worktree/scripts" "$s/sub/dead"   # target never existed -> the #811 condition
+reset_log
+out=$(bash "$R" d1 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok dangling-exit0 || no "dangling-exit0 (got rc=$rc)"
+[ -d "$s" ] && no dangling-scratch-deleted || ok dangling-scratch-deleted
+case "$out" in
+  *"DANGLING SYMLINK"*"$s/sub/dead"*"$TMP/gone-worktree/scripts"*) ok dangling-logged-with-target ;;
+  *) no "dangling-logged-with-target (output was: $out)" ;;
+esac
+grep -q "^copy $s stub:bucket/archive/work/d1 --exclude /sub/dead -L$" "$RCLONE_LOG" \
+  && ok dangling-copy-excludes || no "dangling-copy-excludes ($(grep '^copy' "$RCLONE_LOG"))"
+# VERIFY SYMMETRY: the same excludes on the check. Without them the stub (like rclone) aborts the check's
+# own listing on the very link the copy was told to skip — an asymmetric verify, gate 4's own invariant.
+grep -q "^check $s stub:bucket/archive/work/d1 --one-way --exclude /sub/dead -L$" "$RCLONE_LOG" \
+  && ok dangling-check-excludes || no "dangling-check-excludes ($(grep '^check' "$RCLONE_LOG"))"
+# the LIVE link is not excluded — its bytes are still archived by -L
+grep -q -- '--exclude /live' "$RCLONE_LOG" && no dangling-live-link-not-excluded || ok dangling-live-link-not-excluded
+
+# a tree whose ONLY content is a dangling link copies zero bytes once excluded, so rclone creates no
+# destination prefix and the parent-listing probe could only ever report a false failure: it belongs on the
+# existing no-bytes delete branch, with the dead link still on the record.
+rec create d2 >/dev/null; rec close d2 >/dev/null
+s="$TMP/work/d2"; mkdir -p "$s"; ln -s "$TMP/gone-worktree/scripts" "$s/dead"; reset_log
+out=$(bash "$R" d2 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok dangling-only-exit0 || no "dangling-only-exit0 (got rc=$rc)"
+[ -d "$s" ] && no dangling-only-scratch-deleted || ok dangling-only-scratch-deleted
+[ "$(rclone_calls)" = 0 ] && ok dangling-only-no-rclone || no dangling-only-no-rclone
+case "$out" in
+  *"DANGLING SYMLINK"*"$s/dead"*) ok dangling-only-logged ;;
+  *) no "dangling-only-logged (output was: $out)" ;;
+esac
+
+# an rclone filter is a GLOB, so the exclude has to be escaped: unescaped, a link named `dead[1]*` would
+# exclude every real file matching that pattern too — silently shrinking an archive that is about to
+# authorize an `rm -rf`.
+rec create d3 >/dev/null; rec close d3 >/dev/null
+s=$(mkscratch d3); ln -s "$TMP/gone-worktree/scripts" "$s/dead[1]*link"; reset_log
+if bash "$R" d3 "$s" >/dev/null 2>&1; then ok dangling-glob-exit0; else no dangling-glob-exit0; fi
+grep -qF -- '--exclude /dead\[1\]\*link ' "$RCLONE_LOG" && ok dangling-glob-escaped \
+  || no "dangling-glob-escaped ($(grep '^copy' "$RCLONE_LOG"))"
 
 # --- never delete through a mount point (round-3 code-review Finding 1) -------------------------------
 # `rm -rf` deletes a bind mount's contents THROUGH the mount and only then fails with EBUSY on the mount
