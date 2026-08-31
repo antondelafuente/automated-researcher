@@ -1,3 +1,29 @@
+- repo-janitor 0.3.4 (2026-08-31): tier 1 now admits a MERGED worktree whose every dirty/untracked path is
+  a byte-and-mode-identical duplicate of the default branch, and the skill documents the daily reaping cron
+  (#804). Measured on the instance the day after #793 merged: the sweep classified 22/22 worktrees as tier 3
+  with ZERO in tier 1, while 4 of 7 hand-checked merged worktrees carried nothing but duplicates of
+  `origin/main` (`log-experiment` lands `registry/<exp>/` from its own branch, so the executor worktree's
+  identical copy reads untracked forever) — ~10 new worktrees/day at ~2.2G of `registry/` each, and the disk
+  went 77%→92% in a day. #533's content-identity bar could not rescue them: its committed-tree diff lists
+  everything the default branch changed SINCE the worktree's HEAD, so a merged-but-behind worktree can never
+  pass it. `residue_identical_fact` is now split out of `content_identical_fact` and run directly for a
+  merged worktree carrying residue (ancestry already proves the committed bytes are on main; the residue is
+  all a reap could lose), with the identical per-file discipline — staged blobs checked independently, modes
+  compared, symlinks compared by link target, and every unreadable comparison UNKNOWN rather than a guessed
+  "same". Residue that differs from the default branch, or sits at a path the default branch lacks, stays
+  reported with its own precise dirty/untracked reason and is never reaped; `do_reap`'s pre-delete
+  re-verification applies the same merged-dependent split, so these items don't skip at the moment that
+  matters. Also documents the daily cron line (report-only stays weekly; the reaping opt-in refills daily)
+  and pins all of it in `worktree_sweep_smoke.sh` with a merged-and-behind fixture that fails on the old code.
+- experiment-lifecycle 0.4.5 (2026-08-31): `reap_scratch.sh`'s unset-seam no-op is now LOUD ON THE RECORD —
+  exit 3 plus a one-line `SCRATCH-REAP-GAP:` marker on stdout for the close report and ledger line — and
+  `run-experiment` gains an instance-wiring checklist of the env seams its own scripts read (#804). Neither
+  scratch seam was ever configured on the instance #792 shipped to; the no-op said so on the executor's
+  stdout and exited 0, so seven experiments closed reaping ZERO scratch dirs before a human noticed the disk
+  back at 92%. Exit 3 is deliberately distinct from `die`'s 1: nothing failed and nothing is lost, the
+  wiring is missing. No `rclone` on `PATH` and no readable mount table take the same path (same consequence,
+  same invisibility). Nothing about what may be deleted changed — every gate, binding, and refusal is
+  untouched.
 - experiment-lifecycle 0.4.4 (2026-08-30): the designer-of-record gets a stable ADDRESS on the
   run-supervision record, so an executor's question reaches the session actually supervising the run (#796).
   Peer addressing assumed one tmux session name = one long-lived context (the claude-1..4 fleet). Under a

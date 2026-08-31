@@ -789,8 +789,16 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   **`rclone copy` → `rclone check` → only then `rm -rf`** — the same "tear down after a verified upload"
   pattern the completion boundary above already demands of compute, applied to the workspace. **On a check
   failure it leaves the directory alone and exits non-zero: say so on the run's ledger line** rather than
-  deleting anyway or silently retrying. Two instance seams bound it, and **either one unset → a logged
-  no-op that deletes nothing** (a wiring gap for the retro, never a licence to delete):
+  deleting anyway or silently retrying. Two instance seams bound it, and **either one unset → nothing is
+  deleted and the run exits 3 with a one-line `SCRATCH-REAP-GAP:` marker on stdout. Copy that line onto the
+  close report AND the run's ledger line, verbatim** — a wiring gap is a finding about this instance, never a
+  licence to delete and never something you resolve by wiring the seam yourself mid-close:
+  - **The gap is loud because a quiet one cost seven closes (automated-researcher#804).** Neither seam was
+    ever configured on the instance this shipped to; the no-op said so on stdout and exited 0, so seven
+    experiments closed reaping ZERO scratch dirs and the disk went 77%→92% in a day before a human looked.
+    Exit 3 is distinct from exit 1 on purpose: 1 means an archive/verify step FAILED (bytes at risk, act on
+    it), 3 means nothing was archived, nothing was deleted, and nothing is lost — the wiring is missing.
+    Same treatment for no `rclone` on `PATH` and no readable mount table: same consequence, same record.
   - **`EXPERIMENT_SCRATCH_ROOT`** — the absolute local directory your instance creates per-run scratch dirs
     under. **The delete target is derived, not taken from you:** the only path this ever `rm -rf`s for
     `<run-id>` is `<root>/<run-id>`, a direct child of that one root and nothing else at any depth. The
@@ -805,9 +813,9 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   deletes a bind mount's contents *through* the mount and only then fails with `EBUSY` on the mount point,
   so the non-zero exit you'd act on arrives after the mounted dataset is already destroyed. Mount-freedom
   is read from `/proc/self/mountinfo` — a same-filesystem bind mount has an identical `st_dev` on both
-  sides, so nothing else sees it — and a platform with no readable mount table is another **logged no-op
-  that deletes nothing**, since mount-freedom can't be established there. An *ancestor* mount is fine: a
-  scratch root on its own volume is the normal layout.
+  sides, so nothing else sees it — and a platform with no readable mount table is another **recorded gap
+  that deletes nothing** (the same exit-3 + `SCRATCH-REAP-GAP:` line), since mount-freedom can't be
+  established there. An *ancestor* mount is fine: a scratch root on its own volume is the normal layout.
 
   Fires **only on a clean close**, same as the two steps around it: a parked/blocked/crashed run keeps its
   scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop for whatever this step
@@ -847,6 +855,30 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   close), and an inconclusive idle read. It needs its own instance seams (`SESSION_JANITOR_LIST_CMD` /
   `SESSION_JANITOR_IDLE_CMD` / `SESSION_JANITOR_KILL_CMD`) — `reap_session.sh`'s `EXPERIMENT_SESSION_REAP_CMD` is
   self-only by contract and cannot be reused here. Roll it out `--dry-run` first, same as the pod reaper.
+
+---
+
+## Instance-wiring checklist — the env seams this skill's own scripts read
+
+Every seam below is an **instance** value (a path, a command), so the product ships none of them. They are
+listed together here because the alternative failed in exactly the way you would predict: the two scratch
+seams were documented only inside the close step that uses them, nobody wired them, and seven consecutive
+closes reaped nothing (`automated-researcher#804`). If you are standing up this skill on a new box, wire
+these first; if you are an executor and a close reports one missing, that is a finding for the record — not
+yours to configure mid-run.
+
+| Seam | Read by | Unset ⇒ |
+| --- | --- | --- |
+| `EXPERIMENT_SESSION_HANDLE_CMD` | `run_supervision_record.sh start` — binds the session handle from the instance's own self-identity lookup | the handle must be passed explicitly, and a hand-written near-miss is uncorrectable later (`#673`) |
+| `EXPERIMENT_SESSION_REAP_CMD` | `reap_session.sh` (self-only teardown seam) | logged no-op: the session outlives the close (the janitor is the backstop) |
+| `EXPERIMENT_SCRATCH_ROOT` | `reap_scratch.sh` — the one root whose direct children are reapable | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; scratch accumulates until the disk fills |
+| `EXPERIMENT_SCRATCH_ARCHIVE_DEST` | `reap_scratch.sh` — the rclone destination root archives land under | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; same accumulation |
+| `SESSION_JANITOR_LIST_CMD` / `_IDLE_CMD` / `_KILL_CMD` | `session_janitor.sh` (the crashed-close backstop, scheduled by the instance) | the backstop doesn't run; only self-reap frees sessions |
+
+`reap_scratch.sh` additionally needs `rclone` on `PATH` and a readable mount table (`/proc/self/mountinfo`)
+— both absent take the same exit-3 recorded-gap path as an unset seam. Everything else this skill depends
+on (provisioning, artifact store, ledger, teardown-key policy) comes through the **execution profile**, not
+through env seams; see the "three seams" note at the top of this skill.
 
 ---
 
@@ -1042,12 +1074,13 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   one that is durable NOWHERE until you archive it: `reap_scratch.sh <run-id> <scratch dir>` does
   `rclone copy` → `rclone check` → `rm -rf`, never `rm -rf` without a verified archive. The delete target is DERIVED
   (`EXPERIMENT_SCRATCH_ROOT` + the run-id), never the path you passed. A failed check leaves the dir and goes on the
-  ledger line; either seam unconfigured (`EXPERIMENT_SCRATCH_ROOT` / `..._ARCHIVE_DEST`) is a logged no-op, not a delete.
+  ledger line; either seam unconfigured (`EXPERIMENT_SCRATCH_ROOT` / `..._ARCHIVE_DEST`) deletes nothing and **exits 3
+  with a `SCRATCH-REAP-GAP:` line that goes on the close record verbatim** (#804) — never a log line you can close over.
   What may never be deleted unverified is BYTES: a scratch tree holding no files has nothing to archive (and `rclone`
   creates no empty destination prefix to verify), so it is removed with that stated, not stranded forever. And the
   derived path bounds the delete only if nothing is MOUNTED inside it — a scratch dir that is, or contains, a mount
   point is refused (`rm -rf` destroys the mounted data before it fails), read from the mount table, with no readable
-  mount table another no-op.
+  mount table the same recorded gap.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

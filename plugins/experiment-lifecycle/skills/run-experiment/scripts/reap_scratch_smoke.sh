@@ -9,7 +9,10 @@
 #   - NO DELETE WITHOUT A VERIFIED ARCHIVE: copy failure, `Can't follow symlink` NOTICE on an exit-0
 #     copy, `rclone check` failure, and a destination listing that doesn't show the run-id all leave the
 #     directory in place and exit non-zero
-#   - the unset-seam NO-OPs — archive dest, scratch root, no rclone (exit 0, nothing deleted/invoked)
+#   - the unset-seam / no-rclone / unreadable-mount-table gaps are LOUD ON THE RECORD (#804): still
+#     nothing deleted and rclone never invoked, but now a `SCRATCH-REAP-GAP:` marker on STDOUT (the close
+#     report's stream) and a distinct exit 3 — the exit-0 log line they used to be is exactly how seven
+#     closes reaped zero scratch dirs while the disk refilled
 #   - path-sanity refusals: a symlinked scratch dir, the run's own bound worktree, and a cwd inside it
 #   - the destination probe matches the run-id LITERALLY (a '.' in a run-id is not a regex wildcard
 #     that could pass the gate against a different, similarly-named archive prefix)
@@ -182,18 +185,33 @@ s=$(mkscratch f_lsf); reset_log
 if STUB_SKIP_STORE=1 bash "$R" f_lsf "$s" >/dev/null 2>&1; then no lsfmiss-nonzero; else ok lsfmiss-nonzero; fi
 [ -d "$s" ] && ok lsfmiss-scratch-kept || no lsfmiss-scratch-kept
 
-# --- unset seam / no rclone: documented NO-OPs (exit 0, nothing deleted, nothing invoked) ----------
+# --- unset seam / no rclone: the LOUD, on-the-record no-op (#804) ----------------------------------
+# Nothing is deleted and nothing is invoked (unchanged), but the gap is no longer an exit-0 log line: a
+# single `SCRATCH-REAP-GAP:` marker goes to STDOUT for the close report / ledger line, and the exit status
+# is the distinct 3 — NOT 0 (seven closes reaped nothing on the instance behind that exit 0) and NOT 1
+# (nothing failed and nothing is lost, so a caller must be able to tell the two apart).
+gap_case(){ # gap_case <label> <expected-cause> <scratch-dir> -- <command...>
+  local label=$1 cause=$2 dir=$3; shift 4
+  local out rc
+  out=$("$@" 2>/dev/null); rc=$?
+  [ "$rc" = 3 ] && ok "$label-exit3" || no "$label-exit3 (got rc=$rc, expected 3)"
+  case "$out" in
+    *"SCRATCH-REAP-GAP: "*"cause=$cause"*"reaped=no"*) ok "$label-marker-on-stdout" ;;
+    *) no "$label-marker-on-stdout (stdout was: $out)" ;;
+  esac
+  [ -d "$dir" ] && ok "$label-scratch-kept" || no "$label-scratch-kept"
+  [ "$(rclone_calls)" = 0 ] && ok "$label-no-rclone" || no "$label-no-rclone"
+}
+
 rec create n1 >/dev/null; rec close n1 >/dev/null
 s=$(mkscratch n1); reset_log
-if env -u EXPERIMENT_SCRATCH_ARCHIVE_DEST bash "$R" n1 "$s" >/dev/null 2>&1; then ok noseam-exit0; else no noseam-exit0; fi
-[ -d "$s" ] && ok noseam-scratch-kept || no noseam-scratch-kept
-[ "$(rclone_calls)" = 0 ] && ok noseam-no-rclone || no noseam-no-rclone
+gap_case noseam EXPERIMENT_SCRATCH_ARCHIVE_DEST-unset "$s" -- \
+  env -u EXPERIMENT_SCRATCH_ARCHIVE_DEST bash "$R" n1 "$s"
 
 rec create n3 >/dev/null; rec close n3 >/dev/null
 s=$(mkscratch n3); reset_log
-if env -u EXPERIMENT_SCRATCH_ROOT bash "$R" n3 "$s" >/dev/null 2>&1; then ok noroot-exit0; else no noroot-exit0; fi
-[ -d "$s" ] && ok noroot-scratch-kept || no noroot-scratch-kept
-[ "$(rclone_calls)" = 0 ] && ok noroot-no-rclone || no noroot-no-rclone
+gap_case noroot EXPERIMENT_SCRATCH_ROOT-unset "$s" -- \
+  env -u EXPERIMENT_SCRATCH_ROOT bash "$R" n3 "$s"
 
 # A root that is set but unusable is a LOUD failure, not a no-op: the seam was configured, so a target the
 # script cannot derive from it is a wiring error the caller must see — never a silent skip.
@@ -210,10 +228,9 @@ s=$(mkscratch n2); reset_log
 # the host happens to ship a REAL rclone there, this one case is skipped rather than asserted falsely.
 BARE_PATH="/usr/bin:/bin"
 if PATH="$BARE_PATH" command -v rclone >/dev/null 2>&1; then
-  echo "skip norclone-exit0 (a real rclone is present on $BARE_PATH)"
+  echo "skip norclone-gap (a real rclone is present on $BARE_PATH)"
 else
-  if env PATH="$BARE_PATH" bash "$R" n2 "$s" >/dev/null 2>&1; then ok norclone-exit0; else no norclone-exit0; fi
-  [ -d "$s" ] && ok norclone-scratch-kept || no norclone-scratch-kept
+  gap_case norclone rclone-missing "$s" -- env PATH="$BARE_PATH" bash "$R" n2 "$s"
 fi
 
 # --- path sanity ------------------------------------------------------------------------------------
@@ -302,12 +319,12 @@ s=$(mkscratch m4); mkmountinfo "$TMP/mi-m4" "$EXPERIMENT_SCRATCH_ROOT"; reset_lo
 if REAP_SCRATCH_MOUNTINFO="$TMP/mi-m4" bash "$R" m4 "$s" >/dev/null 2>&1; then ok mount-ancestor-allowed; else no mount-ancestor-allowed; fi
 [ -d "$s" ] && no mount-ancestor-scratch-deleted || ok mount-ancestor-scratch-deleted
 
-# an unreadable table is UNKNOWN, and UNKNOWN never reaches a delete: the gate-6 logged no-op shape.
+# an unreadable table is UNKNOWN, and UNKNOWN never reaches a delete: the gate-6 recorded-gap shape (#804
+# — same consequence as an unset seam, so it takes the same loud exit-3 + marker path, not a silent exit 0).
 rec create m5 >/dev/null; rec close m5 >/dev/null
 s=$(mkscratch m5); reset_log
-if REAP_SCRATCH_MOUNTINFO="$TMP/no-such-mountinfo" bash "$R" m5 "$s" >/dev/null 2>&1; then ok mount-unreadable-exit0; else no mount-unreadable-exit0; fi
-[ -d "$s" ] && ok mount-unreadable-scratch-kept || no mount-unreadable-scratch-kept
-[ "$(rclone_calls)" = 0 ] && ok mount-unreadable-no-rclone || no mount-unreadable-no-rclone
+gap_case mount-unreadable mountinfo-unreadable "$s" -- \
+  env REAP_SCRATCH_MOUNTINFO="$TMP/no-such-mountinfo" bash "$R" m5 "$s"
 
 # --- argument validation ----------------------------------------------------------------------------
 if bash "$R" only-one-arg >/dev/null 2>&1; then no args-refused; else ok args-refused; fi

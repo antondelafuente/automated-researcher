@@ -5,8 +5,11 @@ THE CONTRACT: sweep one or more repos' `git worktree list`, and for every entry 
 FAIL-CLOSED facts (dirty? untracked? merged into the default branch? how old? — for the repo's own primary
 checkout, how far behind/ahead of origin?), then route each flagged entry into exactly one of three tiers:
 
-  tier 1 (deterministic "safe to reap")  — merged + clean + old, or the worktree's administrative record is
-                                            plain PRUNABLE (working directory already gone). No one is asked.
+  tier 1 (deterministic "safe to reap")  — merged + clean + old (or merged + every dirty/untracked path a
+                                            byte-identical duplicate of the default branch's own copy,
+                                            automated-researcher#804), or the worktree's administrative
+                                            record is plain PRUNABLE (working directory already gone).
+                                            No one is asked.
   tier 2 (owner-session investigates)    — stray content, or a stale unmerged branch, whose candidate owner
                                             (derived from --worktree-root) reads as a LIVE session.
   tier 3 (researcher residual)          — everything flagged that isn't tier 1 and has no live owner to ask,
@@ -292,43 +295,69 @@ def content_identical_fact(repo, path, head, default_ref):
        specific files genuinely differ, which is a real answer, not a failed check — this is what keeps an
        otherwise-clean-but-genuinely-unmerged branch (real content of its own, not reflected on the default
        branch under any commit) correctly OUT of this alternative, the same as before this feature existed.
-    2. **Working-tree residue on top of that** (untracked files, and uncommitted edits to tracked files —
-       git diff's tree comparison above never sees these) — compared file-by-file against `default_ref`.
-       None (UNKNOWN) on ANY failure to complete one of these comparisons: the local file can't be read, or
-       `git show <default_ref>:<path>` errors for ANY reason, including the path simply not existing at
-       `default_ref` at all. That last case reads as UNKNOWN rather than a confirmed "different" on purpose
-       (scope note, automated-researcher#533): a per-file compare failure fails this fact closed exactly
-       like every other fact in this script, rather than the script guessing which kind of failure it saw.
+    2. **Working-tree residue on top of that** — `residue_identical_fact` below.
 
-       A path carrying a STAGED ADD/MODIFY (index status other than ' '/'?'/'D') is checked TWICE — the
-       index blob AND the working-tree file, each independently against `default_ref` (round-2 Codex review,
-       automated-researcher#537): a status like `MM` (staged AND further unstaged-modified) means the index
-       holds content the working-tree read alone never sees, so a worktree can have its working-tree file
-       coincidentally byte-identical to `default_ref` while the staged blob holds unique content that exists
-       nowhere else — exactly what a bare working-tree-only comparison would wave through and then lose. A
-       staged DELETION ('D' as the index status) is excluded from this extra check: it has no index blob to
-       read at all (`git show :<path>` fails against a path the index no longer has), and removing a
-       tracked path from the index never withholds unique content the way an add/modify can — the working-
-       tree read below (or step 1's committed-tree diff, for a path the disk copy also lacks) already covers
-       whatever's actually still present.
-
-       Identity requires byte-identical AND MODE-identical content (100644/100755/120000) — not bytes alone
-       (senior-engineer round, automated-researcher#537): an uncommitted `chmod +x` on a tracked file is
-       byte-identical to `default_ref` but a distinct mode, and a forced reap riding a byte-only "identical"
-       verdict would silently discard that mode change. A symlink is compared by its LINK TARGET, never by
-       reading through it — the previous plain `open()` read followed a symlink to its target's content,
-       which could coincidentally byte-match `default_ref`'s copy of a REGULAR file at that path while the
-       symlink itself (a wholly different, unique thing) got waved through as "identical" and lost on reap.
-       Any other on-disk type at a residue path (fifo, socket, device — `git status` never lists these, so
-       only a directory-vs-file mismatch should reach this branch in practice) fails the fact closed, same
-       as every other unreadable case here.
+    THIS WHOLE-TREE ENTRY POINT IS FOR `merged is False` ONLY (automated-researcher#804). For a worktree
+    that ancestry has already proven merged, step 1 answers False for a reason that has nothing to do with
+    safety: the two-tree diff lists every file the default branch changed SINCE this worktree's HEAD, which
+    for a worktree whose PR landed weeks ago is most of the repo. `process_entry` therefore calls
+    `residue_identical_fact` directly in that case — see its docstring.
     """
     rc, out, _ = run_git(["diff", "--name-only", default_ref, head], cwd=repo)
     if rc != 0:
         return None
     if out.strip():
         return False  # confirmed: this branch carries tracked content the default branch doesn't have
+    return residue_identical_fact(repo, path, default_ref)
 
+
+def residue_identical_fact(repo, path, default_ref):
+    """Is every DIRTY/UNTRACKED path in this worktree byte-and-mode-identical to `default_ref`'s copy?
+    True / False (confirmed different) / None (UNKNOWN — a comparison could not be completed).
+
+    Untracked files and uncommitted edits to tracked files are exactly what a tree-vs-tree `git diff` never
+    sees, so they are compared file-by-file. Two callers, one meaning ("this residue carries no content the
+    default branch doesn't already have"):
+
+    - `content_identical_fact` (merged is False, automated-researcher#533) runs it as its second pass,
+      after the committed tree itself has been shown identical.
+    - `process_entry` runs it DIRECTLY for a MERGED worktree carrying residue (automated-researcher#804).
+      Ancestry already proves every committed byte lives on the default branch, so the residue on top is
+      the only thing a reap could lose. This is the case that made the 2026-08-31 instance sweep classify
+      22/22 worktrees as tier 3 with ZERO in tier 1: `log-experiment` lands `registry/<exp>/` from its own
+      branch, which leaves the executor worktree's identical copy UNTRACKED, so every merged executor
+      worktree read "dirty" forever — 4 of 7 checked by hand carried nothing but byte-identical duplicates
+      of `origin/main`, and the disk refilled 77%->92% in a day behind that.
+
+    None (UNKNOWN) on ANY failure to complete one of these comparisons: the local file can't be read, or
+    `git show <default_ref>:<path>` errors for ANY reason, including the path simply not existing at
+    `default_ref` at all. That last case reads as UNKNOWN rather than a confirmed "different" on purpose
+    (scope note, automated-researcher#533): a per-file compare failure fails this fact closed exactly
+    like every other fact in this script, rather than the script guessing which kind of failure it saw.
+
+    A path carrying a STAGED ADD/MODIFY (index status other than ' '/'?'/'D') is checked TWICE — the
+    index blob AND the working-tree file, each independently against `default_ref` (round-2 Codex review,
+    automated-researcher#537): a status like `MM` (staged AND further unstaged-modified) means the index
+    holds content the working-tree read alone never sees, so a worktree can have its working-tree file
+    coincidentally byte-identical to `default_ref` while the staged blob holds unique content that exists
+    nowhere else — exactly what a bare working-tree-only comparison would wave through and then lose. A
+    staged DELETION ('D' as the index status) is excluded from this extra check: it has no index blob to
+    read at all (`git show :<path>` fails against a path the index no longer has), and removing a
+    tracked path from the index never withholds unique content the way an add/modify can — the working-
+    tree read below (or, for the merged/squash-equivalent committed tree, the caller's own tree comparison)
+    already covers whatever's actually still present.
+
+    Identity requires byte-identical AND MODE-identical content (100644/100755/120000) — not bytes alone
+    (senior-engineer round, automated-researcher#537): an uncommitted `chmod +x` on a tracked file is
+    byte-identical to `default_ref` but a distinct mode, and a forced reap riding a byte-only "identical"
+    verdict would silently discard that mode change. A symlink is compared by its LINK TARGET, never by
+    reading through it — the previous plain `open()` read followed a symlink to its target's content,
+    which could coincidentally byte-match `default_ref`'s copy of a REGULAR file at that path while the
+    symlink itself (a wholly different, unique thing) got waved through as "identical" and lost on reap.
+    Any other on-disk type at a residue path (fifo, socket, device — `git status` never lists these, so
+    only a directory-vs-file mismatch should reach this branch in practice) fails the fact closed, same
+    as every other unreadable case here.
+    """
     entries, ok = dirty_untracked_entries(path)
     if not ok:
         return None
@@ -519,13 +548,14 @@ def inspect_action(path):
 
 def remove_action(repo, path, branch, default_branch, force=False):
     """`force` must be set whenever this tier-1 classification relied on the content-identity bar
-    (`squash_safe`) rather than git's own clean bar (Codex review, automated-researcher#537 round 1): git
+    (`identity_safe` — the squash-merge whole-tree bar, or #804's merged-plus-identical-residue bar)
+    rather than git's own clean bar (Codex review, automated-researcher#537 round 1): git
     unconditionally refuses a bare `worktree remove` on a working tree carrying ANY modified-tracked or
     untracked file, regardless of whether that content is byte-identical to the default branch — exactly
     the "matching residue" case this PR's own SKILL.md documents as needing `--force`/manual removal. A
     worktree that's genuinely git-clean doesn't need `--force`, but passing it there too is harmless (git
     still checks history/attachedness first; `--force` only lifts the dirty/untracked refusal), so callers
-    pass `force=squash_safe` unconditionally rather than re-deriving "was this actually dirty" themselves."""
+    pass `force=identity_safe` unconditionally rather than re-deriving "was this actually dirty" themselves."""
     cmds = [gitcmd("-C", repo, "worktree", "remove", *(["--force"] if force else []), path)]
     # NEVER suggest (or later execute) deleting the ref matching the configured default branch name
     # (round-3 code-review Finding 2): a linked worktree can legitimately be checked out ON the default
@@ -893,14 +923,33 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     age_days = age_days_fact(path, now_ts)
     has_submodule = submodule_fact(path)
 
-    # content-identity: the squash-merge-aware ALTERNATIVE to `merged` (automated-researcher#533) — only
-    # worth computing when `merged` is a CONFIRMED False (a real ancestry check ran and failed); `merged is
-    # None` is a different, unrelated failure (unresolvable ref/object) already routed to UNKNOWN below.
+    # content-identity: byte-identity as an alternative to git's own merged/clean bars. WHICH check applies
+    # depends on `merged`, and the difference is load-bearing:
+    #   merged is False (automated-researcher#533) — the whole tree is compared (committed tree vs
+    #     default_ref, PLUS the residue on top): ancestry established nothing, so nothing may be assumed
+    #     about the commits either.
+    #   merged is True WITH residue (automated-researcher#804) — only the residue is compared. Ancestry
+    #     already proves every committed byte lives on the default branch, and running the whole-tree check
+    #     here would answer False for the wrong reason: its two-tree diff lists everything the default
+    #     branch changed SINCE this worktree's HEAD, so a merged-but-behind worktree (the normal state of a
+    #     worktree whose PR landed weeks ago) could never pass it. That gap is why the 2026-08-31 sweep put
+    #     22/22 worktrees in tier 3 with zero in tier 1 while 4 of them held nothing but byte-identical
+    #     duplicates of `origin/main`.
+    #   merged is None — a different, unrelated failure (unresolvable ref/object) already routed to UNKNOWN
+    #     below; no identity check is attempted for it.
     content_identical = None
-    if merged is False and default_ref is not None and head:
-        content_identical = content_identical_fact(repo, path, head, default_ref)
-    squash_safe = content_identical is True
+    if default_ref is not None and head:
+        if merged is False:
+            content_identical = content_identical_fact(repo, path, head, default_ref)
+        elif merged is True and (dirty or (untracked or 0) > 0):
+            content_identical = residue_identical_fact(repo, path, default_ref)
+    identity_safe = content_identical is True
 
+    # A failed identity comparison on a MERGED worktree is deliberately NOT folded into `unknown`: that
+    # worktree is reported either way (residue keeps it out of tier 1 exactly as before #804), and folding
+    # it in would REPLACE a precise reason ("dirty; 3 untracked") with a generic "inspection needed". For
+    # `merged is False` the fact is load-bearing in the other direction — it is the only thing standing
+    # between the worktree and tier 1 — so an UNKNOWN there still poisons the whole entry, as before.
     unknown = (dirty is None or untracked is None or ignored is None or merged is None or age_days is None
                or has_submodule is None or (merged is False and content_identical is None))
 
@@ -915,12 +964,12 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         return
 
     is_old = age_days >= args.min_age_days
-    merge_ok = bool(merged) or squash_safe
-    # clean_ok folds in the content-identity alternative: when squash_safe holds, every dirty/untracked
+    merge_ok = bool(merged) or identity_safe
+    # clean_ok folds in the content-identity alternative: when identity_safe holds, every dirty/untracked
     # file this worktree carries is confirmed byte-identical to the default branch already, so the
     # classic "not dirty and zero untracked" bar isn't the only way to be clean — nothing is lost by
     # reaping regardless (the worktree's branch ref survives `git branch -d`'s no-op the same as always).
-    clean_ok = (not dirty and untracked == 0) or squash_safe
+    clean_ok = (not dirty and untracked == 0) or identity_safe
     # ignored == 0 is part of the tier-1 bar, NOT of stray_or_stale (code-review Finding 1): ignored
     # build-artifact clutter (node_modules, __pycache__, a venv) is common and harmless to leave alone,
     # so it doesn't need to nag a live tier2/3 report every week — but it DOES need to block automatic
@@ -933,18 +982,25 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # skipped) for a human to remove manually or with --force.
     det_safe = merge_ok and clean_ok and ignored == 0 and is_old and not has_submodule
     submodule_blocks_reap = merge_ok and clean_ok and ignored == 0 and is_old and has_submodule
-    stray_or_stale = ((dirty or untracked > 0) and not squash_safe) or (not merge_ok and is_old) or submodule_blocks_reap
+    stray_or_stale = ((dirty or untracked > 0) and not identity_safe) or (not merge_ok and is_old) or submodule_blocks_reap
 
     if not (det_safe or stray_or_stale):
         return  # in-progress (unmerged+fresh), just-merged-and-fresh, or merged+clean+old-but-ignored-content
 
-    clean_old_phrase = (f"merged, clean, {age_days}d old" if merged else
-                        f"clean (all residue already on {args.default_branch} — squash-merge equivalent), "
-                        f"{age_days}d old")
+    if merged and not identity_safe:
+        clean_old_phrase = f"merged, clean, {age_days}d old"
+    elif merged:
+        # automated-researcher#804: merged by ancestry, and every dirty/untracked path on top of it is
+        # byte-and-mode-identical to the default branch's own copy — a pure duplicate, nothing unique here.
+        clean_old_phrase = (f"merged, residue identical to {args.default_branch} "
+                            f"(every dirty/untracked path is a byte-identical duplicate), {age_days}d old")
+    else:
+        clean_old_phrase = (f"clean (all residue already on {args.default_branch} — squash-merge equivalent), "
+                            f"{age_days}d old")
 
     if det_safe and liveness == "not_live":
         entry = dict(base, tier=1, reason=f"{clean_old_phrase} — safe to reap",
-                     action=remove_action(repo, path, branch, args.default_branch, force=squash_safe))
+                     action=remove_action(repo, path, branch, args.default_branch, force=identity_safe))
         results["tier1"].append(entry)
         reap_plan.append(dict(entry, kind="remove", owner=owner, merged=merged, dirty=dirty,
                                untracked=untracked, ignored=ignored, age_days=age_days, head=head))
@@ -958,9 +1014,9 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
                       "this sweep — treated conservatively, not reaped")
     else:
         bits = []
-        if dirty and not squash_safe:
+        if dirty and not identity_safe:
             bits.append("dirty")
-        if untracked and not squash_safe:
+        if untracked and not identity_safe:
             bits.append(f"{untracked} untracked")
         if not merge_ok and is_old:
             bits.append(f"unmerged, {age_days}d old, no one continuing it")
@@ -1067,16 +1123,24 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
         # between classification and this reap. Re-verify both, independently.
         default_ref_now = resolve_default_ref(repo, default_branch)
         merged_now = merged_fact(repo, head_now, default_ref_now) if head_now else None
-        # Re-check the squash-merge content-identity alternative too, same as classification (process_entry)
-        # — a squash-merge branch's `merged_now` is a confirmed False forever, so gating solely on
-        # `merged_now is True` would make every content-identity-qualified tier-1 item SKIP here
-        # unconditionally, defeating the whole point of the alternative bar at the one moment it matters.
+        # Re-check content-identity too, same as classification (process_entry) and with the same
+        # merged-dependent split of which check applies:
+        #   - a squash-merge branch's `merged_now` is a confirmed False forever, so gating solely on
+        #     `merged_now is True` would make every content-identity-qualified tier-1 item SKIP here
+        #     unconditionally, defeating the whole point of the alternative bar at the one moment it matters.
+        #   - a MERGED item that qualified on residue-identity (automated-researcher#804) is dirty by
+        #     definition, so `clean_ok_now` can only hold via the residue check — running the whole-tree
+        #     check for it instead would answer False (see content_identical_fact) and skip every one of
+        #     them, which is the same defect one case over.
         content_identical_now = None
-        if merged_now is False and default_ref_now is not None and head_now:
-            content_identical_now = content_identical_fact(repo, path, head_now, default_ref_now)
-        squash_safe_now = content_identical_now is True
-        merge_ok_now = bool(merged_now) or squash_safe_now
-        clean_ok_now = (dirty is False and untracked == 0) or squash_safe_now
+        if default_ref_now is not None and head_now:
+            if merged_now is False:
+                content_identical_now = content_identical_fact(repo, path, head_now, default_ref_now)
+            elif merged_now is True and (dirty or (untracked or 0) > 0):
+                content_identical_now = residue_identical_fact(repo, path, default_ref_now)
+        identity_safe_now = content_identical_now is True
+        merge_ok_now = bool(merged_now) or identity_safe_now
+        clean_ok_now = (dirty is False and untracked == 0) or identity_safe_now
         still_safe = (clean_ok_now and ignored == 0 and head_unchanged and merge_ok_now
                       and has_submodule_now is False)
         if not still_safe:
@@ -1091,7 +1155,7 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
         # clean bar (Codex review, automated-researcher#537 round 1): a bare `worktree remove` unconditionally
         # refuses a working tree carrying modified-tracked/untracked content, even when that content is
         # byte-identical to the default branch — harmless to pass when the tree is also genuinely clean.
-        rc, _, err = run_git(["worktree", "remove"] + (["--force"] if squash_safe_now else []) + [path], cwd=repo)
+        rc, _, err = run_git(["worktree", "remove"] + (["--force"] if identity_safe_now else []) + [path], cwd=repo)
         if rc != 0:
             log(f"REMOVE FAILED: path={path}: {err.strip()}")
             fails += 1

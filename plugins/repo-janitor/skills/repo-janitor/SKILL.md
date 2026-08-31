@@ -87,8 +87,23 @@ genuinely initialized submodule at such a path and silently let it through a for
    status like `MM` (staged, then further modified unstaged) means the working-tree file can coincidentally
    match the default branch while the staged blob still holds unique content (and its own mode) that exists
    nowhere else; checking the working tree alone would miss that and reap it anyway. A staged deletion needs
-   no such check (there's no index blob left to compare). **The reap itself
-   passes `--force`** whenever this bar (rather than plain
+   no such check (there's no index blob left to compare).
+   **A MERGED worktree qualifies on its RESIDUE ALONE** (automated-researcher#804): ancestry has already
+   proven every committed byte lives on the default branch, so the dirty/untracked residue on top is the
+   only thing a reap could lose — if every one of those paths is byte-and-mode-identical to `default_ref`'s
+   own copy (compared exactly as above, staged blobs, modes, and symlink targets included), the worktree is
+   tier 1 with the reason "residue identical to `<default-branch>`". The content-identity bar above cannot
+   serve this case: its committed-tree diff lists every file the default branch changed *since* this
+   worktree's HEAD, so a merged-but-**behind** worktree — the normal state of one whose PR landed weeks ago
+   — can never pass it. That gap is what made a 2026-08-31 instance sweep classify 22/22 worktrees as tier 3
+   with zero in tier 1 while 4 of 7 hand-checked ones carried nothing but duplicates of `origin/main`:
+   `log-experiment` lands `registry/<exp>/` from its own branch, which leaves the executor worktree's
+   identical copy *untracked* forever, and the disk refilled 77%→92% in a day behind that. Residue that
+   DIFFERS from the default branch, or that sits at a path the default branch doesn't carry at all (an
+   UNKNOWN comparison, never a guessed "same"), keeps the worktree out of tier 1 exactly as before —
+   reported with its own precise dirty/untracked reason rather than a generic "inspection needed", and
+   never deleted. **The reap itself
+   passes `--force`** whenever either identity bar (rather than plain
    mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
    to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
    unconditionally refuses, regardless of whether that content is a byte-for-byte match — `--force` is
@@ -258,17 +273,38 @@ This plugin owns the classification + report format only. An instance wires:
 - **Message delivery** — turning `--json`'s tier-2/tier-3 entries into an actual fleet message per owner /
   to the researcher. Delivery is fire-and-forget: no waiting on responses, no tracking, no timeouts, no
   aggregation. Whatever isn't resolved just reappears next sweep.
-- **The schedule** — the weekly timer (or on-demand invocation) that runs the sweep. **Never pass
+- **The schedule** — the timer (or on-demand invocation) that runs the sweep. **Never pass
   `--reap-tier1` from the standing timer** unless the researcher has explicitly, separately decided to
   blanket-approve the deterministic bucket for that instance (automated-researcher#792 is that decision on
-  the instance it was filed from; it is not inherited by any other deployment).
+  the instance it was filed from; it is not inherited by any other deployment). **An unscheduled sweep is
+  no sweep at all** (automated-researcher#804): on the instance that opted in, nothing ran the sweep for
+  the first day after the reaper landed and merged worktrees only went away when someone remembered — while
+  ~10 new worktrees/day at ~2.2G of `registry/` each put on 18–22G/day. Wire it as a **daily** cron (the
+  worktree bucket refills daily; the weekly cadence in this skill's own description is the report-only
+  default, not the opted-in reaping one), with the sweep's own output going to a log a human can read
+  afterwards — the `## Reaped` section is the record of what it deleted:
+
+  ```cron
+  # daily worktree/scratch sweep. ONE line — crontab has no line continuation. Every angle-bracketed value
+  # is an INSTANCE value (checkout path, research repo, temp-dir layout, uid in a path, log path): fill in
+  # your own, and see "Non-git scratch" above for what a --scratch-glob may safely look like.
+  17 4 * * * python3 <checkout>/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep.py --repo <research repo> --fetch --reap-tier1 --scratch-glob '<absolute glob of repro dirs>' --scratch-glob '<absolute glob of per-session scratch>' >> <log path> 2>&1
+  ```
+
+  The default 7-day `--min-age-days` bar still applies (a daily sweep does not shorten it — it only means
+  an entry is reaped the day after it crosses the bar instead of up to a week later), and `--fetch` is what
+  keeps the mergedness/identity comparisons against a live `origin/<default-branch>` rather than whatever
+  the box last fetched. Roll the timer out with `--dry-run` for a cycle first, per the reap section above.
 
 ## Smoke
 
 `scripts/worktree_sweep_smoke.sh` — builds real local git fixtures (no network) covering every tier, the
 live-owner tier-1 veto, fail-closed UNKNOWN handling, the silent cases, `--fetch` freshness, `--reap-tier1`
 with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored content never reaching tier
-1 (with a `status.showUntrackedFiles=no` config bypass attempt), the default branch's ref surviving a reap
+1 (with a `status.showUntrackedFiles=no` config bypass attempt), the merged+identical-residue tier-1 bar
+(automated-researcher#804 — a merged-but-behind worktree whose untracked residue duplicates the default
+branch reaches tier 1 and is really removed, while residue that differs from it or sits at a path it lacks
+stays reported and survives a real `--reap-tier1`), the default branch's ref surviving a reap
 of a linked worktree checked out on it, a locked (un-removable) tier-1 worktree failing without blocking
 other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass, a
 fail-closed novel-content case, a chmod-only mode-mismatch case, and an untracked-symlink mode-mismatch
