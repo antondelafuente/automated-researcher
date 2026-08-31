@@ -68,7 +68,8 @@ assistant (which stops to check in at natural boundaries) — it is an **autonom
   *answer* it under the two-check rule (does the answer stay inside the already-cleared cost envelope, and does it
   leave unchanged what is being measured?), forwarding only what fails one of those checks. So route up and keep
   working — you flag, you do not rule, and you do not address the researcher over the designer's head. (The
-  designer's side of this is `design-experiment`'s designer-of-record duties.)
+  designer's side of this is `launch-experiment`'s designer-of-record duties — held by the session that
+  launched you, which is not always the session that designed the brief.)
 - **That routing governs EVERY escalation you meet, however the individual line is worded.** Wherever anything you
   work from — this skill, `START.md`, `CHECKLIST.md`, a driver comment, an instance recipe — tells you to notify
   someone, gate on someone, or wait for clearance before proceeding, the recipient is the **designer-of-record**; the

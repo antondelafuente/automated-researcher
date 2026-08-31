@@ -1,17 +1,19 @@
 ---
 name: design-experiment
 description: >-
-  Design a GPU experiment as a DATA-COLLECTION spec WITH the researcher, then dispatch it
-  to a fresh-context executor. The "together" stage: propose with taste + a
+  Design a GPU experiment as a DATA-COLLECTION spec WITH the researcher, then land it as a merged
+  design-stage record and hand it to `launch-experiment`. The "together" stage: propose with taste + a
   recommendation, surface the load-bearing choices, write the DESIGN.md
   data-collection spec (purpose — what the data is designed to inform; arms; the canonical
   metric + exact eval definitions; comparability; cost — but NOT a pre-registered verdict), run the
   pre-launch gates (verify-claim on the FACTS + cross-family design-audit on the
   DATA-TRUSTABILITY), iterate till the researcher clears it, write the thin START.md executor
-  brief + CHECKLIST.md gates, and dispatch a fresh-context executor to run it. Use
-  when starting to design / scope / propose an experiment ("let's design X",
-  "propose an experiment for Y"), BEFORE it runs. The layer ABOVE run-experiment —
-  that skill EXECUTES the locked brief this one produces.
+  brief + CHECKLIST.md gates, and land the design-stage PR. Its LAST step is a question, not an
+  action: launch from this session (invoke `launch-experiment`) or hand the launch off to a session
+  that holds the supervision machinery — the launching session, whichever it is, becomes
+  designer-of-record. Use when starting to design / scope / propose an experiment ("let's design X",
+  "propose an experiment for Y"), BEFORE it runs. The layer ABOVE `launch-experiment` +
+  run-experiment — those skills START and EXECUTE the locked brief this one produces.
 ---
 
 # Designing an experiment (the "together" stage)
@@ -23,13 +25,18 @@ fresh-context executor that runs to completion). The **seam is `DESIGN.md` + `ST
 produces them; the executor consumes them.
 
 You are the **design-side agent**, working with the researcher (the human who holds design clearance). Design produces a
-*locked brief*; you do not run the experiment in this thread (the default) — you dispatch it (Step 4).
+*locked brief*; you do not run the experiment in this thread (the default) — it is launched, from this session or another,
+by **`launch-experiment`** (Step 4).
 
 > **Companion skills this one composes** (declare these as dependencies of your install):
 > - **`verify-claims`** — supplies the pre-launch gates (`verify_claim` on facts, `audit_experiment --design` on data-trustability,
 >   `--data` on data). **Invoke the verify-claims skill; let it resolve its own scripts** — never hardcode a path to
 >   another plugin's scripts (installs are version-pinned; the companion skill is the stable interface).
-> - **`run-experiment`** — the execute half that the dispatched executor loads.
+> - **`launch-experiment`** — the launch half: it takes the MERGED design-stage record and starts the executor
+>   (fail-closed preconditions, the run worktree, the designer-of-record bind, the instance-resolved launcher +
+>   executor model pin, kickoff verification, supervision arming). Invoke it in this session to launch here, or
+>   name it in the one-line handoff (Step 4).
+> - **`run-experiment`** — the execute half that the launched executor loads.
 > - **`log-experiment`** — logs the design-stage pre-registration (Step 4, below) as a gated PR before
 >   dispatch, and later logs the finished result at close; invoke it rather than hand-rolling the PR.
 
@@ -388,10 +395,12 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
 - **Don't-redesign:** the design is locked; execute per `DESIGN.md`; collect + report the data it specifies (no verdict).
 - **Exact input paths + scripts to adapt**, with filename caveats (a filename can lie about its contents — verify by
   content, not name). Point at battle-tested worked-example drivers; don't make the executor write from scratch.
-- **Use the `run-experiment` skill** for the loop + gates. **Cost ceiling** + who the **designer-of-record** is (so the
-  executor can route design-intent questions back to you) — and, in the template's designer-of-record section,
-  your **harness session name** as the executor's push address, generated per the "Designer address" rule in
-  Step 4, never a hand-written fleet/tmux name.
+- **Use the `run-experiment` skill** for the loop + gates. **Cost ceiling** + the **designer-of-record** section (how the
+  executor routes design-intent questions back to whoever holds the run). **Leave that section's
+  `<designer_session>` placeholder alone at design time** — the address is the *launching* session's harness
+  session name, which may not be this session, and `launch-experiment` writes it mechanically at launch
+  (`launch_record.sh bind-designer`). A hand-written name here is the failure this split closes off: never a
+  fleet/tmux name, and never a name you assumed.
 - **The resume contract (so a model-free supervisor can relaunch a dead run):** the `START` template's
   resilience wording tells the executor to checkpoint run state to disk (pod ids, what's collected, decision
   rules — not only the conversation), keep a standing `TEMP.md` successor handoff current, and write a
@@ -449,81 +458,14 @@ must resolve **with evidence**, ticked in place (it becomes both protocol and re
   **always, all three surfaces, both layers, no N.A.** (the eval rollouts are audited every run; generated fresh, never
   frozen).
 
-## Step 4 — Dispatch the locked brief to a fresh-context executor (the default)
+## Step 4 — Land the design-stage PR, then: launch here, or hand off?
 
-Do NOT run the locked design in this designing thread. **Dispatch the brief to a fresh-context execution substrate.**
-The contract is substrate-neutral:
+Do NOT run the locked design in this designing thread. It goes to a **fresh-context executor** — but
+*starting* one is its own step, owned by its own skill (**`launch-experiment`**), because **the designing
+session is not always the launching session**. Design owns the science and the Presentation lock; launch owns
+the executor, the designer-of-record address, and the supervision.
 
-> **`dispatch(DESIGN.md, START.md, CHECKLIST.md) → a fresh-context executor that reads ONLY the brief + scaffold, runs
-> the `run-experiment` skill, and reports artifacts/results.`**
-
-The executor MUST start with **fresh context** (no memory of this design conversation) — that property is the whole
-point. *How* you spawn it is the instance's implementation of the contract:
-- **Autonomous detached run requirement:** the executor substrate must be able to arm its **own independent recurring
-  self-wake** and record the waker/backstop id in `CHECKLIST.md`. A controller-held wake, or a monitor used after the
-  executor parks, does not satisfy the autonomous detached-run contract. A blocking watcher that keeps the executor turn
-  alive is controller-supervised, not autonomous detached; pair it with the idle-cost teardown backstop if compute bills.
-- **Claude Code:** a fresh zero-context session in its own dedicated working dir (a launcher script + the session-manager skill).
-  A tool-spawned Agent subagent is fine for short controller-supervised probes, but not as the autonomous detached
-  executor: it cannot arm the independent recurring wake this contract requires.
-- **Codex:** a fresh, zero-context Codex thread by default — same-family, never a silent fallback to a different
-  family (an explicit operator override is fine; a quiet substitution is not). Record `--executor-family codex` and
-  the capability-detected `--supervision-mode` (`autonomous-detached` if the host actually exposes an independent
-  scheduled wake, else the honest `controller-supervised`) on the run-supervision record at dispatch. A blocking
-  watcher is the controller-supervised implementation today (Codex has no periodic-reinvocation primitive yet): it
-  keeps the executor turn alive and, with an idle-teardown backstop for billable compute, satisfies this dispatch
-  contract without claiming autonomous-detached status — but it must re-verify its own held handle on every wake, not
-  just trust a long wait blindly (the stale-`exec_command`-handle incident this closes). **Capability-detect the
-  coordination surface — do not assume the visible top-level thread wrappers exist** (automated-researcher#637):
-  a session may expose `create_thread`/`wait_threads`, or only the native multi-agent primitives (a
-  `spawn_agent`-shaped child task with a nickname). Either satisfies this contract as long as the child starts
-  zero-context on the brief; a missing wrapper is **not** a blocked dispatch and never a reason to fall back to
-  a different family or to run the design here. **Announce the executor the moment the dispatch call returns
-  a handle** — before verifying anything, before any wait: the handle/nickname it returned and where to
-  inspect it ("Executor **Erdos** is running; open **Subagents** to inspect or chat with it"), bound as the
-  record's `--session-handle` so it outlives the turn. An app-visible child is a first-class executor surface
-  the researcher may read or chat with directly, while supervision and integration stay yours; keep it around
-  through human review rather than closing it at DONE. **Separately — a successful dispatch call alone does
-  NOT make dispatch complete** (automated-researcher#628): before falling into the healthy zero-turn wait loop
-  below, run `run_supervision_record.sh verify-bootstrap <run-id> --executor-family codex
-  --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
-  --terminal-route <expected route> --designer-session <your harness session name, or record-only>`
-  and treat a non-zero exit (missing record, a mismatched field, or a timeout)
-  as `needs-attention`, not a normal wait — reported against the executor you already named. That poll is
-  bounded but can run to its full default 300s or fail, so it must never be what the announcement waits on.
-  See **`run-experiment`'s `references/CODEX_SUPERVISION.md`** for the full contract: same-family default,
-  the supervision-bootstrap receipt (§2), the durable question/answer inbox,
-  the hardened wait pattern, and the coordination-surface/visibility contract (§7).
-- **Other substrates:** a CI job, a remote worker, or a hosted queue that reads the brief.
-
-**Designer address — resolve YOUR OWN harness session name; never assume one (automated-researcher#796).** The
-executor needs a *stable address* for you, not a description of you. Look your own up through the harness's own
-self-identity listing (Claude Code: the name `ListAgents` shows for this session — the same name `SendMessage
-<name>` delivers into), exactly as the peer-coordination rule requires everywhere else: **never** a fleet-shaped
-guess (`claude-1..4`) and never the tmux session name. A tmux name is not a session under a Remote Control host
-(`claude rc … --spawn worktree`): it is a HOST fronting many spawned zero-context sessions. Real incident
-(2026-08-30, `depv1-negemo-qwen-chat-carrier-emotion-1`): the brief named the tmux session `claude-rc` as
-designer-of-record, the executor's DESIGN-budget notify was keyed into that name, an RC-spawned sibling with no
-run context received it, ruled as designer-of-record and consumed the question — the session actually
-supervising the run found the inbox already cleared. Two designers-of-record by construction; same ruling both
-times only by luck. So at dispatch:
-1. **Write that name into `START.md`'s designer-of-record section** (the template generates the line from it) —
-   it is the executor's `--designer-session` bind, and the *seed only*: once bound, **the record is the address
-   of record**, and the brief's copy is never reissued.
-2. **Verify it landed on the record** rather than trusting the brief: `--designer-session <your harness session
-   name>` is a required argument of `verify-bootstrap` below, matched EXACTLY against what the executor bound.
-3. **No addressable session on this substrate?** Say so on the record — the reserved literal `record-only` —
-   and own the polling: with no push, `has-question` on your heartbeat cadence is the only thing that surfaces
-   a question. Never substitute a `send-keys`-to-a-tmux-name push for the address you don't have.
-4. **If the designer role moves mid-run** (you hand off, or you are relaunched under a new name), re-bind it —
-   `run_supervision_record.sh checkpoint <run-id> --designer-session <new name>` — before the executor's next
-   question, or its notify goes to a session that no longer holds the run. That one write is the WHOLE handoff:
-   the executor is told to resolve the address off the record (`designer-session <run-id>`) immediately before
-   every notify, precisely so a rebind takes effect without reissuing the brief — which is also why the stale
-   `START.md` line is harmless, and why **re-binding is not optional**: a successor that leaves the old name
-   bound is addressable only at the session that just left the run.
-
-Why fresh-context dispatch is the default:
+Why a fresh-context executor is the default:
 - **It tests the brief's self-sufficiency on every real run** — the product's core promise ("hand an agent a brief, it
   runs the experiment"). A designer-executes flow never tests that.
 - **It separates designer-bias from execution** (same logic as the cross-family audit): the designing agent fills gaps
@@ -532,7 +474,7 @@ Why fresh-context dispatch is the default:
 - **It kills implicit-context fragility** (recycles, model-fallbacks, long threads lose warm context) and decouples
   heavy design from delegatable, fan-out execution.
 
-**Land the design-stage PR FIRST — MANDATORY for pre-registered experiments (the dispatch gate).** The design-audit
+**Land the design-stage PR FIRST — MANDATORY for pre-registered experiments (the launch gate).** The design-audit
 (Step 2) is the *scientific* gate: a cross-family review of the design's DATA-TRUSTABILITY. Landing it is a *separate,
 GitHub* step — the **design leg of the two-PR flow** (design merge before execution; closeout merge after results). Once
 the researcher has cleared the design, run the **`log-experiment`** skill on the experiment dir
@@ -540,192 +482,59 @@ the researcher has cleared the design, run the **`log-experiment`** skill on the
 **design-stage**, gates on the design-audit + the Presentation lock (the `## Presentation (locked with the researcher
 <ISO date>)` header from Step 1 above) + a deterministic secret scan, posts that audit as the PR review record, gets
 opposite-family bot approval, and merges. It **reuses the already-run design-audit as its review record — it does NOT
-re-run the science.** **Do NOT dispatch the executor until this design-stage PR is merged.** This gate is
+re-run the science.** **Nothing is launched until this design-stage PR is merged** — `launch-experiment`'s own
+preflight refuses an unmerged record, so an unlanded design cannot be launched by either route below. This gate is
 substrate-neutral: it holds whether the executor is Claude, Codex, or any other substrate — there is no separate
 per-family wrapper, so a Codex-family design agent reads this same instruction. A design-side agent that has cleared the
 design-audit but not landed + merged the design-stage PR is **not done**. (Genuinely exploratory, designer-driven work
-that is never dispatched — see the last paragraph — has no pre-registration to land; this gate is the pre-registered /
-dispatch path, matching `run-experiment`'s existing close-stage `log-experiment` requirement.)
+that is never launched — see the last paragraph — has no pre-registration to land; this gate is the pre-registered /
+launch path, matching `run-experiment`'s existing close-stage `log-experiment` requirement.)
 
-**The kickoff (only after the design-stage PR is merged):** point the executor at `START.md` with the
-run-to-completion + arm-self-wake-first directive. Do NOT ask it to "report your first status lines and stop" — that
-invites a park after planning (a real failure mode). The executor's first action is to arm its own heartbeat/self-wake;
-then run to completion.
+**Then your last step is a QUESTION, not an action** (automated-researcher#813 — the RGBH1 2026-08-31 seam
+failure: this step used to say "dispatch it", so a session that was never going to launch still read
+launch-side instructions, and the session that actually launched had none):
 
-**A send is not a submit — mechanically verify the kickoff SUBMITTED before you call dispatch done
-(automated-researcher#659).** Dispatch is complete when the executor is *consuming tokens*, not when the send
-call returned. Real incident (2026-08-02, `depv1-negemo-dose-response-1`): a tmux `send-keys <prompt> Enter`
-kickoff raced the fresh executor session's own startup prompts, the Enter was consumed by one of them, the
-kickoff sat **unsent in the input box**, and the executor idled at 0 tokens for ~15 minutes — caught by the
-researcher, not by machinery. So after sending, capture the pane (e.g. `tmux capture-pane -t run-<exp> -p`) and
-**classify what is on screen before you touch the keyboard again** — the remedy depends on the state, and
-firing the wrong keystroke at the wrong state is how this incident happened in the first place:
+> **Design-stage PR merged. Launch from this session, or hand off?**
 
-1. **A startup / permission / choice prompt is up** (trust-this-folder, a model or theme picker, a tool
-   permission ask — anything with a highlighted default). **Answer it deliberately**: read what it asks and
-   send the answer this dispatch actually requires. Do NOT fire a blind Enter at it — Enter here *selects
-   whatever default is highlighted* rather than submitting anything, which is precisely the keystroke-eating
-   modal that swallowed the original kickoff. Then re-capture and classify again.
-2. **No modal, but the kickoff is still pending in the composer** — the multi-line kickoff still sitting above
-   the input separator. **Send a bare Enter.** It is the right remedy *in this state specifically*: the
-   composer has focus with nothing modal in front of it, so Enter submits what is already typed and nothing
-   else, and a text nudge would instead append to the pending prompt and submit a corrupted kickoff. Then
-   re-capture and classify again.
-3. **No modal and the composer is clear** — the kickoff went in. Now confirm the executor is actually
-   *working*: the **token counter is climbing**, greater than 0 AND increasing across two reads a few seconds
-   apart. A static non-zero count is not a pass. This cold-start test is valid *here* because a
-   just-launched executor sits at 0 until the kickoff turn begins (see the heartbeat's first tick in the
-   supervision step below, where it is NOT valid and a different signature is used instead).
+- **Launch here** → invoke **`launch-experiment`** on the merged record in this same session (the
+  same-session design-and-launch flow). You then hold designer-of-record and its duties — they are that
+  skill's Step 8, because they belong to whoever launched, not to whoever designed.
+- **Hand off** → print ONE paste-able line for the researcher and stop:
+  > `/launch-experiment registry/<exp>` — design-stage record is merged on main; the launching session
+  > becomes designer-of-record.
 
-Reading the composer takes care: the `❯` line normally carries ghost/auto-suggest text, so "there's text on the
-prompt line" cannot distinguish a genuinely pending unsent prompt from ghost text. The discriminators are the
-multi-line prompt sitting above the separator and the token counter, not the `❯` line's contents.
+  Nothing else is needed, because **the merged record is the whole input**. Do not write a `TEMP.md`, do not
+  summarize the design conversation, and do not hand-write your own session name into the brief as the
+  designer-of-record: the launcher binds its own address mechanically (researcher rule, 2026-08-31: *"handoff
+  is never needed for experiments"*). If something load-bearing is only in this conversation, that is a brief
+  gap — put it in the record (Step 3's self-sufficiency pass) rather than in a handoff note.
+- **A substrate without supervision machinery defaults to HAND OFF.** Codex today has no
+  periodic-reinvocation primitive, so a Codex-family designer hands the launch to a substrate that can arm
+  the two supervision layers rather than dispatching itself — the old step told exactly the family that lacks
+  the machinery to dispatch itself. (A Codex session may still launch when it is the deliberate choice: it
+  runs controller-supervised on the documented manual cadence, per `launch-experiment` and
+  `run-experiment`'s `references/CODEX_SUPERVISION.md`.)
 
-Only once you have reached state 3 *and* the counter is climbing do you report "executor running". Two pane
-captures is the whole cost in the common case.
+Either way the **designer-of-record moves exactly once, at launch, to the launching session**, written to the
+record by the launcher. Once it has moved, design-intent questions terminate there, not here.
 
-This is written concretely for the tmux/Claude-launcher path, where the race lives. The contract behind it is
-substrate-neutral — some mechanical proof the brief was actually accepted and the executor is doing work — and
-the Codex path carries its own form of it in the `verify-bootstrap` receipt above.
-
-**Reap your own design worktree — right after kickoff (automated-researcher#532).** If this design session is
+**Reap your own design worktree — right after you launch or hand off (automated-researcher#532).** If this design session is
 running in a dedicated worktree (your instance's convention for giving a design-experiment session its own
-working dir, distinct from the shared checkout — mirroring the executor's own dedicated dir just above), it
-is dead by construction the moment the executor launches: the design docs it carried already landed on the
-default branch via the design-stage PR merge (the gate just above), so nothing in it is still load-bearing —
+working dir, distinct from the shared checkout — mirroring the executor's own dedicated dir), it
+is dead by construction once the launch is placed: the design docs it carried already landed on the
+default branch via the design-stage PR merge (the gate above), so nothing in it is still load-bearing —
 worktrees don't bill, so nothing else forces this teardown (automated-researcher#532: ~37G of exactly this
 class of dead worktree accumulated silently before this contract existed). `cd` OUT of it first (e.g. `$HOME`
 or the shared checkout — never remove the tree your own shell is standing in), then `git worktree remove
 --force` it (**`--force` is required and safe ONLY because the design-stage PR already merged** — design-stage
 scratch may be untracked). **Keep the branch ref** — the content already landed via squash-merge, so the ref
 is cheap and preserves recoverability. Skip this if you were never given a dedicated worktree for this design
-(e.g. exploratory work directly in a shared tree) — there is nothing of this class to reap.
-
-**Arm designer-side supervision (standard, the same moment you kick off) — the two-layer split (#292, #342).**
-Supervision divides by failure mode, and the designer's share is deliberately small. (The prior contract — one
-`/loop 20m` watchdog per executor, in the designer session — ran every tick with the full designer history:
-guaranteed cache-cold past the 5-min prompt-cache TTL, ~$150–250/run-day of avoidable spend measured 2026-07-05.)
-
-- **The executor's own independent self-wake owns IDLE detection** — benign waiting, dead in-session monitors,
-  no-progress-while-billing escalation, and GPU-utilization judgment (`run-experiment`: "Arm your self-wake" + the
-  #323 utilization-series discipline under Execution discipline). This is why `CHECKLIST.md`'s self-wake gate makes
-  autonomous detached runs name an *independent* waker — parking on an in-process monitor is FAIL; a substrate that
-  can't arm one runs controller-supervised instead. None of it is the designer's job — no pod SSH, no
-  GPU sampling, no checklist-step progress accounting from the designer session.
-- **The designer side owns only SESSION-WEDGE**: the executor's session API-stuck mid-turn (usually a rate limit) —
-  process alive, no crash, so a crash supervisor never fires; the one failure the executor's own wake cannot cure,
-  because its wake queues behind the stuck turn (#292).
-
-For the session-wedge duty, arm at dispatch, in this order:
-
-1. **An event-driven shell monitor per executor pane — zero model turns while healthy.** A detached shell watcher
-   polling the pane text (e.g. `tmux capture-pane -t run-<exp> -p | tail -5`) for the terminal transitions — the
-   executor's DONE/BLOCKED line, or the pane gone — delivering one notification turn to whoever holds the heartbeat
-   duty when it fires; **record its id**; stop it when the run is reaped. (Claude Code: the harness `Monitor`
-   primitive — visible, cancellable harness machinery, not an ad-hoc background sleep-loop the harness can kill
-   without anyone noticing. Any substrate with a background shell can run the equivalent loop.)
-2. **ONE long-cadence heartbeat (45–60 min) for silent-wedge detection.** Read each executor's pane and judge
-   advancing-vs-frozen against your previous read — the discrimination a model-free probe (#172) cannot make.
-   **The FIRST tick asks one extra question of every supervised pane before any advancing-vs-frozen judgment:
-   did the kickoff ever land at all?** (#659 — a race that slipped past the dispatcher then costs one heartbeat
-   interval instead of the researcher's attention.) Key it on the **never-started signature**, which is durable
-   at this distance from kickoff: the token counter still at **0** — nothing has ever been consumed — together
-   with the kickoff still pending in the composer or an unanswered startup/permission prompt still on screen.
-   Remedy it the way the kickoff step does: **answer a modal deliberately, bare Enter for a pending composer**,
-   never the text nudge below (which would append to the still-pending prompt). Do **NOT** reuse the kickoff
-   step's *climbing*-counter test here: 45–60 min in, a correctly running executor legitimately shows a static
-   counter — mid-tool-call, waiting on a long job, sitting at a question, or simply finished — so demanding
-   "increasing" would misread all of those as an unsent kickoff, poke healthy sessions, and short-circuit the
-   wedge assessment this tick exists to make. No never-started signature → fall straight through to the
-   advancing-vs-frozen judgment below, which is what a static counter is actually diagnosed by. Put this
-   instruction in the heartbeat prompt itself — including the dispatched-watchdog variant in 3 below, which has
-   no memory of the kickoff.
-   Frozen → send a cheap, idempotent nudge via `send-keys` (even `hello` resumes an API-errored session; low harm if
-   it was actually working — a liveness poke, not driving it, see below). A load-bearing fork/question sitting
-   unanswered in the pane, or any real problem → it lands on **you** as designer-of-record (a delegated watchdog
-   escalates to you, not past you): answer it under the decide-record-report rule below, and surface it to the
-   researcher with specifics only when one of that rule's two checks fails. **Supervising several
-   executors → ONE merged heartbeat over all their panes, never one loop per run.** (A **Codex** designer still has
-   no periodic-reinvocation primitive today, so run this heartbeat as an ad hoc / manual
-   check at the same 45-60 min cadence — read the executor's pane/log tail and the run-supervision record's `status`
-   only, never the full design conversation, and do NOT block dispatch on this being automated away. A real
-   load-bearing question from the executor arrives through the durable question/answer inbox on the run-supervision
-   record — `has-question`/`answer-question` — not only through pane text, so this cadence check should also poll
-   that. See `references/CODEX_SUPERVISION.md` in `run-experiment` for the full contract, #223.)
-
-   > **Claude Code implementation — invoke the loop skill; never a `ScheduleWakeup` chain
-   > (automated-researcher#658).** Arm this layer by explicitly invoking the loop skill (`/loop 45m <heartbeat
-   > prompt>`), which registers a **standing cron** (`CronCreate`): it fires until deleted or expired, with no
-   > per-tick re-arm step to lose. **Record the returned cron job id** with your dispatch notes, and delete the
-   > job when the run is reaped. Do **NOT** implement this duty as a `ScheduleWakeup` dynamic wakeup: those are
-   > self-re-arming chains where each firing must schedule the next, so one broken link — an interrupted turn, a
-   > user message consuming the turn before the re-arm — ends supervision **silently**. That is a measured
-   > incident, not a hypothetical (2026-08-02, the `depv1-negemo-dose-response-1` dispatch): the pending wakeup
-   > vanished during interactive churn, no heartbeat was live for ~40 minutes, and only the researcher noticing
-   > surfaced it. Nobody watches the watcher (exactly one supervision level — see 3 below), so this failure mode
-   > has no backstop. Other substrates with a scheduling primitive: same rule — a standing schedule, never a
-   > self-re-arming chain.
-
-3. **Designer context known-large → dispatch the heartbeat to a separate small session (optional).** The heartbeat
-   needs ~2k tokens (pane text + the rubric above) but a loop in the designer session executes with the whole
-   designer history, re-cached cold on every tick. The dispatched watchdog is spawned at kickoff with the list of
-   panes to watch, owns only this layer's duty (monitor triggers route to it; it runs the merged heartbeat and
-   escalates real problems), and terminates when every supervised run reports DONE or is reaped. It is the
-   designer's *delegated* watch, not a new level: nobody watches the watchdog — exactly **one** supervision level,
-   as always (the launcher watches the executor; nobody watches the launcher; two nested failures is out of scope).
-
-**"Supervision armed" is a checkable state, not a claim (automated-researcher#658).** On a substrate with a
-scheduling primitive, dispatch is not complete until BOTH layers demonstrably exist and both ids are recorded with
-the dispatch notes: the per-pane monitor (1) and the heartbeat cron (2). Verify against the substrate's own listing
-rather than your memory of having armed them — Claude Code: `CronList` for the heartbeat job id, `TaskList` for the
-monitor — so a retro can check supervision mechanically instead of trusting prose. Either one missing = go arm it
-before calling dispatch done. If you delegated the heartbeat to a separate watchdog session (3), that session owns
-the cron and reports its id back to you (a cron wakes only its creating session, so it is that session's `CronList`
-the id lives in) — what you record is unchanged. A substrate with no scheduling primitive (Codex today) has no cron
-id to record: say so explicitly at dispatch and fall back to its documented manual cadence above, rather than
-reporting supervision armed on the strength of the monitor alone.
-
-**Context hygiene while supervising:** route bulk reads (RESULTS.md, screenshots, long logs) through subagents/forks
-during supervision phases — context accumulated while babysitting is rent paid on every future turn of the designer
-session, including every heartbeat tick.
-
-**Designer-of-record:** you stay available for design-intent questions (the executor routes them back to you — through
-the durable question/answer inbox on the run-supervision record where the instance uses one,
-`has-question`/`answer-question`, with its push notify addressed to whatever `designer_session` the record holds
-when it asks — so if the role moves to you mid-run, re-bind that field or the notify chases your predecessor;
-a `record-only` binding means **no** push exists, so your own `has-question` poll is the only thing that surfaces
-a question), but you **do not drive it** mid-run (that defeats the self-sufficiency test) — you
-review at the synthesis pass. The heartbeat nudge above is bounded health supervision, not driving: it pokes an idle
-session back to life, it does not answer design questions or steer the method — a real question still routes back to
-you as a load-bearing flag, same as always.
-
-**You are where the executor's questions TERMINATE, not a relay to the researcher — on an unattended run the default
-is DECIDE-RECORD-REPORT (automated-researcher#664).** When a question reaches you, apply two checks:
-
-1. **Does it stay inside the already-cleared budget / cost envelope?**
-2. **Does it leave unchanged what is being measured** — the question, the arms, the metric; what the numbers will mean? (A meaning-changing answer FAILS this check.)
-
-**Both pass → you decide**, record the decision durably where the run's own record carries it (an amendment note on
-the experiment's registry record — the run-supervision record's question/answer inbox is cleared by
-`consume-question` by design, so an answer that lived only there is not a record, and neither is a decision that
-exists only in a chat turn), and report it to the researcher **after the fact**. **Either check fails → forward to the researcher.**
-Researcher-owned and untouched by this: design clearance, the Presentation lock, raising any cost ceiling, and
-anything that alters the experiment's meaning — those are legitimate asks, and this default is not a reason to
-suppress them. What it eliminates is the *decidable* question: a bounded, invariant-preserving call you already have
-the judgment to make, sent up for approval anyway (2026-08-02/03, observed in both families — the same session, once
-told "make decisions as long as nothing changes drastically," immediately made the correct bounded call; it had the
-judgment, it lacked the license). Note what is deliberately **not** a condition here: "is it reversible or
-gate-protected?" Nearly everything in this pipeline is redoable at small dollar cost, so a reversibility clause just
-gets over-applied in the cautious direction — which is the failure mode this default exists to fix. The executor's
-own disposition is unchanged by all of this: mechanical/reversible gap → sensible default, record, keep going; bigger
-gap → route up and work around it. The executor flags; it does not rule.
-
-**A verifiable fact is never forwarded — and that binds you too.** A question whose answer is checkable from the
-records or the live state ("is X the baseline?", "does Y exist?") gets verified directly by whoever is holding it,
-not relayed to anyone.
+(e.g. exploratory work directly in a shared tree) — there is nothing of this class to reap. If you launched
+from this session, reap after `launch-experiment` reports the executor running (you keep supervising from
+this session, just not from that tree); if you handed off, reap once the handoff line is out.
 
 **When to keep the designer driving instead (per-experiment, reversible):** genuinely exploratory / iterative work where
-the design *is* the discovery and can't be fully pre-specified. For pre-registered, well-specified designs, dispatch it.
+the design *is* the discovery and can't be fully pre-specified. For pre-registered, well-specified designs, launch it.
 For work that's deliberately below even that threshold — a quick interactive analysis that still deserves a durable
 record, not a locked design — see **`log-exploratory`** instead of running this skill's full pipeline.
 
@@ -742,5 +551,9 @@ counts back as feedback.
 - **Templates** ship with this skill under `templates/` (`START`, `CHECKLIST`, `DATA_AUDIT_MANIFEST`).
 - **Gates:** the `verify-claims` skill — `verify_claim` (facts), `audit_experiment --design` (data-trustability), `--data`
   + `audit_data.py` (data). Invoke that skill; it owns the scripts.
-- **Execute half:** the **`run-experiment`** skill (what the dispatched executor loads). Compose this skill → that skill
-  via the `START.md` handoff.
+- **Launch half:** the **`launch-experiment`** skill — the design→execute seam (merged-record preconditions, the
+  designer-of-record bind, the instance-resolved launcher + executor model pin, kickoff verification, supervision
+  arming, and the designer-of-record duties that follow). Compose this skill → that one via the **merged
+  design-stage record**, not via a conversation handoff.
+- **Execute half:** the **`run-experiment`** skill (what the launched executor loads). Compose via the `START.md`
+  handoff.

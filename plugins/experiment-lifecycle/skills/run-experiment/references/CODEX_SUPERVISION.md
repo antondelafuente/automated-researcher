@@ -19,9 +19,9 @@ file.
 
 ## 1. Same-family fresh executor by default, never a silent fallback
 
-A Codex designer dispatches the locked `DESIGN.md` / `START.md` / `CHECKLIST.md` to a **fresh, zero-context
-Codex executor** by default — the same same-family default `design-experiment` Step 4 already states for
-Claude. If the substrate genuinely cannot spin up a fresh same-family executor, an operator may explicitly
+A Codex launcher dispatches the locked `DESIGN.md` / `START.md` / `CHECKLIST.md` to a **fresh, zero-context
+Codex executor** by default — the same same-family default `launch-experiment`'s dispatch contract already
+states for Claude. If the substrate genuinely cannot spin up a fresh same-family executor, an operator may explicitly
 choose a different one — but that choice must be a **visible, deliberate act**, never a quiet substitution
 made because the same-family path was inconvenient. *Which* Codex primitive creates that fresh executor is
 capability-detected, not assumed — see §7. Record which family actually ran the experiment on the
@@ -206,12 +206,12 @@ the continuity contract above.
 
 ## 6. Bounded designer supervision — wedge detection without recaching the world
 
-The two-layer split `design-experiment` Step 4 already defines is substrate-neutral: the executor's own
+The two-layer split `launch-experiment` already defines is substrate-neutral: the executor's own
 tick (§4) owns ordinary idle/progress detection; the designer owns only **session-wedge** detection — the
 executor's session stuck mid-turn, alive but making no progress, the one failure the executor's own tick
 cannot self-diagnose because its own wake queues behind the stuck turn. For a Codex designer specifically,
 absent a periodic-reinvocation primitive, run this at a **45-60 min cadence** as an ad hoc/manual check (or
-a delegated small watcher session, per Step 4 item 3) reading only the executor's pane/log tail and the
+a delegated small watcher session, per that step's item 3) reading only the executor's pane/log tail and the
 run-supervision record's `status` — never the full design conversation on every tick, which is exactly the
 $150-250/run-day regression a prior full-history `/loop` watchdog caused. Do not block dispatch on this gap
 being fully automated away — note it, fall back to the manual cadence, and keep supervising; a Codex host
