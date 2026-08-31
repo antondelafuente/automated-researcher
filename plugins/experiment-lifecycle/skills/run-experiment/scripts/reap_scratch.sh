@@ -49,6 +49,22 @@
 #      ignores their copies at the destination as extras — so every byte that reached the store only
 #      BECAUSE the copy followed a link would be deleted locally without ever having been verified. An
 #      asymmetric verify is the exact failure mode gate 5 exists to prevent, one argument over.
+#      DANGLING symlinks are pre-scanned out of BOTH sides of that symmetry (see 4b).
+#   4b. A DANGLING SYMLINK IS EXCLUDED AND LOGGED, NOT ARCHIVED AND NOT FATAL.
+#      INCIDENT (automated-researcher#811, 2026-08-31): with -L, rclone fails the LISTING on a symlink
+#      whose target is gone (`Listing error: symlink: stat …: no such file or directory`, exit 6, "Can't
+#      retry any of the errors"), so gate 4 refused and the dir stayed on disk forever. The scaffold
+#      MANUFACTURES that condition: executors symlink `work/<exp>/scripts` at the run worktree, and
+#      reap_worktree.sh removes that worktree earlier in the SAME close — so by the time this runs the
+#      link dangles. 2 of 27 clean-closed scratch dirs failed exactly this way (1.3G + 259M); removing the
+#      dead link and re-running reaped both. So a pre-scan lists every dangling link, LOGS it (path +
+#      target) on the reap output, and passes an `--exclude` for it. Excluded rather than deleted, so the
+#      record shows what was skipped — and a link to nothing carries no BYTES, which puts it in the same
+#      class as the empty tree of gate 5's precondition, not in the class of data. A link whose target
+#      EXISTS is untouched: its bytes are archived by -L, and the `Can't follow symlink` NOTICE above
+#      still refuses for it (a live link whose bytes were silently skipped is data loss; a dangling link
+#      is not). The excludes go on `rclone check` identically — asymmetry there would leave the verify to
+#      list, and abort on, the exact entry the copy skipped (gate 4's own invariant, one argument over).
 #   5. THE VERIFY DESTINATION IS RE-DERIVED, NOT REUSED (#729): `rclone copy "$src" "$D"` followed by
 #      `rclone check "$src" "$D"` verifies the wrong destination against itself and passes green — it
 #      proves the copy happened, never that it happened to the INTENDED target. Here the destination is
@@ -61,6 +77,9 @@
 #      archive" logged, never run through a probe that could only report a false failure and strand it
 #      locally forever (round-2 code-review Finding 2). The invariant is that no BYTES are deleted
 #      without a verified archive; a tree with no bytes has nothing to verify and nothing to lose.
+#      A tree whose ONLY content is dangling symlinks reaches that same branch (#811): after 4b's
+#      exclusions the copy would write zero bytes, so no destination prefix appears and the probe could
+#      only ever report a false failure. The dangling paths are still logged before it is deleted.
 #   6. UNSET SEAM -> A NO-OP THAT IS LOUD ON THE RECORD, NEVER A DELETE. With no scratch root declared
 #      there is no bounded delete target to derive; with no archive destination configured (or no rclone on
 #      PATH) there is nowhere to make the scratch durable. Either way nothing is deleted.
@@ -217,6 +236,52 @@ while [ "${dest_root%/}" != "$dest_root" ]; do dest_root=${dest_root%/}; done
 [ -n "$dest_root" ] || die "EXPERIMENT_SCRATCH_ARCHIVE_DEST resolved to an empty destination root"
 dest="$dest_root/$id"
 
+# Gate 4b PRE-SCAN — dangling symlinks (#811). Every symlink in the tree is classified BEFORE anything is
+# copied or deleted: a link whose target resolves is ordinary content the -L copy will carry, a link whose
+# target is gone carries no bytes and would fail the -L listing for the whole tree. `[ -e ]` follows the
+# link, so it answers exactly the question rclone's `os.Stat` asks (a circular link is unresolvable too,
+# and lands on the same side). It cannot tell "target is gone" from "target cannot be stat'd", so a live
+# link with an unreadable target is classified here as dangling — which costs the archive a DUPLICATE of
+# bytes that live outside this tree and are not what the rm -rf below deletes (a target INSIDE the tree is
+# enumerated and copied on its own, link or no link), so the no-bytes-deleted-unverified invariant holds
+# either way. A scan that fails (an unreadable subdirectory is a SHORT READ, never "no
+# links down there") can only UNDER-report: the copy then hits the link this missed and refuses loudly with
+# the scratch still on disk — the pre-#811 behavior, never a delete.
+link_scan_rc=0
+link_list=$(mktemp) || die "mktemp failed — refusing to copy without a dangling-symlink pre-scan"
+find "$scratch_real" -mindepth 1 -type l -print0 > "$link_list" 2>/dev/null || link_scan_rc=$?
+dangling=()
+live_symlink=0
+while IFS= read -r -d '' link; do
+  if [ -e "$link" ]; then live_symlink=1; else dangling+=("$link"); fi
+done < "$link_list"
+rm -f "$link_list"
+
+# rclone filter patterns are GLOBS, so a literal path has to be escaped before it can be an --exclude: an
+# unescaped `*` or `[…]` in a filename would exclude MORE than the one dead link, silently dropping real
+# files from an archive that is about to authorize an rm -rf. Escaping in-shell (no fork, no sed dialect
+# question about `\` inside a bracket expression).
+glob_escape(){
+  local s=$1 out='' i=0 c
+  while [ "$i" -lt "${#s}" ]; do
+    c=${s:$i:1}
+    case "$c" in
+      '\'|'['|']'|'*'|'?'|'{'|'}') out="$out\\$c" ;;
+      *) out="$out$c" ;;
+    esac
+    i=$((i+1))
+  done
+  printf '%s' "$out"
+}
+
+# The excludes are built ONCE and used by the copy and the check identically (gate 4's symmetry). Anchored
+# with a leading '/' so the pattern is the path relative to the transfer root, not a name match anywhere.
+excludes=()
+for link in ${dangling[@]+"${dangling[@]}"}; do
+  say "DANGLING SYMLINK (excluded from the archive — it points at nothing, so it carries no bytes): '$link' -> '$(readlink -- "$link" 2>/dev/null)'"
+  excludes+=( --exclude "/$(glob_escape "${link#"$scratch_real"/}")" )
+done
+
 # Gate 4/5 PRECONDITION — does this tree hold anything the archive must carry? `rclone copy` creates no
 # empty directories at the destination, so for a scratch tree with no files there is nothing for the
 # parent-listing probe to find and the probe CANNOT pass (round-2 code-review Finding 2). Left as-is, the
@@ -225,15 +290,27 @@ dest="$dest_root/$id"
 # leaves no scratch dir unless the check failed"). The invariant is that no BYTES are deleted without a
 # verified archive; a tree with no bytes has nothing to verify and nothing to lose, so it is deleted with
 # that stated explicitly rather than archived through a probe that can only ever report a false failure.
-# Anything that is not a directory counts as content, symlinks included: the -L copy turns them into
-# files at the destination. A find that fails (an unreadable subdirectory is a SHORT READ, never "no
-# files down there") is treated as NON-empty, so the full archive-and-verify path runs and can only
-# refuse to delete.
+# Anything that is not a directory counts as content, LIVE symlinks included: the -L copy turns them into
+# files at the destination. DANGLING links do not (#811) — they are excluded above, so a tree holding
+# nothing else copies zero bytes and belongs on this branch rather than in front of a probe that cannot
+# pass. A find that fails (an unreadable subdirectory is a SHORT READ, never "no files down there") is
+# treated as NON-empty, so the full archive-and-verify path runs and can only refuse to delete; the same
+# goes for a short link scan, whose live/dangling split is then not trustworthy either.
 find_rc=0
-tree_content=$(find "$scratch_real" -mindepth 1 ! -type d -print -quit 2>/dev/null) || find_rc=$?
-[ "$find_rc" = 0 ] || tree_content="unreadable-tree-assume-content"
+tree_content=$(find "$scratch_real" -mindepth 1 ! -type d ! -type l -print -quit 2>/dev/null) || find_rc=$?
+if [ "$find_rc" != 0 ]; then
+  tree_content="unreadable-tree-assume-content"
+elif [ -z "$tree_content" ] && [ "$live_symlink" = 1 ]; then
+  tree_content="live-symlink-is-content"
+elif [ -z "$tree_content" ] && [ "$link_scan_rc" != 0 ]; then
+  tree_content="unreadable-link-scan-assume-content"
+fi
 if [ -z "$tree_content" ]; then
-  say "scratch '$scratch_real' holds no files — nothing to archive (and rclone copy would create no destination prefix to verify). Deleting the empty tree."
+  if [ "${#dangling[@]}" -gt 0 ]; then
+    say "scratch '$scratch_real' holds nothing but ${#dangling[@]} dangling symlink(s) (logged above) — they point at nothing, so there are no bytes to archive (and rclone copy would create no destination prefix to verify). Deleting the tree."
+  else
+    say "scratch '$scratch_real' holds no files — nothing to archive (and rclone copy would create no destination prefix to verify). Deleting the empty tree."
+  fi
   rm -rf -- "$scratch_real" || die "empty scratch delete failed ('rm -rf $scratch_real') — delete it by hand"
   say "done — empty scratch removed; nothing was archived because there was nothing to archive"
   exit 0
@@ -242,9 +319,10 @@ fi
 say "archiving scratch '$scratch_real' -> '$dest' before deleting it"
 
 # Gate 4 — hardened copy. -L is appended LAST so nothing can override it; a `Can't follow symlink` NOTICE
-# is an INCOMPLETE copy even when rclone exits 0 (gpu-job#295's silent data-loss swallow).
+# is an INCOMPLETE copy even when rclone exits 0 (gpu-job#295's silent data-loss swallow). The 4b excludes
+# sit before -L for the same reason.
 copy_log=$(mktemp) || die "mktemp failed — refusing to copy without a log to scan for skipped symlinks"
-rclone copy "$scratch_real" "$dest" -L 2>&1 | tee "$copy_log"
+rclone copy "$scratch_real" "$dest" ${excludes[@]+"${excludes[@]}"} -L 2>&1 | tee "$copy_log"
 copy_rc=${PIPESTATUS[0]}
 notice=0
 grep -qi "can't follow symlink" "$copy_log" && notice=1
@@ -260,8 +338,10 @@ fi
 # a previous partial attempt's leftovers at the destination are not themselves reported as differences.
 # -L MUST match the copy's -L: without it rclone skips source symlinks while listing, and --one-way then
 # ignores their copies at the destination as extras — so link-followed bytes would be deleted locally
-# having never been verified at all (round-1 code-review Finding 1).
-if ! rclone check "$scratch_real" "$dest" --one-way -L; then
+# having never been verified at all (round-1 code-review Finding 1). The 4b excludes must match the copy's
+# for the same reason in the other direction: an exclude the copy carried and the check did not leaves the
+# check to list — and abort on — the very dangling link the copy was told to skip (#811).
+if ! rclone check "$scratch_real" "$dest" --one-way ${excludes[@]+"${excludes[@]}"} -L; then
   die "ARCHIVE CHECK FAILED (rclone check '$scratch_real' vs '$dest'): scratch left in place. Record this on the run's ledger line."
 fi
 

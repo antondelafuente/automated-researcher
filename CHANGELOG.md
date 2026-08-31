@@ -1,3 +1,25 @@
+- experiment-lifecycle 0.4.7 (2026-08-31): `reap_scratch.sh` no longer strands a scratch dir because of a
+  dangling symlink (#811). With `-L`, rclone fails the LISTING on a symlink whose target is gone
+  (`Listing error: symlink: stat …`, exit 6, "Can't retry any of the errors"), so the archive step failed
+  and gate 4 correctly refused to delete — forever. The scaffold MANUFACTURES that condition: executors
+  symlink `work/<exp>/scripts` at the run worktree, and `reap_worktree.sh` removes that worktree earlier in
+  the SAME close, so the link is already dead by the time the scratch reap runs. Observed 2026-08-31 on the
+  instance: 2 of 27 clean-closed scratch dirs (1.3G + 259M) failed exactly this way; deleting the dead link
+  by hand and re-running reaped both. A pre-scan now classifies every symlink in the tree, LOGS each
+  dangling one (path + target) on the reap output, and passes an anchored `--exclude` for it — excluded and
+  recorded rather than deleted, since a link to nothing carries no bytes. A link whose target EXISTS is
+  untouched (its bytes are still archived by `-L`, and the `Can't follow symlink` NOTICE still refuses for
+  it — a live link's skipped bytes are data loss, a dead link's are not). The excludes reach `rclone check`
+  identically: an exclude on the copy alone would leave the verify to list, and abort on, the very entry the
+  copy skipped, which is gate 4's own symmetry invariant one argument over. Glob metacharacters in a link's
+  name are escaped, because an rclone filter is a glob and an unescaped `*` would drop real files from an
+  archive that is about to authorize an `rm -rf`. A tree whose ONLY content is dangling links copies zero
+  bytes once excluded, so no destination prefix appears and the parent-listing probe could only report a
+  false failure: it takes the existing "nothing to archive" delete branch (#792 round-2 Finding 2's shape),
+  dead links still logged. A short link scan under-reports at worst, which lands on the pre-#811 behavior
+  (loud refusal, scratch on disk), never on a delete. `reap_scratch_smoke.sh`'s stubbed rclone now models
+  the exit-6 listing abort on BOTH `copy` and `check`, so the new cases reproduce the incident against the
+  old script rather than asserting the fix's own mechanism.
 - experiment-lifecycle 0.4.6 / repo-janitor 0.3.5 (2026-08-31): sparse worktrees by default — the scaffold
   stops duplicating the whole registry into every worktree of the research repo (#805). Measured on the
   instance 2026-08-31: of 184G used on a 225G disk, 57G was worktrees — 25 checkouts each carrying its own
