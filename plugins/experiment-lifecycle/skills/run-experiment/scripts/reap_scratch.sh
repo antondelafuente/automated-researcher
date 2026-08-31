@@ -61,28 +61,61 @@
 #      archive" logged, never run through a probe that could only report a false failure and strand it
 #      locally forever (round-2 code-review Finding 2). The invariant is that no BYTES are deleted
 #      without a verified archive; a tree with no bytes has nothing to verify and nothing to lose.
-#   6. UNSET SEAM -> A LOGGED NO-OP, NEVER A DELETE. With no scratch root declared there is no bounded
-#      delete target to derive; with no archive destination configured (or no rclone on PATH) there is
-#      nowhere to make the scratch durable. Either way nothing is deleted and the run reports the wiring
-#      gap in its retro — the same shape as reap_session.sh's unset-seam no-op.
+#   6. UNSET SEAM -> A NO-OP THAT IS LOUD ON THE RECORD, NEVER A DELETE. With no scratch root declared
+#      there is no bounded delete target to derive; with no archive destination configured (or no rclone on
+#      PATH) there is nowhere to make the scratch durable. Either way nothing is deleted.
+#      INCIDENT (automated-researcher#804, 2026-08-31): as a plain exit-0 log line, that no-op was invisible
+#      — neither seam was ever wired on the instance, the message went to the executor's stdout only, and
+#      SEVEN experiments closed reaping ZERO scratch dirs before a human noticed the disk back at 92%. So a
+#      gap now surfaces the way a FAILED ARCHIVE CHECK does: a one-line `SCRATCH-REAP-GAP:` marker on
+#      STDOUT for the close report / ledger line, and a distinct non-zero EXIT 3 the caller cannot miss.
+#      Exit 3 is deliberately NOT 1: nothing was lost and nothing needs recovering (the scratch is exactly
+#      where it was), so the caller must be able to tell this apart from `die`'s "an archive/verify step
+#      FAILED" without parsing prose. The same shape covers the platform gap (no readable mount table) —
+#      same consequence, same invisibility, same record.
 #
 # WHAT THE INSTANCE SUPPLIES (both are instance values, so the product ships neither path):
 #   EXPERIMENT_SCRATCH_ROOT — the absolute LOCAL directory this instance creates per-run scratch dirs
 #   under (e.g. "<home>/work"). It bounds what may ever be deleted: the only reapable path for run <id>
-#   is "<root>/<id>", nothing else, at any depth. Unset -> no-op (6).
+#   is "<root>/<id>", nothing else, at any depth. Unset -> recorded gap, exit 3 (6).
 #   EXPERIMENT_SCRATCH_ARCHIVE_DEST — an rclone destination ROOT for archived executor scratch (e.g.
-#   "<remote>:<bucket>/archive/work"). Per-run archives land at "<root>/<run-id>". Unset -> no-op (6).
+#   "<remote>:<bucket>/archive/work"). Per-run archives land at "<root>/<run-id>". Unset -> recorded gap,
+#   exit 3 (6).
 #
 # USAGE: reap_scratch.sh <run-id> <scratch-dir>
 # Call it at close, AFTER artifact-store upload is verified and `log-experiment` has merged the record —
 # same sequencing responsibility as reap_worktree.sh gate 4: this script cannot re-check those itself.
+#
+# EXIT CODES (all three are outcomes a close report states; none of them is "ignore me"):
+#   0  reaped (archived + verified + deleted), or an empty tree deleted with nothing to archive
+#   1  a REAL failure — a gate refused, or an archive/verify step failed. The scratch is still on disk and
+#      the run's ledger line says so.
+#   3  WIRING/PLATFORM GAP (#804) — nothing was archived and nothing was deleted because a seam is unset
+#      (or no rclone / no readable mount table). Nothing is lost; the wiring is missing. Stdout carries a
+#      single `SCRATCH-REAP-GAP: ...` line for the close report and the ledger line.
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REC="$SCRIPT_DIR/run_supervision_record.sh"
 
+GAP_EXIT=3
+
 say(){ echo "reap_scratch: $*" >&2; }
 die(){ echo "reap_scratch: $*" >&2; exit 1; }
+# gap <cause-slug> <one-line detail> — the loud, on-the-record no-op (#804). The marker goes to STDOUT
+# because that is the stream a close report is written from; the human sentence goes to stderr with the
+# rest of the log; and the exit status is non-zero so an unattended close cannot silently skip a reap the
+# way seven of them did. Every call site sits below where `id` and `scratch_real` are bound; the `:-`
+# fallbacks keep a future one from turning into an unbound-variable abort INSTEAD of the gap report, which
+# would be the same invisibility this exists to remove.
+gap(){
+  local cause=$1; shift
+  local where=${scratch_real:-${scratch:-unresolved}}
+  printf 'SCRATCH-REAP-GAP: run=%s cause=%s reaped=no scratch=%s — %s\n' \
+    "${id:-unknown}" "$cause" "$where" "$*"
+  say "WIRING GAP [$cause]: $* Scratch '$where' was NOT archived and NOT deleted (nothing is lost — the wiring is missing). Put the SCRATCH-REAP-GAP line on the close report AND the run's ledger line; exit $GAP_EXIT."
+  exit "$GAP_EXIT"
+}
 
 [ $# -eq 2 ] || die "usage: reap_scratch.sh <run-id> <scratch-dir>"
 id=$1
@@ -108,8 +141,7 @@ scratch_real=$(cd "$scratch" && pwd -P) || die "could not resolve '$scratch'"
 # the only remaining "binding" would be a basename, which is not one (see the CONTRACT block).
 scratch_root=${EXPERIMENT_SCRATCH_ROOT:-}
 if [ -z "${scratch_root// /}" ]; then
-  say "NO-OP: EXPERIMENT_SCRATCH_ROOT is unset — scratch '$scratch_real' left in place (without a declared scratch root there is no bounded delete target to derive, and a basename alone would make every dir named '$id' on this box deletable). Report this wiring gap in the retro."
-  exit 0
+  gap EXPERIMENT_SCRATCH_ROOT-unset "EXPERIMENT_SCRATCH_ROOT is unset, so there is no bounded delete target to derive (a basename alone would make every dir named '$id' on this box deletable) — wire the instance's scratch root."
 fi
 case "$scratch_root" in
   /*) : ;;
@@ -165,19 +197,17 @@ if [ -r "$mountinfo" ]; then
     esac
   done < "$mountinfo"
 else
-  say "NO-OP: cannot enumerate mount points on this platform ('$mountinfo' unreadable) — scratch '$scratch_real' left in place (mount-free cannot be established, and nothing may be deleted without it). Report this wiring gap in the retro."
-  exit 0
+  gap mountinfo-unreadable "cannot enumerate mount points on this platform ('$mountinfo' unreadable), so mount-freedom cannot be established and nothing may be deleted without it."
 fi
 
-# Gate 6 — unset seam / no rclone: a logged NO-OP. Nothing is archived, so nothing may be deleted.
+# Gate 6 — unset seam / no rclone: a no-op that is LOUD ON THE RECORD (#804). Nothing is archived, so
+# nothing may be deleted.
 dest_root=${EXPERIMENT_SCRATCH_ARCHIVE_DEST:-}
 if [ -z "${dest_root// /}" ]; then
-  say "NO-OP: EXPERIMENT_SCRATCH_ARCHIVE_DEST is unset — scratch '$scratch_real' left in place (nothing may be deleted without a verified archive). Report this wiring gap in the retro."
-  exit 0
+  gap EXPERIMENT_SCRATCH_ARCHIVE_DEST-unset "EXPERIMENT_SCRATCH_ARCHIVE_DEST is unset, so there is nowhere to make this scratch durable and nothing may be deleted without a verified archive — wire the instance's archive destination."
 fi
 if ! command -v rclone >/dev/null 2>&1; then
-  say "NO-OP: rclone is not on PATH — scratch '$scratch_real' left in place (nothing may be deleted without a verified archive). Report this wiring gap in the retro."
-  exit 0
+  gap rclone-missing "rclone is not on PATH, so the archive cannot be made or verified and nothing may be deleted without it."
 fi
 
 # Gate 5 — the destination is DERIVED FROM <run-id>, once, and both the copy and the verification use

@@ -15,6 +15,10 @@
 #   - --json shape, and CLI argument validation (missing --repo, --dry-run without --reap-tier1, bad depth)
 #   - default-ref resolution never falls back to an unverified branch name (merge-gate final-review MED):
 #     an unresolvable --default-branch reads as UNKNOWN (inspection needed), not silently merged/unmerged
+#   - the MERGED+identical-residue tier-1 bar (automated-researcher#804): a merged-but-BEHIND worktree
+#     whose only residue is a byte-identical duplicate of the default branch reaches tier 1 and is really
+#     removed, while one whose residue differs from main, or sits at a path main lacks entirely, stays
+#     reported and survives a real --reap-tier1
 #   - a worktree with an INITIALIZED submodule is excluded from tier1 even when merged+clean+old, since
 #     `git worktree remove` unconditionally refuses it (merge-gate final-review MED)
 #   - --scratch-glob, the non-git scratch prune (automated-researcher#792): a stale entry reaches tier1 and
@@ -418,6 +422,66 @@ if [ -d "$TMP/wt-stray-novel" ]; then ok "content-identity: novel-content worktr
 if [ -d "$TMP/wt-staged-unique" ]; then ok "content-identity: staged-unique ('MM') worktree preserved by --reap-tier1"; else no "content-identity: staged-unique ('MM') worktree was WRONGLY removed by --reap-tier1 (staged-only content lost)"; fi
 if [ -d "$TMP/wt-chmod-only" ]; then ok "content-identity: chmod-only worktree preserved by --reap-tier1"; else no "content-identity: chmod-only worktree was WRONGLY removed by --reap-tier1 (mode change lost)"; fi
 if [ -d "$TMP/wt-symlink-residue" ]; then ok "content-identity: untracked-symlink worktree preserved by --reap-tier1"; else no "content-identity: untracked-symlink worktree was WRONGLY removed by --reap-tier1 (symlink lost)"; fi
+
+# 3f2. automated-researcher#804: a MERGED worktree whose only residue is byte-identical to the default
+#      branch. The 2026-08-31 instance sweep classified 22/22 worktrees as tier 3 with ZERO in tier 1 while
+#      4 of 7 hand-checked ones carried nothing but duplicates of `origin/main`: `log-experiment` lands
+#      `registry/<exp>/` from its own branch, so the executor worktree's identical copy reads UNTRACKED
+#      forever. The #533 whole-tree bar could not rescue them either — its two-tree diff lists everything
+#      main changed SINCE the worktree's HEAD, which for a worktree whose PR landed weeks ago is never
+#      empty. So the fixture below is deliberately MERGED-AND-BEHIND: main moves on after the merge, which
+#      is exactly what makes the whole-tree check answer False and the residue-only check the load-bearing
+#      one.
+M_ORIGIN="$TMP/m-origin.git"; M_REPO="$TMP/m-repo"
+git init -q --bare -b main "$M_ORIGIN"
+git init -q -b main "$M_REPO"
+g "$M_REPO" config user.email t@example.com; g "$M_REPO" config user.name smoke
+echo hello > "$M_REPO/f.txt"; g "$M_REPO" add f.txt; g "$M_REPO" commit -q -m init
+g "$M_REPO" remote add origin "$M_ORIGIN"; g "$M_REPO" push -q origin main
+
+# Three old worktrees, each branched off main and merged BACK into it (so ancestry — plain `merged` — holds
+# for all three); they differ only in what residue sits on top.
+for w in merged-dup merged-differs merged-novel; do
+  g "$M_REPO" worktree add -q -b "feat-$w" "$TMP/wt-$w" main
+  GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-$w" commit -q --allow-empty -m "old-$w" --date="$OLD_DATE"
+  g "$M_REPO" merge -q --no-edit "feat-$w"
+done
+g "$M_REPO" push -q origin main
+
+# ...and then main moves on with a registry record landed from its OWN branch, which none of the three
+# worktrees has in its index. This is what puts every one of them BEHIND main.
+mkdir -p "$M_REPO/registry/exp-1"
+printf 'record-line\n' > "$M_REPO/registry/exp-1/RESULTS.md"
+g "$M_REPO" add registry/exp-1/RESULTS.md
+g "$M_REPO" commit -q -m "log-experiment landed registry/exp-1 from its own branch"
+g "$M_REPO" push -q origin main
+
+# Case A: the incident's own shape — an untracked copy of a path on main, byte-for-byte identical.
+mkdir -p "$TMP/wt-merged-dup/registry/exp-1"
+printf 'record-line\n' > "$TMP/wt-merged-dup/registry/exp-1/RESULTS.md"
+# Case B: the same path, DIFFERENT bytes — a confirmed "not identical", must stay reported, never reaped.
+mkdir -p "$TMP/wt-merged-differs/registry/exp-1"
+printf 'locally-edited-line\n' > "$TMP/wt-merged-differs/registry/exp-1/RESULTS.md"
+# Case C: residue at a path main does not carry AT ALL — UNKNOWN per-file compare, never a guessed "same".
+printf 'only-here\n' > "$TMP/wt-merged-novel/scratch-notes.txt"
+
+J_M=$(python3 "$SWEEP" --json --repo "$M_REPO" 2>/dev/null)
+if echo "$J_M" | has_path_in "d['tier1']" "$TMP/wt-merged-dup"; then ok "merged-residue-identity: merged+behind worktree whose untracked residue duplicates main reaches tier1"; else no "merged-residue-identity: duplicate-residue worktree NOT classified tier1 (#804 defect not fixed)"; fi
+if echo "$J_M" | reason_has "d['tier1']" "$TMP/wt-merged-dup" "residue identical to main"; then ok "merged-residue-identity: tier1 reason names the residue-identity basis"; else no "merged-residue-identity: tier1 reason doesn't state the residue-identity basis"; fi
+if echo "$J_M" | has_path_in "d['tier1']" "$TMP/wt-merged-differs"; then no "merged-residue-identity: worktree whose residue DIFFERS from main wrongly reached tier1 (real edits would be lost)"; else ok "merged-residue-identity: differing residue correctly excluded from tier1"; fi
+if echo "$J_M" | has_path_in "d['tier3']" "$TMP/wt-merged-differs"; then ok "merged-residue-identity: differing residue reported in tier3"; else no "merged-residue-identity: differing-residue worktree reported in neither tier1 nor tier3"; fi
+if echo "$J_M" | has_path_in "d['tier1']" "$TMP/wt-merged-novel"; then no "merged-residue-identity: residue absent from main wrongly reached tier1 (UNKNOWN treated as identical)"; else ok "merged-residue-identity: residue absent from main correctly excluded from tier1"; fi
+# The reason for a merged worktree whose identity check came back UNKNOWN/False stays the PRECISE
+# dirty/untracked one it was before #804 — a failed residue comparison must not downgrade a reported
+# entry's reason to a generic "inspection needed".
+if echo "$J_M" | reason_has "d['tier3']" "$TMP/wt-merged-novel" "untracked"; then ok "merged-residue-identity: an UNKNOWN residue comparison keeps the precise untracked reason"; else no "merged-residue-identity: UNKNOWN residue comparison replaced the precise reason with a generic one"; fi
+
+# ...and the classification must survive do_reap's own re-verification, which recomputes the same facts.
+python3 "$SWEEP" --repo "$M_REPO" --reap-tier1 >/dev/null 2>&1 || true
+if [ -d "$TMP/wt-merged-dup" ]; then no "merged-residue-identity: duplicate-residue worktree NOT removed by --reap-tier1 (reap-time re-verification regressed)"; else ok "merged-residue-identity: duplicate-residue worktree removed by --reap-tier1 (--force lifts the untracked refusal)"; fi
+if [ -d "$TMP/wt-merged-differs" ]; then ok "merged-residue-identity: differing-residue worktree preserved by --reap-tier1"; else no "merged-residue-identity: differing-residue worktree was WRONGLY removed (local edits lost)"; fi
+if [ -d "$TMP/wt-merged-novel" ]; then ok "merged-residue-identity: novel-residue worktree preserved by --reap-tier1"; else no "merged-residue-identity: novel-residue worktree was WRONGLY removed"; fi
+if [ -f "$M_REPO/registry/exp-1/RESULTS.md" ]; then ok "merged-residue-identity: the default branch's own copy of the duplicated path is untouched"; else no "merged-residue-identity: the swept checkout's own registry file disappeared"; fi
 
 # 3g. automated-researcher#533: submodule-fact per-path degradation. A single gitlink with no `.gitmodules`
 #     mapping makes `git submodule status` fail identically for EVERY worktree whose checkout contains that
