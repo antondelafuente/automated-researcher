@@ -1,7 +1,7 @@
 {
   "name": "repo-janitor",
   "description": "Deterministic weekly sweep of git worktrees + the shared checkout + non-git scratch globs, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Report-only by default; deletion only under an explicit --reap-tier1 opt-in; no state.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": {
     "name": "Anton de la Fuente"
   }
