@@ -40,6 +40,19 @@
 # just don't auto-settle their claim, because only the author knows whether the sentence asserts more
 # than the mechanical fact does.
 #
+# How a citation is recognized: any token that could name a file — a bare `RESULTS.md` as much as
+# `registry/x/data/train.jsonl` or `artifacts/model.safetensors` — is resolved, and it goes in the
+# packet if it resolves anywhere under the search bases. Only the UNRESOLVED case needs a shape
+# judgment, since prose carries slashes ("and/or") and dots ("e.g."): an unresolved token is reported
+# loudly as a missing record when it is unambiguously a path (two-plus slashes, a slash plus an
+# extension, a `@sha` pin) or the author backticked it; otherwise it is treated as prose and dropped.
+# Write a `check: exists <path>` when you need an unresolvable bare name to fail the gate outright.
+#
+# A `<path>@<sha>` citation pins a REVISION, and the packet carries THAT revision's bytes (as
+# `<path>@<sha>`), hashed and line-counted from the blob — not the working-tree file, which may have
+# been amended, moved, or deleted since the pin was taken. That is the whole point of the light
+# design path's parent-drift check.
+#
 # Verdicts: per-claim CONFIRM / DISPUTE / UNKNOWN with file citations. Treat DISPUTE as a
 # blocker and UNKNOWN as "your records are too thin to support this claim".
 #
@@ -177,20 +190,36 @@ for c in claims:
     c["text"] = "\n".join(c["lines"])
 
 # ---- extract + resolve every cited path -------------------------------------------------------
-PATH_RE = re.compile(r"(?<![\w/@])((?:[\w.~+-]+/)+[\w.~+-]+)(?:@([0-9a-fA-F]{7,40}))?")
+# Whether a token lands in the packet is decided by RESOLUTION, not by a shape guess: any token that
+# COULD name a file is resolved, and it is included if it resolves. The shape guess is only used to
+# decide whether an UNRESOLVED token is worth reporting loudly. Getting that backwards is what let a
+# bare `RESULTS.md` (no slash) and `artifacts/model.safetensors` (one slash, 11-char extension) fall
+# out of the packet in silence — the exact packing hole --exp exists to close (#818 review, P0).
+PATH_RE = re.compile(r"(?<![\w/@])((?:[\w.~+-]+/)*[\w.~+-]+)(?:@([0-9a-fA-F]{7,40}))?")
 URL_RE = re.compile(r"\w+://\S+")
-EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,8}$")
+TICK_RE = re.compile(r"`([^`\n]+)`")
+EXT_RE = re.compile(r"\.[A-Za-z0-9_]{1,16}$")
+TRAILING = ".,;:!?)]}\"'"
+HEAD_LINES, TAIL_LINES, MAX_LISTING = 200, 100, 500
 SEARCH_BASES = [b for b in (EXP, os.path.dirname(EXP), ROOT, os.getcwd()) if b]
 
 
-def looks_like_a_path(p):
-    """Filter prose that merely contains a slash ("and/or", "24k/53k") out of the citation set."""
-    return p.count("/") >= 2 or EXT_RE.search(p.rsplit("/", 1)[-1]) is not None
+def could_name_a_file(p):
+    """Cheap pre-filter: is this token worth a resolve() call at all?"""
+    return "/" in p or EXT_RE.search(p) is not None
+
+
+def unambiguously_a_path(p):
+    """Is this a path citation even when nothing resolves — i.e. worth a LOUD unresolved report?
+    Prose carries slashes ("and/or", "24k/53k") and dots ("e.g.", "3.5x"), so a bare name or a
+    single bare slash doesn't qualify on shape alone; backticks (checked by the caller) or a `@sha`
+    are the author marking it as a literal."""
+    return p.count("/") >= 2 or ("/" in p and EXT_RE.search(p.rsplit("/", 1)[-1]) is not None)
 
 
 def resolve(p):
     """Return (abspath or None, list of locations searched)."""
-    p = p.rstrip(".,;:!?")
+    p = p.rstrip(TRAILING)
     if os.path.isabs(p):
         return (p if os.path.exists(p) else None), [p]
     tried = []
@@ -204,21 +233,29 @@ def resolve(p):
     return None, tried
 
 
-cited = {}      # cited-string -> {"abs":…, "tried":[…], "commits":set()}
+cited = {}      # cited-string -> {"abs":…, "tried":[…], "commits":set(), "loud":bool}
 for text in ["\n".join(preamble)] + [c["text"] for c in claims]:
     text = URL_RE.sub(" ", text)     # a URL is not a local record; don't chase its path segments
+    ticked = {t.strip().strip(TRAILING) for m in TICK_RE.finditer(text) for t in [m.group(1)]}
+    ticked |= {t.split("@", 1)[0] for t in list(ticked) if "@" in t}
     for m in PATH_RE.finditer(text):
-        p = m.group(1).rstrip(".,;:!?")
-        if not p or p.endswith("/") or not looks_like_a_path(p):
+        p = m.group(1).rstrip(TRAILING)
+        if not p or p.endswith("/") or not could_name_a_file(p):
             continue
-        ent = cited.setdefault(p, {"commits": set()})
+        ent = cited.setdefault(p, {"commits": set(), "loud": False})
+        ent["loud"] = ent["loud"] or unambiguously_a_path(p) or p in ticked or bool(m.group(2))
         if "abs" not in ent:
             ent["abs"], ent["tried"] = resolve(p)
         if m.group(2):
             ent["commits"].add(m.group(2))
 
+# A token that neither resolves nor is unambiguously a path is prose, not a missing record: drop it
+# rather than fill MECHANICAL_FACTS.md with "and/or does not exist".
+for p in [p for p, e in cited.items() if not e.get("abs") and not e["loud"]]:
+    del cited[p]
+
 # DESIGN.md is always in the packet, cited or not — it is the record the claims are about.
-cited.setdefault("DESIGN.md", {"commits": set(), "abs": os.path.join(EXP, "DESIGN.md"),
+cited.setdefault("DESIGN.md", {"commits": set(), "loud": True, "abs": os.path.join(EXP, "DESIGN.md"),
                                "tried": [os.path.join(EXP, "DESIGN.md")]})
 
 # ---- copy into the packet + compute the mechanical facts --------------------------------------
@@ -256,69 +293,179 @@ def line_count(path):
     return n
 
 
+def excerpt_note(size):
+    return (f"\n... [verify_claim] EXCERPT: {size} bytes > {MAX_BYTES}; first {HEAD_LINES} and last "
+            f"{TAIL_LINES} lines only. sha256/line count in MECHANICAL_FACTS.md ...\n\n")
+
+
+def resolve_in_commit(p, sha):
+    """Repo-relative path for `p` AS IT EXISTED at `sha`, or None. Deliberately independent of the
+    working tree: a citation can pin a file that has since been moved or deleted."""
+    if not ROOT:
+        return None
+    cands = []
+    if os.path.isabs(p):
+        cands.append(os.path.relpath(p, ROOT))
+    else:
+        cands += [os.path.relpath(os.path.normpath(os.path.join(base, p)), ROOT)
+                  for base in SEARCH_BASES]
+        cands.append(p)
+    for c in dict.fromkeys(cands):
+        if c.startswith(".."):
+            continue
+        if git("cat-file", "-t", f"{sha}:{c}", cwd=ROOT) is not None:
+            return c
+    return None
+
+
+def git_pipe(sha, relroot, filt):
+    """`git show <sha>:<relroot> | <filt>` without a shell, so a cited path can't inject one."""
+    proc = subprocess.Popen(["git", "show", f"{sha}:{relroot}"], cwd=ROOT,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out = subprocess.run(filt, stdin=proc.stdout, capture_output=True, text=True).stdout
+    proc.stdout.close()
+    proc.wait()
+    return out
+
+
+def ingest_blob(sha, relroot, dest):
+    """Materialize `<relroot>` AS OF `<sha>` into the packet and compute its facts from THOSE bytes.
+    The working-tree copy is not a substitute: the light-rerun contract checks the parent at its
+    pinned commit precisely because the parent may have been amended since (#818 review, P0).
+    -> facts dict, or None if `<sha>:<relroot>` is not a blob."""
+    if git("cat-file", "-t", f"{sha}:{relroot}", cwd=ROOT) != "blob":
+        return None
+    raw_size = git("cat-file", "-s", f"{sha}:{relroot}", cwd=ROOT)
+    size = int(raw_size) if raw_size and raw_size.isdigit() else None
+    h, nl, last, binary, first = hashlib.sha256(), 0, b"\n", False, True
+    proc = subprocess.Popen(["git", "show", f"{sha}:{relroot}"], cwd=ROOT,
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    fh = open(dest, "wb") if (size is not None and size <= MAX_BYTES) else None
+    total = 0
+    for chunk in iter(lambda: proc.stdout.read(1 << 20), b""):
+        if first:
+            binary, first = b"\0" in chunk[:8192], False
+        h.update(chunk)
+        total += len(chunk)
+        nl += chunk.count(b"\n")
+        last = chunk[-1:] or last
+        if fh:
+            fh.write(chunk)
+    proc.stdout.close()
+    proc.wait()
+    if fh:
+        fh.close()
+    if last not in (b"\n", b""):
+        nl += 1
+    size = total if size is None else size
+    info = {"size": size, "sha256": h.hexdigest(), "lines": None if binary else nl,
+            "packet": "full copy" if size <= MAX_BYTES else None}
+    if size > MAX_BYTES and not binary:
+        with open(dest, "w", encoding="utf-8") as out:
+            out.write(git_pipe(sha, relroot, ["head", "-n", str(HEAD_LINES)]))
+            out.write(excerpt_note(size))
+            out.write(git_pipe(sha, relroot, ["tail", "-n", str(TAIL_LINES)]))
+        info["packet"] = f"head+tail excerpt ({HEAD_LINES}+{TAIL_LINES} of {nl} lines)"
+    return info
+
+
 facts, manifest = [], []
 for p in sorted(cited):
     ent = cited[p]
     ap = ent.get("abs")
+    rel = packet_rel(p)
     facts.append(f"### `{p}`")
     if not ap:
-        facts.append("- resolved: **NO** — the claims file cites this path but nothing exists at it.")
+        facts.append("- resolved in the working tree: **NO**"
+                     + (" — see the pinned revision(s) below; the CITED bytes are still in the packet."
+                        if ent["commits"] else
+                        " — the claims file cites this path but nothing exists at it."))
         for t in ent.get("tried", []):
             facts.append(f"  - searched: `{t}`")
-        facts.append("")
-        continue
-    rel = packet_rel(p)
-    ent["packet_rel"] = rel
-    dest = os.path.join(PACKET, rel)
-    os.makedirs(os.path.dirname(dest) or PACKET, exist_ok=True)
-    facts.append(f"- resolved: YES -> `{ap}`")
-    if os.path.isdir(ap):
-        listing = sorted(
-            os.path.relpath(os.path.join(dp, f), ap)
-            for dp, _, fs in os.walk(ap) for f in fs
-        )[:500]
-        with open(dest + ".listing.txt", "w", encoding="utf-8") as fh:
-            fh.write("\n".join(listing) + "\n")
-        facts.append(f"- kind: directory, {len(listing)} file(s) listed")
-        manifest.append(f"- `{rel}.listing.txt` (directory listing of `{p}`)")
     else:
-        size = os.path.getsize(ap)
-        facts.append(f"- bytes: {size}")
-        facts.append(f"- sha256: `{sha256_of(ap)}`")
-        text = is_text(ap)
-        if text:
-            ent["lines"] = line_count(ap)
-            facts.append(f"- lines: {ent['lines']}")
-        if size <= MAX_BYTES:
-            shutil.copyfile(ap, dest)
-            manifest.append(f"- `{rel}` (full copy of `{p}`)")
-        elif text:
-            with open(ap, encoding="utf-8", errors="replace") as fh:
-                head = [next(fh, "") for _ in range(200)]
-            tail = subprocess.run(["tail", "-n", "100", ap], capture_output=True, text=True).stdout
-            with open(dest, "w", encoding="utf-8") as fh:
-                fh.write("".join(head))
-                fh.write(f"\n... [verify_claim] EXCERPT: {size} bytes > {MAX_BYTES}; "
-                         f"first 200 and last 100 lines only. sha256/line count in MECHANICAL_FACTS.md ...\n\n")
-                fh.write(tail)
-            facts.append(f"- packet copy: EXCERPT ONLY (first 200 + last 100 lines of {ent['lines']})")
-            manifest.append(f"- `{rel}` (head+tail excerpt of `{p}`; full sha256/line count in MECHANICAL_FACTS.md)")
+        ent["packet_rel"] = rel
+        dest = os.path.join(PACKET, rel)
+        os.makedirs(os.path.dirname(dest) or PACKET, exist_ok=True)
+        facts.append(f"- resolved in the working tree: YES -> `{ap}`")
+        if os.path.isdir(ap):
+            entries = sorted(
+                os.path.relpath(os.path.join(dp, f), ap)
+                for dp, _, fs in os.walk(ap) for f in fs
+            )
+            listing, total_n = entries[:MAX_LISTING], len(entries)
+            cut = total_n - len(listing)
+            with open(dest + ".listing.txt", "w", encoding="utf-8") as fh:
+                fh.write("\n".join(listing) + "\n")
+                if cut:
+                    fh.write(f"... [verify_claim] TRUNCATED: {total_n} file(s) total, first "
+                             f"{MAX_LISTING} listed; {cut} NOT shown (unlisted != absent) ...\n")
+            # A silent cut reads as "these are all the files there are" — say the count out loud so
+            # an omitted entry can't be mistaken for a missing record (#818 review, P1).
+            facts.append(f"- kind: directory, {total_n} file(s) total, {len(listing)} listed"
+                         + (f" — **LISTING TRUNCATED**, {cut} file(s) not shown; absence from the "
+                            "listing does NOT mean the file is absent from the directory" if cut else ""))
+            manifest.append(f"- `{rel}.listing.txt` (directory listing of `{p}`"
+                            + (f"; TRUNCATED to the first {MAX_LISTING} of {total_n})" if cut else ")"))
         else:
-            facts.append(f"- packet copy: NONE (binary, {size} bytes > {MAX_BYTES}); facts above are the record")
-    if ROOT:
-        tracked = git("ls-files", "--error-unmatch", "--", ap, cwd=ROOT)
-        facts.append(f"- git: {'tracked' if tracked is not None else 'NOT tracked'} in `{ROOT}`")
+            size = os.path.getsize(ap)
+            ent["sha256"] = sha256_of(ap)
+            facts.append(f"- bytes: {size}")
+            facts.append(f"- sha256: `{ent['sha256']}`")
+            text = is_text(ap)
+            if text:
+                ent["lines"] = line_count(ap)
+                facts.append(f"- lines: {ent['lines']}")
+            if size <= MAX_BYTES:
+                shutil.copyfile(ap, dest)
+                manifest.append(f"- `{rel}` (full copy of `{p}`)")
+            elif text:
+                with open(ap, encoding="utf-8", errors="replace") as fh:
+                    head = [next(fh, "") for _ in range(HEAD_LINES)]
+                tail = subprocess.run(["tail", "-n", str(TAIL_LINES), ap],
+                                      capture_output=True, text=True).stdout
+                with open(dest, "w", encoding="utf-8") as fh:
+                    fh.write("".join(head))
+                    fh.write(excerpt_note(size))
+                    fh.write(tail)
+                facts.append(f"- packet copy: EXCERPT ONLY (first {HEAD_LINES} + last {TAIL_LINES} "
+                             f"lines of {ent['lines']})")
+                manifest.append(f"- `{rel}` (head+tail excerpt of `{p}`; full sha256/line count in MECHANICAL_FACTS.md)")
+            else:
+                facts.append(f"- packet copy: NONE (binary, {size} bytes > {MAX_BYTES}); facts above are the record")
+        if ROOT:
+            tracked = git("ls-files", "--error-unmatch", "--", ap, cwd=ROOT)
+            facts.append(f"- git: {'tracked' if tracked is not None else 'NOT tracked'} in `{ROOT}`")
     for sha in sorted(ent["commits"]):
         if not ROOT:
             facts.append(f"- `@{sha}`: NOT EVALUATED (no git repo at or above the experiment dir)")
             continue
-        relroot = os.path.relpath(ap, ROOT)
-        present = subprocess.run(["git", "cat-file", "-e", f"{sha}:{relroot}"],
-                                 cwd=ROOT, capture_output=True).returncode == 0
         anc = subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"],
                              cwd=ROOT, capture_output=True).returncode == 0 if HEAD else False
-        facts.append(f"- `@{sha}`: path present at that commit = {'YES' if present else 'NO'}; "
-                     f"commit is an ancestor of HEAD = {'YES' if anc else 'NO'}")
+        relroot = resolve_in_commit(p, sha)
+        facts.append(f"- `@{sha}`: path present at that commit = {'YES' if relroot else 'NO'}"
+                     + (f" (as `{relroot}`)" if relroot else "")
+                     + f"; commit is an ancestor of HEAD = {'YES' if anc else 'NO'}")
+        if not relroot:
+            continue
+        pin_rel = f"{rel}@{sha}"
+        pin_dest = os.path.join(PACKET, pin_rel)
+        os.makedirs(os.path.dirname(pin_dest) or PACKET, exist_ok=True)
+        info = ingest_blob(sha, relroot, pin_dest)
+        if info is None:
+            facts.append(f"  - AT THAT COMMIT: `{relroot}` is a directory, not a file — no pinned copy")
+            continue
+        facts.append(f"  - AT THAT COMMIT: bytes={info['size']}, sha256=`{info['sha256']}`"
+                     + (f", lines={info['lines']}" if info["lines"] is not None else ""))
+        ent["pinned"] = True
+        if info["packet"]:
+            facts.append(f"  - pinned copy in the packet: `{pin_rel}` ({info['packet']})")
+            manifest.append(f"- `{pin_rel}` (`{p}` AS OF commit {sha} — the bytes this citation pins)")
+        else:
+            facts.append(f"  - pinned copy in the packet: NONE (binary, {info['size']} bytes > "
+                         f"{MAX_BYTES}); the facts above are the record")
+        if ent.get("sha256") and ent["sha256"] != info["sha256"]:
+            facts.append(f"  - **NOTE: the working tree DIFFERS from `@{sha}`.** Judge a claim that "
+                         f"cites `{p}@{sha}` against `{pin_rel}`, never against `{rel}`.")
     facts.append("")
 
 # ---- evaluate the opt-in `check:` directives --------------------------------------------------
@@ -345,13 +492,13 @@ def eval_check(kind, arg):
         p, sha = parts[0].rsplit("@", 1)
         if not ROOT:
             return None, f"`{parts[0]}`: no git repo at or above the experiment dir"
-        ap, _ = resolve(p)
-        relroot = os.path.relpath(ap, ROOT) if ap else p
-        present = subprocess.run(["git", "cat-file", "-e", f"{sha}:{relroot}"],
-                                 cwd=ROOT, capture_output=True).returncode == 0
+        # Resolved AT THE COMMIT, not through the working tree: a path deleted or moved since the
+        # pin was taken was still present then, and that is exactly what this directive asserts.
+        relroot = resolve_in_commit(p, sha)
         anc = subprocess.run(["git", "merge-base", "--is-ancestor", sha, "HEAD"],
                              cwd=ROOT, capture_output=True).returncode == 0
-        return (present and anc), f"`{p}` present at {sha}={present}; {sha} ancestor of HEAD={anc}"
+        return (relroot is not None and anc), (f"`{p}` present at {sha}={relroot is not None}; "
+                                               f"{sha} ancestor of HEAD={anc}")
     return None, f"unrecognized directive `check: {kind} {arg}`"
 
 
@@ -381,6 +528,9 @@ with open(os.path.join(PACKET, "MECHANICAL_FACTS.md"), "w", encoding="utf-8") as
              "authoritative as the files it describes, and it is the answer to \"does this path exist / what\n"
              "is its hash / how many rows / did that commit land\" — do NOT answer UNKNOWN on a question this\n"
              "file already settles.\n\n"
+             "A citation written `<path>@<sha>` pins a REVISION. The packet carries that revision's own bytes\n"
+             "at `<packet path>@<sha>`, and its facts below are computed from those bytes — not from the\n"
+             "working tree, which may have moved on. Judge a pinned claim against the pinned copy.\n\n"
              f"- experiment dir: `{EXP}`\n"
              f"- repo root: `{ROOT or '(not a git repo)'}`\n"
              f"- HEAD: `{HEAD or '-'}`\n\n"
@@ -403,7 +553,8 @@ with open(os.path.join(WORK, "residual_claims.md"), "w", encoding="utf-8") as fh
             if c.get("note"):
                 fh.write(c["note"] + "\n")
 
-unresolved = [p for p in sorted(cited) if not cited[p].get("abs")]
+# Pinned-only is resolved: the cited bytes ARE in the packet, even though the working tree moved on.
+unresolved = [p for p in sorted(cited) if not cited[p].get("abs") and not cited[p].get("pinned")]
 print(f"[verify_claim] packet: {len(manifest)} file(s); "
       f"{len(mech_lines) // 3} claim(s) settled mechanically; {len(residual)} to the verifier; "
       f"{len(unresolved)} cited path(s) unresolved", file=sys.stderr)
@@ -420,7 +571,9 @@ if [ -s "$WORK/residual_claims.md" ]; then
 The packet also contains MECHANICAL_FACTS.md — file existence, sha256 hashes, line counts and git
 ancestry already resolved DETERMINISTICALLY by the script that built this packet. It is a primary
 record: never answer UNKNOWN on something it already settles, and if a claim contradicts it, that is
-a DISPUTE with MECHANICAL_FACTS.md as the decisive citation. Claims settled entirely by code were
+a DISPUTE with MECHANICAL_FACTS.md as the decisive citation. A claim citing \`<path>@<sha>\` is about
+the PINNED revision, whose own bytes are in the packet as \`<path>@<sha>\` — read that copy, not the
+working-tree one next to it. Claims settled entirely by code were
 already answered and are not in the list below, so keep each claim's ORIGINAL number in your output —
 the numbering may have gaps.
 "
@@ -447,12 +600,17 @@ fi
   if [ -s "$VERIFIER_OUT" ]; then
     echo "## Verifier verdicts (independent model family, semantic claims only)"
     echo
-    cat "$VERIFIER_OUT"
+    echo "_(the verifier's own SUMMARY line is folded into the single combined SUMMARY at the end.)_"
+    echo
+    # Drop the verifier's SUMMARY. The file must carry exactly ONE, the combined one below: two
+    # SUMMARY records let a consumer grep the first and read semantic-only counts, missing every
+    # mechanically-resolved DISPUTE above it (#818 review, P0).
+    grep -vE "^[[:space:]]*SUMMARY:" "$VERIFIER_OUT" || true
     echo
   fi
 } > "$OUT.assembled"
 
-# Combined SUMMARY over BOTH halves — the line downstream consumers read.
+# The ONE combined SUMMARY, over both halves — the line downstream consumers read.
 CONFIRM=$(grep -cE "^CLAIM [0-9]+: CONFIRM" "$OUT.assembled" || true)
 DISPUTE=$(grep -cE "^CLAIM [0-9]+: DISPUTE" "$OUT.assembled" || true)
 UNKNOWN=$(grep -cE "^CLAIM [0-9]+: UNKNOWN" "$OUT.assembled" || true)

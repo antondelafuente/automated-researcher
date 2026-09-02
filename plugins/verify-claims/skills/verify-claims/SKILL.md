@@ -48,13 +48,26 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
 
 - **The packet is assembled from the experiment dir.** `DESIGN.md` always, plus every path the claims
   file cites that actually resolves (searched under the experiment dir, its parent, the repo root,
-  and the cwd — so a sibling experiment's record resolves too). Files over
-  `VERIFY_CLAIM_MAX_BYTES` (2 MiB) go in as a head+tail excerpt; directories go in as a listing.
+  and the cwd — so a sibling experiment's record resolves too). A bare `RESULTS.md` counts as much as
+  `registry/x/data/train.jsonl` or `artifacts/model.safetensors`: **inclusion is decided by
+  resolution, not by how path-shaped the token looks.** Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
+  go in as a head+tail excerpt; directories go in as a listing, and a listing cut at 500 entries says
+  so in the facts, the manifest, and the listing file (unlisted is not the same as absent).
+- **A `<path>@<sha>` citation pins a REVISION, and the packet carries that revision's bytes** — the
+  blob is materialized from git as `<path>@<sha>` and hashed/line-counted from those bytes, so the
+  verifier reads what the claim pinned rather than a working-tree file that may have been amended
+  since. It works for a path that has since been moved or deleted, and when the two differ the facts
+  say so and name the pinned copy as the one to judge against. This is what makes the light design
+  path's parent-drift check (`design-experiment` Step 2b) checkable at all.
 - **`MECHANICAL_FACTS.md` is computed and put in the packet before the model sees anything** —
   existence, byte size, sha256, line count, git-tracked status, and for a cited `<path>@<sha>`,
-  whether the path existed at that commit and whether the commit is an ancestor of HEAD. The verifier
-  is told this file is a primary record and must not answer UNKNOWN on anything it settles. A cited
-  path that resolves to nothing is reported loudly, in the verdict and on stderr, as itself.
+  whether the path existed at that commit, whether the commit is an ancestor of HEAD, and the pinned
+  blob's own size/hash/lines. The verifier is told this file is a primary record and must not answer
+  UNKNOWN on anything it settles. A cited path that resolves to nothing — in the working tree and at
+  every commit it pins — is reported loudly, in the verdict and on stderr, as itself; a token that is
+  neither resolvable nor unambiguously a path (backticked, `@sha`-pinned, or two-plus slashes) is
+  treated as prose rather than a missing record. Use `check: exists <path>` when you need an
+  unresolvable bare name to fail the gate outright.
 - **`check:` directives settle a claim without a model at all** — opt-in, indented under the claim:
   `check: exists <path>` · `check: sha256 <path> <hex>` · `check: rows <path> <n>` ·
   `check: commit <path>@<sha>`. All directives pass → deterministic `CONFIRM`; any fails → `DISPUTE`
@@ -66,8 +79,11 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
   than its directives check (identity, lineage, "same construct as") is a semantic claim — leave the
   directives off and let the verifier read it, with the mechanical facts now in front of it.
 - The verdict file records the packet manifest, the mechanically-resolved verdicts, the verifier's
-  verdicts, and one combined `SUMMARY:` over both halves. `VERIFY_CLAIM_KEEP_EVIDENCE=1` keeps the
-  generated packet dir for inspection. The two-argument form is unchanged for existing callers.
+  verdicts, and **exactly one** `SUMMARY:` line — the combined one over both halves, at the end. The
+  verifier's own SUMMARY is folded into it and does not appear separately, so a consumer that greps
+  the first `SUMMARY:` cannot read semantic-only counts and miss the mechanical DISPUTEs above them.
+  `VERIFY_CLAIM_KEEP_EVIDENCE=1` keeps the generated packet dir for inspection. The two-argument form
+  is unchanged for existing callers.
 
 ## Requirements / configuration
 

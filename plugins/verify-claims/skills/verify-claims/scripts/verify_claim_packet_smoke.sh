@@ -109,6 +109,11 @@ grep -q "MECHANICAL_FACTS.md" "$TMP/prompt.txt" \
   || bad "verifier prompt never mentions MECHANICAL_FACTS.md"
 grep -q "^SUMMARY: confirm=" "$TMP/out1.md" && ok "verdict carries a combined SUMMARY line" \
   || bad "verdict has no combined SUMMARY line"
+# Two SUMMARY records let a consumer grep the first one and read semantic-only counts, missing every
+# mechanically-resolved DISPUTE above it (#818 review, P0).
+n_sum=$(grep -cE "^[[:space:]]*SUMMARY:" "$TMP/out1.md")
+[ "$n_sum" = 1 ] && ok "exactly one SUMMARY record in the verdict (verifier's own is folded in)" \
+  || bad "verdict carries $n_sum SUMMARY records; the combined one must be the only one"
 
 # ---------------------------------------------------------------- 2. `check:` directives settle claims
 rm -f "$TMP/prompt.txt"
@@ -180,6 +185,91 @@ grep -q "Evidence packet (built by code" "$TMP/out6.md" \
 grep -q "MECHANICAL_FACTS" "$TMP/prompt.txt" \
   && bad "the --exp prompt preamble leaked into the legacy path (its calibration is prompt-specific)" \
   || ok "legacy prompt is unchanged — no --exp preamble"
+
+# ---------------------------------------------------------------- 6. citation shapes reach the packet
+# Inclusion must be decided by RESOLUTION, not by how path-shaped a token looks: a shape guess is
+# what silently dropped a bare `RESULTS.md` and a long-extension `artifacts/model.safetensors`
+# (#818 review, P0) — the exact packing hole --exp exists to close.
+rm -f "$TMP/prompt.txt"
+mkdir -p "$EXPD/artifacts"
+echo "# results" > "$EXPD/RESULTS.md"
+printf 'weights\n' > "$EXPD/artifacts/model.safetensors"
+CL7="$TMP/claims7.txt"
+cat > "$CL7" <<'EOF'
+1. The headline number lives in RESULTS.md and the checkpoint is artifacts/model.safetensors.
+2. Every arm was scored and/or re-scored at 24k/53k tokens, per no file in particular.
+EOF
+run_vc "$CL7" "$TMP/out7.md"
+PKT7=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
+[ -f "$PKT7/RESULTS.md" ] && ok "a bare cited filename reaches the packet" \
+  || bad "bare cited path RESULTS.md not copied into the packet"
+[ -f "$PKT7/artifacts/model.safetensors" ] \
+  && ok "a one-level path with a long extension reaches the packet" \
+  || bad "cited path artifacts/model.safetensors not copied into the packet"
+grep -qE "WARN cited path does not resolve: (and/or|24k/53k)" "$TMP/run.log" \
+  && bad "prose with a slash was reported as a missing record" \
+  || ok "prose that merely contains a slash is not reported as a missing record"
+
+# ---------------------------------------------------------------- 7. `<path>@<sha>` pins a REVISION
+# The packet must carry the bytes AT THE PIN. Showing the working-tree file instead is how a
+# parent-drift check silently passes on an amended parent (#818 review, P0).
+rm -f "$TMP/prompt.txt"
+echo "# parent design — AMENDED AFTER THE PIN" > "$REPO/registry/parent-1/DESIGN.md"
+printf 'x\ny\n' > "$EXPD/data/gone.jsonl"
+git -C "$REPO" add -A >/dev/null
+git -C "$REPO" commit -qm "amend parent, add a file that will be deleted" >/dev/null
+GONE_SHA=$(git -C "$REPO" rev-parse HEAD)
+rm -f "$EXPD/data/gone.jsonl"
+git -C "$REPO" commit -qam "delete gone.jsonl" >/dev/null
+CL8="$TMP/claims8.txt"
+cat > "$CL8" <<EOF
+1. The baseline is registry/parent-1/DESIGN.md@$PARENT_SHA as authorized.
+2. The dropped pool was registry/exp-1/data/gone.jsonl@$GONE_SHA at the time it was measured.
+EOF
+run_vc "$CL8" "$TMP/out8.md"
+PKT8=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
+PIN="$PKT8/registry/parent-1/DESIGN.md@$PARENT_SHA"
+if [ -f "$PIN" ]; then
+  ok "the pinned revision is materialized into the packet"
+  grep -q "AMENDED AFTER THE PIN" "$PIN" \
+    && bad "the pinned copy holds the working-tree bytes, not the bytes at the pin" \
+    || ok "the pinned copy holds the bytes AS OF the pinned commit"
+else
+  bad "no pinned copy at $PIN — the verifier would only see the amended working-tree file"
+fi
+grep -q "the working tree DIFFERS from" "$PKT8/MECHANICAL_FACTS.md" \
+  && ok "MECHANICAL_FACTS.md flags the working tree/pin divergence" \
+  || bad "a diverged pin is not flagged in MECHANICAL_FACTS.md"
+[ -f "$PKT8/registry/exp-1/data/gone.jsonl@$GONE_SHA" ] \
+  && ok "a path deleted since the pin is still materialized at its pinned commit" \
+  || bad "a since-deleted pinned path produced no packet copy"
+grep -q "WARN cited path does not resolve: registry/exp-1/data/gone.jsonl" "$TMP/run.log" \
+  && bad "a pinned path whose bytes ARE in the packet was reported unresolved" \
+  || ok "pinned-only paths are not reported as unresolved"
+
+# ---------------------------------------------------------------- 8. a truncated listing says so
+# Omitted evidence must be distinguishable from absent evidence (#818 review, P1).
+rm -f "$TMP/prompt.txt"
+BIGD="$EXPD/rollouts"; mkdir -p "$BIGD"
+for i in $(seq 1 505); do : > "$BIGD/r$i.json"; done
+CL9="$TMP/claims9.txt"
+cat > "$CL9" <<'EOF'
+1. Every rollout landed under registry/exp-1/rollouts.
+EOF
+run_vc "$CL9" "$TMP/out9.md"
+PKT9=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
+grep -q "LISTING TRUNCATED" "$PKT9/MECHANICAL_FACTS.md" \
+  && ok "a truncated directory listing is marked in MECHANICAL_FACTS.md" \
+  || bad "a directory listing cut at 500 entries is not marked as truncated"
+grep -q "505 file(s) total" "$PKT9/MECHANICAL_FACTS.md" \
+  && ok "the full directory count is stated even when the listing is cut" \
+  || bad "MECHANICAL_FACTS.md does not state the true file count for a truncated listing"
+grep -q "TRUNCATED" "$PKT9/registry/exp-1/rollouts.listing.txt" \
+  && ok "the listing file itself marks the cut" \
+  || bad "the listing file ends silently at 500 entries"
+grep -q "TRUNCATED to the first 500 of 505" "$TMP/out9.md" \
+  && ok "the verdict's packet manifest marks the cut" \
+  || bad "the verdict manifest does not mark the truncated listing"
 
 [ "$fail" = 0 ] && echo "[verify_claim_packet_smoke] PASS" >&2 || echo "[verify_claim_packet_smoke] FAIL" >&2
 exit "$fail"

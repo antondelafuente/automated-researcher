@@ -29,9 +29,18 @@
   its cause — the verifier saw only a hand-packed dir, so a forgotten path was UNKNOWN *by construction*
   (found in 3/3 recent designs, ~2-3 min and ~$1-2 each, never once surfacing a new contradiction). Opt-in
   `check:` directives (`exists`/`sha256`/`rows`/`commit`) settle a claim deterministically and skip the
-  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed. The two-argument
+  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed. Packet inclusion is
+  decided by RESOLUTION, not by how path-shaped a token looks (a shape guess dropped a bare `RESULTS.md`
+  and a long-extension `artifacts/model.safetensors` in silence — the very hole `--exp` exists to close);
+  a `<path>@<sha>` citation is materialized from git AT THAT COMMIT, so the verifier reads the bytes the
+  claim pinned rather than a working tree that may have been amended since (this is what makes the light
+  path's parent-drift check checkable), and it works for a path moved or deleted since; a directory listing
+  cut at 500 entries says so in the facts, the manifest, and the listing file; and the verdict carries
+  exactly ONE `SUMMARY:` — the combined one — so no consumer can grep semantic-only counts and miss the
+  mechanical DISPUTEs. The two-argument
   hand-assembled form is unchanged for existing callers, and `verify_claim_packet_smoke.sh` covers packet
-  assembly, the mechanical facts, fail-closed directives, and that legacy shape.
+  assembly, the mechanical facts, fail-closed directives, citation shapes, pinned revisions, listing
+  truncation, the single-SUMMARY guarantee, and that legacy shape.
 - experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
   `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
   (#813). Step 4 assumed the designing session is also the launching session; that broke in production
