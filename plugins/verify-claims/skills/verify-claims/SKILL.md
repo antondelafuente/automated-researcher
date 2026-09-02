@@ -28,13 +28,81 @@ zero-context instance still gives you context independence either way.
 
 1. Write the claims as a numbered list in a file — one atomic, record-checkable claim per line.
    Don't editorialize; state each claim exactly as strongly as it's being relied upon.
-2. Collect the primary records into one directory (copies/symlinks fine). The verifier sees
-   ONLY this directory — if the claim needs evidence that isn't there, that's a finding.
-3. Run: `scripts/verify_claim.sh <claims-file> <evidence-dir>`
-4. Read the verdict file it writes:
+2. Run it. **Inside an experiment dir, use `--exp` and let the packet be built by code** (below):
+   `scripts/verify_claim.sh --exp <experiment-dir> <claims-file>`.
+   Outside one, collect the primary records into one directory yourself (copies/symlinks fine) and
+   run `scripts/verify_claim.sh <claims-file> <evidence-dir>` — the verifier sees ONLY that
+   directory, so anything the claim needs and you didn't copy comes back UNKNOWN.
+3. Read the verdict file it writes:
    - **DISPUTE** → stop; resolve before proceeding (the verifier cites the contradicting line).
    - **UNKNOWN** → the records are too thin to support the claim; treat as a record gap.
    - **CONFIRM** → proceed; the citation is your receipt.
+
+### `--exp` — the evidence packet built by code (automated-researcher#817)
+
+The hand-assembled packet was the mechanical waste in the design gate: the verifier sees only the
+evidence dir, so **any path the designer forgot to copy came back UNKNOWN *by construction*** — a
+packing mistake wearing a records-finding's clothes — and the only fix was reassemble + rerun
+(~2-3 min and ~$1-2 a time; a transcript read found the retry in 3 of 3 recent designs, and no rerun
+ever turned up a new contradiction). `--exp` removes the cause rather than the symptom:
+
+- **The packet is assembled from the experiment dir.** `DESIGN.md` always, plus every path the claims
+  file cites that actually resolves (searched under the experiment dir, its parent, the repo root,
+  and the cwd — so a sibling experiment's record resolves too). **Inclusion is decided by resolution
+  and nothing else — there is no shape pre-filter in front of it**, so an extensionless `SHA256SUMS`
+  or `Makefile` counts as much as a bare `RESULTS.md`, `registry/x/data/train.jsonl`, an absolute
+  `/tmp/run/out.txt`, or `artifacts/model.safetensors`. (An ordinary word that happens to name a real
+  file just adds a primary record; a dropped citation is the hole `--exp` exists to close, so the
+  asymmetry runs toward including.) **A backticked span is ONE literal citation, taken whole with its
+  spaces** (`my results.jsonl`), and a `check:` directive's path argument is a citation too — both are
+  the author marking a name as literal, so neither is word-split into fragments.
+  Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
+  go in as a head+tail excerpt; directories go in as a listing, and a listing cut at 500 entries says
+  so in the facts, the manifest, and the listing file (unlisted is not the same as absent).
+- **Every packet name is claimed, so two records can never collide.** A `../`-relative citation
+  flattens to `cited/<basename>`, which put `../run-a/results.jsonl` and `../run-b/results.jsonl` on
+  one file: the packet held run-b's bytes while the facts described both, each with its own sha256.
+  Two citations of the same object still share one copy; two that resolve to DIFFERENT objects
+  (generated names — `<rel>.listing.txt`, pinned `<rel>@<sha>` — included) get different paths, the
+  loser landing at `cited/<hash-of-citation>/<basename>`. `MECHANICAL_FACTS.md` names each included
+  file's packet path, so a citation can always be mapped to the copy holding its bytes.
+- **A `<path>@<sha>` citation pins a REVISION, and the packet carries that revision's bytes** — the
+  blob is materialized from git as `<path>@<sha>` and hashed/line-counted from those bytes, so the
+  verifier reads what the claim pinned rather than a working-tree file that may have been amended
+  since. It works for a path that has since been moved or deleted, and when the two differ the facts
+  say so and name the pinned copy as the one to judge against. This is what makes the light design
+  path's parent-drift check (`design-experiment` Step 2b) checkable at all.
+- **`MECHANICAL_FACTS.md` is computed and put in the packet before the model sees anything** —
+  existence, byte size, sha256, line count, git-tracked status, and for a cited `<path>@<sha>`,
+  whether the path existed at that commit, whether the commit is an ancestor of HEAD, and the pinned
+  blob's own size/hash/lines. The verifier is told this file is a primary record and must not answer
+  UNKNOWN on anything it settles. A cited path that resolves to nothing — in the working tree and at
+  every commit it pins — is reported loudly, in the verdict and on stderr, as itself; a token that is
+  neither resolvable nor unambiguously a path (backticked, `check:`-declared, `@sha`-pinned, or
+  two-plus slashes) is treated as prose rather than a missing record. Use `check: exists <path>` when
+  you need an unresolvable bare name to fail the gate outright. The file also carries a
+  **`## check: directives`** section holding each directive's evaluation verbatim — the mechanical
+  verdicts cite `MECHANICAL_FACTS.md` as their evidence, so the quoted string has to be in it.
+- **`check:` directives settle a claim without a model at all** — opt-in, indented under the claim:
+  `check: exists <path>` · `check: sha256 <path> <hex>` · `check: rows <path> <n>` ·
+  `check: commit <path>@<sha>`. All directives pass → deterministic `CONFIRM`; any fails → `DISPUTE`
+  (a cited path that doesn't resolve fails CLOSED, on purpose — a gate that fails open is not a gate).
+  Those claims never reach the verifier, so the model's pass is spent on the **semantic** provenance
+  claims, which is what it is actually better than a script at. A directive the *environment* can't
+  evaluate (e.g. `commit` outside a git repo) settles nothing **by itself**, and precedence is
+  failure-first: a claim with any failed directive is DISPUTED however many of its others were
+  unevaluable, and only a claim with no failure and something unevaluable goes to the verifier with a
+  note. (Reading it the other way round lets an already-MISSING `check: exists` reach the model as an
+  open question because a sibling `check: commit` couldn't run — the gate failing open.)
+- **Write directives only for what a script can truly settle.** A claim whose sentence asserts more
+  than its directives check (identity, lineage, "same construct as") is a semantic claim — leave the
+  directives off and let the verifier read it, with the mechanical facts now in front of it.
+- The verdict file records the packet manifest, the mechanically-resolved verdicts, the verifier's
+  verdicts, and **exactly one** `SUMMARY:` line — the combined one over both halves, at the end. The
+  verifier's own SUMMARY is folded into it and does not appear separately, so a consumer that greps
+  the first `SUMMARY:` cannot read semantic-only counts and miss the mechanical DISPUTEs above them.
+  `VERIFY_CLAIM_KEEP_EVIDENCE=1` keeps the generated packet dir for inspection. The two-argument form
+  is unchanged for existing callers.
 
 ## Requirements / configuration
 
@@ -68,7 +136,8 @@ evidence** ladder — each rung read by a foreign model family you're too invest
   researcher explicitly decline it? A resource limit that is itself a discretionary design choice (e.g. "only
   one pod") is NOT a valid reason to serialize. Does its cost reasoning distinguish per-compute billing
   (N parallel costs the same as N serial) from per-wallclock billing (a rented pod)? (Audit once → triage as a
-  peer → surface survivors to the human; on a re-run it's a peer debate, not a fresh scan.)
+  peer → REPORT the survivors to the human — a report at the end, not a gate mid-run, except for a
+  load-bearing arbitration, automated-researcher#817; on a re-run it's a peer debate, not a fresh scan.)
 - **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
   vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a
   STRATIFIED high-risk sample and asks "would this data make the experiment invalid or misleading?"

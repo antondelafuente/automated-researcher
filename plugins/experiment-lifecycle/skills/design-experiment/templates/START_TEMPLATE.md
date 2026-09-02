@@ -1,8 +1,19 @@
 # START.md — <EXP_NAME>  (<one-line what this run does>)
 
 You are a **fresh-context executor** on a disposable compute environment (<backend / GPU, e.g. a cloud GPU pod>).
-Zero prior context — **this file is your whole brief.** Work autonomously, do NOT ask questions. A supervising agent
-watches your progress; talk to it with clear status lines.
+Zero prior context — **this file plus `DESIGN.md` in this same directory is your whole brief.** Work
+autonomously, do NOT ask questions. A supervising agent watches your progress; talk to it with clear status lines.
+
+<!-- DESIGNER: cite DESIGN.md, don't restate it (automated-researcher#817). This file carries what is
+     OPERATIONALLY its own — paths, exact commands, env, the executor disposition, the artifact list — and
+     REFERENCES DESIGN.md by section heading for everything the design already states (arms, instrument pins,
+     the canonical metric, fan-out, comparability, Presentation): "arms + pins per `DESIGN.md` § What's
+     measured". A restated pin is a second copy that can diverge from the one the design-audit cleared. The
+     executor has DESIGN.md open right here, so self-sufficiency is unaffected — but every `DESIGN.md §`
+     citation you write must resolve to a real heading; check them in the self-sufficiency pass. -->
+
+**Read `DESIGN.md` (same directory) first — it is the science this brief executes.** Where a section below
+cites `DESIGN.md § <heading>`, that citation is the authoritative statement; this file does not repeat it.
 
 > **Executor disposition (verbatim — this is what makes the handoff work):** Run this experiment to completion — do
 > not end your turn until you hit a real blocker or you're done; stopping after planning is the failure mode.
@@ -47,10 +58,12 @@ watches your progress; talk to it with clear status lines.
 
 ## Your one job
 <One sentence: build/train/eval X, upload, report. What new data point this produces.>
+Arms, metric, comparability pins: `DESIGN.md § <heading>` — do not restate them here.
 
 ## The idea (so you can sanity-check your own work)
-<2–4 sentences on what the experiment is and what a correct result looks like, so you can catch your own bugs —
-e.g. "if any single arm wins >90% the selection is degenerate".>
+<2–4 sentences on what a correct result looks like OPERATIONALLY, so you can catch your own bugs —
+e.g. "if any single arm wins >90% the selection is degenerate". The purpose itself lives in
+`DESIGN.md § <heading>`; cite it rather than paraphrasing it.>
 
 ## Inputs. ⚠️ FILE NAMES CAN BE MISLEADING — verify by content, not name:
 - <label>: `<storage path / URI>`  (<discriminator: avg length, label rate, etc.>)

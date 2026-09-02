@@ -7,6 +7,12 @@
 #   surfaces for THIS experiment (training data, eval input data, eval rollouts). For each CONDITIONAL
 #   gate either keep it — INSTANTIATING its declared invariant for THIS experiment — or mark it N.A.; then ADD the
 #   EXPERIMENT-SPECIFIC gates (you know this experiment's failure modes; the executor can't invent them).
+#   CITE DESIGN.md, DON'T RESTATE IT (automated-researcher#817). A gate's WORDING — what must be true and what
+#   evidence resolves it — is this file's own; the arms, instrument pins, metric and load-bearing deltas it
+#   ranges over live in DESIGN.md and are referenced BY HEADING ("every delta named load-bearing in DESIGN.md
+#   § What's measured"). Re-listing them here makes a second copy that goes stale on the first design-audit
+#   ACCEPT — which is exactly why the old grep-every-sibling-doc gate (#375) existed, and why removing the
+#   copies retires it instead of enforcing it.
 #   Different experiment types lean very differently: a training run uses most CONDITIONAL gates; a pure
 #   interp/ROME run marks most N.A. and adds its own (e.g. "forward-hook removed after each pass",
 #   "patch recipient == the reference map's checkpoint"); an eval-only run marks training-only gates N.A.
@@ -183,10 +189,6 @@
       resume API the run will call (exercise the resume call, or inspect a checkpoint-type field) — not
       just existence/matching metadata via a generic lookup, which doesn't distinguish checkpoint
       flavors (a platform may have incompatible ones, e.g. training-resumable vs. inference-only, #348). ev:
-- ☐ [BLOCK] Any accepted amendment to DESIGN.md/START.md (a design-audit ACCEPT, or an executor-cleared
-      mid-run correction) greps clean against every sibling doc (data_audit_manifest.md, CHECKLIST.md,
-      gate_evidence/*) for the amended clause before the run continues — `grep -l "<amended term>"
-      <dir>/*.md <dir>/gate_evidence/*` (#375). N.A. only if no amendment occurred.                  ev:
 - ☐ [BLOCK] Judge/classifier instrument capacity sized against THIS wave's estimated call volume + deadline
       (rows/min the pinned instrument can actually absorb at its provisioned concurrency, not its theoretical
       rate) BEFORE dispatch — pre-provisioned (e.g. multiple validated keys/accounts) if the check would
