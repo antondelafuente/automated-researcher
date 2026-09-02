@@ -175,6 +175,11 @@ grep -q "Evidence packet (built by code" "$TMP/out6.md" \
   || ok "legacy form's output is the verifier's verdict verbatim, as before"
 [ "$(cat "$TMP/evidence.txt")" = "$LEG" ] && ok "legacy form points the verifier at the hand-assembled dir" \
   || bad "legacy evidence dir was '$(cat "$TMP/evidence.txt" 2>/dev/null)', expected '$LEG'"
+# The calibration provenance (3/3 incidents caught, 0 false alarms) is against the ORIGINAL prompt text;
+# --exp's extra instructions must not leak into the legacy path and silently re-calibrate it.
+grep -q "MECHANICAL_FACTS" "$TMP/prompt.txt" \
+  && bad "the --exp prompt preamble leaked into the legacy path (its calibration is prompt-specific)" \
+  || ok "legacy prompt is unchanged — no --exp preamble"
 
 [ "$fail" = 0 ] && echo "[verify_claim_packet_smoke] PASS" >&2 || echo "[verify_claim_packet_smoke] FAIL" >&2
 exit "$fail"

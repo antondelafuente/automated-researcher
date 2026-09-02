@@ -77,7 +77,6 @@ Rules:
 - UNKNOWN is a respectable answer. Do NOT stretch to CONFIRM: a claim that is merely
   consistent with the records but not evidenced by them is UNKNOWN, not CONFIRM.
 - A claim is DISPUTED if any part of it is contradicted, even if other parts hold.
-- Keep each claim's ORIGINAL number in your output; the numbering may have gaps.
 
 Output format (exactly):
 CLAIM <n>: <CONFIRM|DISPUTE|UNKNOWN>
@@ -422,7 +421,8 @@ The packet also contains MECHANICAL_FACTS.md — file existence, sha256 hashes, 
 ancestry already resolved DETERMINISTICALLY by the script that built this packet. It is a primary
 record: never answer UNKNOWN on something it already settles, and if a claim contradicts it, that is
 a DISPUTE with MECHANICAL_FACTS.md as the decisive citation. Claims settled entirely by code were
-already answered and are not in the list below, so the numbering has gaps — keep the numbers given.
+already answered and are not in the list below, so keep each claim's ORIGINAL number in your output —
+the numbering may have gaps.
 "
 else
   : > "$VERIFIER_OUT"

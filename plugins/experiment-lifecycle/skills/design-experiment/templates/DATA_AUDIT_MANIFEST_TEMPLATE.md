@@ -38,8 +38,7 @@ split how; relabeled how. Each transformation is a place a bug can enter.>
 - <e.g. labels/arms: every row tagged with the correct arm; balance as designed>
 
 ## What would INVALIDATE the experiment (the auditor's north star)
-Experiment-level: `DESIGN.md § <heading>`. Below: the ways bad data on THIS surface specifically would
-silently produce a confidently-wrong result —
-<e.g. "truncated CoT
-trains the model to stop reasoning (the empty-think collapse); off-distribution prompts confound the
-distribution test; a descriptor confound makes the trait unattributable">
+Experiment-level: `DESIGN.md § <heading>` (cited, not restated).
+<the ways bad data on THIS surface specifically would silently produce a confidently-wrong result — e.g.
+"truncated CoT trains the model to stop reasoning (the empty-think collapse); off-distribution prompts
+confound the distribution test; a descriptor confound makes the trait unattributable">
