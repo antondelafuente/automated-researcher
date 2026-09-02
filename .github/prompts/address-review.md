@@ -30,13 +30,27 @@ below in it, not in this prompt's paraphrase.
    issue's body is the scope contract those findings are adjudicated against (step 3).
 2. Decide whether this round requires whole-mechanism re-derivation, using the review data step 1 already
    fetched: count the trailing run of consecutive `CHANGES_REQUESTED` reviews ending at the latest round
-   (no `APPROVED` in between). If this is the **2nd consecutive** `CHANGES_REQUESTED` on this PR, or if the
-   latest round contains any P0 finding that is design-class (about which invariant governs the surface,
-   not a line-level defect), do not go straight to patching the cited lines. Instead, step back first: name
-   the invariant that actually governs the surface the findings sit on, check whether the current design —
-   not just the specific lines flagged — satisfies it, and fix at that level. A third narrow patch-comment
-   round on the same surface is the failure mode this step exists to prevent; converging in one broader fix
-   is cheaper than another round of local patches that only shifts where the next finding lands.
+   (no `APPROVED` in between). Do **not** go straight to patching the cited lines when any of these holds:
+   - **(a) recurrence by count** — that trailing count is **2 or more**. This is a floor, not an equality
+     test: it fires on the 2nd consecutive round and on every round after it, not only on the 2nd.
+   - **(b) recurrence by surface** — the latest finding sits on a surface or invariant that a prior round
+     on this PR already touched, whatever the round number. Two findings on the same construction/
+     comparison site are the surface telling you it was never derived as a whole.
+   - **(c) design-class** — the latest round contains any P0 finding that is design-class (about which
+     invariant governs the surface, not a line-level defect).
+
+   Re-deriving means: name the invariant that actually governs the surface the findings sit on, check
+   whether the current design — not just the specific lines flagged — satisfies it, and fix at that level,
+   sweeping every site that constructs, compares, or asserts that invariant rather than only the cited one.
+   A third narrow patch-comment round on the same surface is the failure mode this step exists to prevent;
+   converging in one broader fix is cheaper than another round of local patches that only shifts where the
+   next finding lands. A senior-engineer guidance comment that dictates a specific fix sets the **minimum**
+   for the round, not its extent — apply it, and still sweep the surface it sits on when any trigger above
+   fires.
+
+   In **every round from the 2nd on**, the PR comment you post must name the surface(s) you swept and list
+   what the sweep turned up — including "nothing beyond the finding itself" when that is the honest answer
+   — so the next review can see the coverage instead of inferring it from the diff.
 3. Adjudicate every finding against the issue's declared scope and non-goals before acting on it — see
    AGENTS.md's `CODEX-REVIEW-GUIDANCE` block for the `follow-up-suggested` disposition this implements:
    - **Valid and in scope:** apply it. Keep the diff scoped to what was actually flagged — no unrelated

@@ -551,4 +551,21 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^(\.github/scripts/blocked(-state|_st
   fi
 fi
 
+# 20. reconcile stranded-rejected-review smoke (#824): the reconciler leg that auto-dispatches (or escalates
+#     past) a CHANGES_REQUESTED review sitting at the current head. Covers the ordering fix — an allowlisted
+#     dispatch mention inside the grace window means "still in flight", whatever the round count, so the
+#     round-limit escalation never lands on top of a live addressing run (the #820/#823 double-escalations
+#     that each cost a hand-cleared needs-human) — plus the escalate/dispatch/retry paths that must keep
+#     working around it (#515, #516, #502). Branch ORDER is behavior a grep can't prove, so the smoke runs
+#     the workflow step's real body against a stubbed gh. Runs when the workflow or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^\.github/(workflows/reconcile-prs\.yml|scripts/reconcile_prs_smoke\.sh)$'; then
+  RP_SMOKE="$ROOT/.github/scripts/reconcile_prs_smoke.sh"
+  if [ -f "$RP_SMOKE" ]; then
+    echo "[checks] reconcile stranded-rejected-review smoke" >&2
+    bash "$RP_SMOKE" >&2 && ok "reconcile-prs smoke" || err "reconcile-prs smoke FAILED"
+  else
+    err "reconcile-prs.yml changed but reconcile_prs_smoke.sh missing — cannot verify the reconciler's dispatch/escalation ordering"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }

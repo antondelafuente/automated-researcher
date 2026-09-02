@@ -164,7 +164,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
-        timeout-minutes: 45
+        # 75, not 45 (automated-researcher#824): a senior-directed whole-surface sweep is a bigger unit of
+        # work than the line patch this cap was sized for, and a run killed with nothing pushed loses the
+        # entire round. reconcile-prs.yml's CONFLICT_GRACE_SECONDS tracks this value -- raise both together.
+        timeout-minutes: 75
         run: |
           set -euo pipefail
           # #531: read the prompt straight from the file render_prompt wrote — never round-tripped through

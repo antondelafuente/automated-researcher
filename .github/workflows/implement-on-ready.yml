@@ -297,7 +297,11 @@ jobs:
           # So `gh` calls the agent makes from its own Bash tool are authorized as the engineer App.
           GH_TOKEN: ${{ steps.mint_claude_token.outputs.token }}
           CLAUDE_BIN: ${{ steps.install_claude.outputs.path }}
-        timeout-minutes: 45
+        # 75, not 45 (automated-researcher#824): run 33592402034 finished a script-heavy ticket's
+        # implementation at minute 37 and was still killed with nothing pushed. Real implementor runs have
+        # been 4-21 min, but a ticket the size of #821 needs ~26 min of implementation plus checks, and an
+        # implement run that times out before it pushes loses everything it did.
+        timeout-minutes: 75
         run: |
           set -euo pipefail
           # `set -e` + `pipefail` on the `| tee` below already fails this step loudly if the CLI itself
