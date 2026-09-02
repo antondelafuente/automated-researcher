@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 # log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]...
-#                   [--page-source <dir> [--page-source-only <path>]... | --page-source-external <url>]
-#
-#   --page-source <dir> stages a SECOND tree — the experiment's viewer/dashboard page source — into the SAME
-#   commit and the SAME gated PR as the record (#819). A close is one event: the record, the page source and
-#   LANDED.md were three sequential gated PRs at the end of every run (~10 min of a measured 51-min median
-#   close leg) that landed the same close, gated the same way. The dir must live in this same repo and must
-#   be note-shaped (no DESIGN.md/RESULTS.md of its own): it is page SOURCE riding the record's gate, never a
-#   second record with its own evidence to verify. --page-source-only narrows it exactly like --only narrows
-#   the record dir — the dashboard tree is typically multi-tenant, so a co-tenant's untracked files must not
-#   sweep in (#374).
-#   --page-source-external <url> is for a viewer that lives in a DIFFERENT repo, which no single PR can
-#   reach: it records where the page source landed instead of staging it, so the gate below has an answer
-#   rather than blocking a close it cannot help.
 #   --skip-ignored proceeds WITHOUT the flagged gitignored files (acknowledge-and-exclude) — it never
 #   force-includes them into the commit.
 #   --only <path> (repeatable) restricts the staged set to exactly the named path(s), each given relative to
@@ -171,8 +158,7 @@ fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
 # ---- args ----
-DRY_RUN=0; SKIP_IGNORED=0; DIR=""; PS_DIR=""; PS_EXTERNAL=""
-declare -a ONLY_PATHS=() PS_ONLY_PATHS=()
+DRY_RUN=0; SKIP_IGNORED=0; DIR=""; declare -a ONLY_PATHS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
@@ -181,24 +167,11 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || die "--only requires a <path> argument"
       ONLY_PATHS+=("$2")
       shift 2 ;;
-    --page-source)
-      [ "$#" -ge 2 ] || die "--page-source requires a <dir> argument"
-      [ -z "$PS_DIR" ] || die "--page-source given twice ('$PS_DIR' then '$2') — one page-source tree per landing; if the page spans two trees, put them under one parent dir and name that"
-      PS_DIR="$2"; shift 2 ;;
-    --page-source-only)
-      [ "$#" -ge 2 ] || die "--page-source-only requires a <path> argument"
-      PS_ONLY_PATHS+=("$2")
-      shift 2 ;;
-    --page-source-external)
-      [ "$#" -ge 2 ] || die "--page-source-external requires a <url> argument"
-      PS_EXTERNAL="$2"; shift 2 ;;
     -*) die "unknown flag: $1" ;;
     *) DIR="$1"; shift ;;
   esac
 done
-[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]... [--page-source <dir> [--page-source-only <path>]... | --page-source-external <url>]"
-[ -n "$PS_DIR" ] && [ -n "$PS_EXTERNAL" ] && die "--page-source and --page-source-external are mutually exclusive — the page source either rides this PR or it landed elsewhere, not both"
-[ "${#PS_ONLY_PATHS[@]}" -eq 0 ] || [ -n "$PS_DIR" ] || die "--page-source-only needs --page-source (it narrows that dir, exactly as --only narrows the record dir)"
+[ -n "$DIR" ] || die "usage: log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]..."
 [ -d "$DIR" ] || die "not a directory: $DIR"
 DIR="$(cd "$DIR" && pwd)"   # absolute — stable across the later cd into the repo root
 
@@ -206,22 +179,6 @@ REPO_ROOT="$(cd "$DIR" && git rev-parse --show-toplevel 2>/dev/null)" || die "no
 REL="$(cd "$REPO_ROOT" && realpath --relative-to="$REPO_ROOT" "$DIR")"
 [ "${REL#..}" = "$REL" ] || die "dir is outside the repo root"
 SLUG="$(basename "$REL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
-
-# assert_physical_parent <abs-root> <rel> <flag> (#820 round 3): the lexical checks cannot see a symlinked
-# INTERMEDIATE component — the kernel resolves it in find's starting path and cp --parents materializes the
-# result as a REGULAR file under REAL directories, so symlink_scan sees nothing and out-of-tree bytes land
-# as ordinary staged content. Resolve the named path's PARENT physically and require it inside the
-# physically-resolved root. The FINAL component is deliberately never resolved (#586): a symlink you name
-# still stages verbatim and symlink_scan wholesale-BLOCKs it. Resolving the root too keeps a symlinked
-# prefix ABOVE the root (e.g. a symlinked /home) working. Call as a plain statement, never via $( ).
-assert_physical_parent() {
-  local root="$1" rel="$2" flag="$3" phys_root phys_parent
-  phys_root="$(realpath -e -- "$root" 2>/dev/null)" || die "internal: cannot physically resolve $root"
-  phys_parent="$(realpath -e -- "$root/$(dirname -- "$rel")" 2>/dev/null)" \
-    || die "$flag path's parent directory could not be resolved: $rel"
-  [ "$phys_parent" = "$phys_root" ] || [ "${phys_parent#"$phys_root"/}" != "$phys_parent" ] \
-    || die "$flag path reaches through a symlinked parent that leaves the tree ($rel resolves under $phys_parent) — name the real path instead"
-}
 
 # ---- --only allowlist (#374): resolve + validate each named path against $DIR, then build STAGE_PATHS —
 # the exact set later staged (stage_worktree) and gitignore-checked (check_ignored_files) against. Doing
@@ -242,15 +199,11 @@ for _op in "${ONLY_PATHS[@]}"; do
   # where `mine.py` is a symlink to a co-tenant's `cotenant.py` would silently rewrite the allowlist entry to
   # `cotenant.py` — staging and scanning the co-tenant's file under a name the caller never asked for, exactly
   # the sweep-in this flag exists to prevent. `-s` still lexically normalizes `.`/`..`/repeated `/` (so the
-  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone. Only the FINAL
-  # component stages verbatim that way (#820 round 3 corrects the original claim that a path component does
-  # too): if `_op` itself is a symlink it stages as a symlink and symlink_scan (which runs on every KIND right
-  # after stage_worktree) wholesale-BLOCKs it — but an INTERMEDIATE component is kernel-resolved during
-  # staging and materialized as an ordinary file, which symlink_scan cannot see. assert_physical_parent below
-  # is what closes that half.
+  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone; if `_op` (or a
+  # path component) is a symlink, it stages as a symlink verbatim, and symlink_scan (which runs on every KIND
+  # right after stage_worktree) then wholesale-BLOCKs it same as any other staged symlink.
   _rel="$(cd "$DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
   [ "${_rel#..}" = "$_rel" ] || die "--only path escapes the registry dir: $_op"
-  assert_physical_parent "$DIR" "$_rel" "--only"
   ONLY_REL+=("$_rel")
 done
 if [ "${#ONLY_REL[@]}" -gt 0 ]; then
@@ -258,73 +211,6 @@ if [ "${#ONLY_REL[@]}" -gt 0 ]; then
   note "--only: staging restricted to ${#ONLY_REL[@]} path(s) under $REL: ${ONLY_REL[*]}"
 else
   STAGE_PATHS=("$REL")
-fi
-# STAGE_ROOTS: the dir each staged path belongs to, index-parallel to STAGE_PATHS. Everything that is
-# per-ROOT rather than per-PATH reads this — the ancestor .gitignore walk (copy_stage_paths), the sparse
-# cone, and the TEMP.md scan — so adding a second root (--page-source, below) needs no second copy of any
-# of them. Without --page-source there is exactly one root and the behavior is bit-for-bit what it was.
-declare -a STAGE_ROOTS=() ROOT_RELS=("$REL")
-for _r in "${STAGE_PATHS[@]}"; do STAGE_ROOTS+=("$REL"); done
-
-# path_contains <ancestor> <descendant> — true when <ancestor> IS <descendant> or an ancestor directory of
-# it, over repo-relative paths in the shape `realpath --relative-to` emits. The repo root normalizes to the
-# sentinel `.`, and plain prefix arithmetic reads that sentinel exactly backwards: `.` is an ancestor of
-# EVERY path in the repo, yet "$anc/" is "./" and no other relative path starts with "./", so the containment
-# test says "disjoint" for the one root that contains everything (#820 review round 2: `--page-source
-# <repo-root>` against a `registry/<exp>` record therefore passed the guard below and would have routed the
-# whole repository through page-source staging). The sentinel is handled here, in the predicate itself,
-# rather than at one call site: both directions and the equality case are the same question, and patching
-# only the direction that was found would leave the other reachable the moment the roots swap.
-path_contains() {
-  local anc="$1" desc="$2"
-  if [ "$anc" = "." ] || [ "$anc" = "$desc" ]; then return 0; fi
-  [ "${desc#"$anc"/}" != "$desc" ]
-}
-
-# ---- --page-source (#819): a SECOND staging root landing in the SAME commit/PR as the record ----
-PS_REL=""
-if [ -n "$PS_DIR" ]; then
-  [ -d "$PS_DIR" ] || die "--page-source is not a directory: $PS_DIR"
-  PS_DIR="$(cd "$PS_DIR" && pwd)"
-  _ps_root="$(cd "$PS_DIR" && git rev-parse --show-toplevel 2>/dev/null)" || die "--page-source dir is not inside a git repo: $PS_DIR"
-  [ "$_ps_root" = "$REPO_ROOT" ] \
-    || die "--page-source dir lives in a DIFFERENT repo ($_ps_root) than the record ($REPO_ROOT) — one PR cannot land both; land the page source in its own repo and pass --page-source-external <url> instead"
-  PS_REL="$(cd "$REPO_ROOT" && realpath -s --relative-to="$REPO_ROOT" "$PS_DIR")"
-  [ "${PS_REL#..}" = "$PS_REL" ] || die "--page-source dir is outside the repo root"
-  # Disjoint from the record dir in BOTH directions: a page-source root at/inside/containing $REL would put
-  # the same paths under two roots (double-staged, and the record's own gate silently governing page files,
-  # or worse the page root's rules governing the record).
-  if path_contains "$REL" "$PS_REL" || path_contains "$PS_REL" "$REL"; then
-    die "--page-source dir ($PS_REL) overlaps the record dir ($REL) — the page source is a separate tree riding the same PR, not part of the record dir (which is staged whole already)"
-  fi
-  # Note-shaped only: this tree rides the RECORD's gate, so it must carry no evidence of its own to verify.
-  # A dir with its own DESIGN.md/RESULTS.md is a record and gets its own gated landing (same reasoning that
-  # restricts --only to KIND=note: a gate must never approve evidence it did not read).
-  { [ -f "$PS_DIR/DESIGN.md" ] || [ -f "$PS_DIR/RESULTS.md" ] || [ -f "$PS_DIR/KIND" ]; } \
-    && die "--page-source dir ($PS_REL) carries DESIGN.md/RESULTS.md/KIND — that is a RECORD, not page source, and a record needs its own gate; log it separately"
-  declare -a PS_ONLY_REL=()
-  for _op in "${PS_ONLY_PATHS[@]}"; do
-    case "$_op" in
-      /*) die "--page-source-only path must be relative to the page-source dir, not absolute: $_op" ;;
-    esac
-    [ -e "$PS_DIR/$_op" ] || die "--page-source-only path does not exist under $PS_DIR: $_op"
-    # `-s` (no symlink resolution) for exactly the #586 reason --only uses it: the allowlist must stage the
-    # path you named, never a co-tenant's file it happens to point at (symlink_scan then BLOCKs it). That
-    # holds for the FINAL component only (#820 round 3): an INTERMEDIATE symlinked component is kernel-resolved
-    # at staging time and lands as an ordinary file symlink_scan never sees — assert_physical_parent closes it.
-    _rel="$(cd "$PS_DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--page-source-only path could not be resolved under $PS_DIR: $_op"
-    [ "${_rel#..}" = "$_rel" ] || die "--page-source-only path escapes the page-source dir: $_op"
-    assert_physical_parent "$PS_DIR" "$_rel" "--page-source-only"
-    PS_ONLY_REL+=("$_rel")
-  done
-  if [ "${#PS_ONLY_REL[@]}" -gt 0 ]; then
-    for _r in "${PS_ONLY_REL[@]}"; do STAGE_PATHS+=("$PS_REL/$_r"); STAGE_ROOTS+=("$PS_REL"); done
-    note "--page-source: staging restricted to ${#PS_ONLY_REL[@]} path(s) under $PS_REL: ${PS_ONLY_REL[*]}"
-  else
-    STAGE_PATHS+=("$PS_REL"); STAGE_ROOTS+=("$PS_REL")
-  fi
-  ROOT_RELS+=("$PS_REL")
-  note "--page-source: $PS_REL lands in the SAME PR as $REL (#819)"
 fi
 
 # ---- classify (registry convention; KIND file is an explicit override) ----
@@ -345,11 +231,6 @@ note "classified: $KIND  ($REL)"
 # scan runs on the staged set only), so it's the only KIND where narrowing the staged set can't create that
 # gap — and it's also the actual reported use case (a shared multi-tenant dashboard dir has no DESIGN.md/
 # RESULTS.md, so it always classifies as 'note').
-# A page source rides an EXPERIMENT close (that is the only kind with a publish leg, #347/#819). On any other
-# kind it would stage an unrelated tree into a PR whose gate never looked at it.
-if { [ -n "$PS_DIR" ] || [ -n "$PS_EXTERNAL" ]; } && [ "$KIND" != "experiment" ]; then
-  die "--page-source/--page-source-external is only supported for KIND=experiment — this dir classified as '$KIND'; the publish leg belongs to an experiment's close"
-fi
 if [ "${#ONLY_REL[@]}" -gt 0 ] && [ "$KIND" != "note" ]; then
   die "--only is only supported for KIND=note — this dir classified as '$KIND', whose gate reads audit/design evidence directly from $DIR rather than the staged set, so an --only allowlist could approve/merge a record whose cited evidence was never actually committed; log the whole dir (drop --only), or split the allowlisted content into its own single-owner registry dir"
 fi
@@ -383,43 +264,13 @@ gate_experiment() {
     # for unresolved HIGHs — that heuristic is unreliable (negation/scope games) and not a real proof.
     # Per-finding HIGH-resolution verification needs a machine-readable triage status (a documented future
     # hardening); the actual triage is done with discipline in run-experiment's close.
-    gate_page_source   # #819 — only on the audited path; see the no-go branch below
   else
     if grep -qiE '^[^A-Za-z0-9]*((decision|status|outcome|result)[^A-Za-z0-9]+)?(ANCHOR_FAILED|NO[ _-]?GO|GATE[ _]PASS=FALSE|GATE[ _]FAILED?|NULL RESULT|DIAGNOSTIC ONLY|STOPPED AT [A-Za-z0-9 _-]*GATE)' "$DIR/RESULTS.md"; then
       APPROVAL_BODY="Experiment record — eval-only/no-go run; no close-audit needed; RESULTS records a closed decision."
-      # No publish leg on this path (#819): a run that stopped at an instrument/data/validity gate has no
-      # headline page to build, so requiring page source here would block exactly the closes that are
-      # supposed to land cheaply. The page-source gate applies to a normal, audited close.
-      note "experiment gate ok: no close-audit, RESULTS records a closed decision (no page-source requirement on a no-go close)"
+      note "experiment gate ok: no close-audit, RESULTS records a closed decision"
     else
       die "experiment has no AUDIT.md and RESULTS.md records no closed decision — surface for human"
     fi
-  fi
-}
-gate_page_source() {
-  # #819: page presence is a MECHANICAL property, so it is checked HERE rather than by making the
-  # cross-family close audit see a built page. That ordering ("publish first, so the audit and the landed
-  # record see the page") is what exposed the whole publish chain — upload, fresh-pull reproduction, page
-  # build, gallery rebuild — to a redo after every audit finding that moved a number. The audit reads the
-  # science; this gate reads the tree.
-  #
-  # The trigger is the FROZEN START.md instance-profile snapshot, not the live profile: the executor's
-  # publish leg is defined by what the brief carries (`[recipes.viewer]` in the snapshot block
-  # aar_profile_snapshot.sh wrote), and the design-stage gate already owns snapshot freshness. No snapshot,
-  # or a snapshot with no viewer recipe, is a legitimate manifest-only close and requires nothing here.
-  [ -f "$DIR/START.md" ] || { note "page-source gate: no START.md — nothing to require (manifest-only close)"; return 0; }
-  if ! grep -qE '^\[recipes\.viewer\]' "$DIR/START.md"; then
-    note "page-source gate: no [recipes.viewer] in the START.md snapshot — manifest-only close, page source not required"
-    return 0
-  fi
-  if [ -n "$PS_DIR" ]; then
-    APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) rides this same PR — one landing, not three (#819)."
-    note "page-source gate ok: brief carries a [recipes.viewer] recipe and the page source is staged here ($PS_REL)"
-  elif [ -n "$PS_EXTERNAL" ]; then
-    APPROVAL_BODY="$APPROVAL_BODY Page source landed separately (viewer repo is not this repo): $PS_EXTERNAL (#819)."
-    note "page-source gate ok: page source recorded as external ($PS_EXTERNAL)"
-  else
-    die "this experiment's START.md snapshot carries a [recipes.viewer] recipe, so the publish leg is part of its close (#347) — but no page source is being landed: pass --page-source <dir> to land it in THIS PR (the one-landing close, #819), or --page-source-external <url> if the viewer lives in a different repo and its source already landed there; a viewer-recipe close whose page source lands nowhere is the silent miss #347 exists to prevent"
   fi
 }
 secret_scan() {
@@ -439,11 +290,6 @@ secret_scan() {
   # The sk- alternative carries a LEFT word-boundary guard ((^|[^A-Za-z0-9_-])) so it no longer matches inside a
   # long hyphenated identifier that merely contains 'sk-' (e.g. 'task-always-succeeds-…') (#306). The other
   # patterns (ghp_/github_pat_/AKIA/PEM) are distinctive enough to leave unguarded.
-  #
-  # Optional pathspec arguments narrow the scan to part of the staged set. Used by the one-landing close
-  # (#819): an experiment PR that also carries a --page-source tree must still scan THAT tree, because the
-  # page source used to land as its own KIND=note PR and got exactly this scan there — riding the record's
-  # gate must not silently drop it. The record half stays unscanned, exactly as before.
   [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: secret_scan called before stage_worktree (no staged worktree)"
   local hits rc f pat; local -a files=()
   pat='(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)'
@@ -451,7 +297,7 @@ secret_scan() {
   # such a staged file could be skipped by the scan while still being committed (a scan bypass). Keep only
   # existing regular files (a staged deletion names a path that is gone).
   while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$WT/$f" ] && files+=("$WT/$f"); done < <(
-    git -C "$WT" diff --cached -z --name-only -- "$@")
+    git -C "$WT" diff --cached -z --name-only)
   # stage_worktree already fails closed on an empty staged set ("nothing to commit"), so a scan reaching here
   # normally has files; guard anyway (a staged pure-deletion would leave nothing to scan — nothing to leak).
   [ "${#files[@]}" -gt 0 ] || { note "secret scan: no staged file content — nothing to scan"; return 0; }
@@ -496,22 +342,12 @@ temp_handoff_scan() {
   # it before landing (SKILL.md); this catches a close that skipped that step. Runs for EVERY kind, same as
   # symlink_scan, on the EXACT staged set in $WT (MUST be called AFTER stage_worktree).
   [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: temp_handoff_scan called before stage_worktree (no staged worktree)"
-  local hit root
-  hit=""
-  for root in "${ROOT_RELS[@]}"; do
-    hit="$hit$(git -C "$WT" diff --cached --name-only -z -- "$root" | tr '\0' '\n' | grep -xF "$root/TEMP.md" || true)"
-  done
+  local hit
+  hit="$(git -C "$WT" diff --cached --name-only -z -- "$REL" | tr '\0' '\n' | grep -xF "$REL/TEMP.md" || true)"
   [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
 }
-# Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved), plus
-# the --page-source tree riding an experiment PR (#819), which carries the scan it had when it landed as its
-# own note PR.
-scan_if_needed() {
-  case "$KIND" in
-    note|design-stage) secret_scan ;;
-    experiment) if [ -n "$PS_REL" ]; then secret_scan "$PS_REL"; fi ;;
-  esac
-}
+# Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved).
+scan_if_needed() { case "$KIND" in note|design-stage) secret_scan ;; esac; }
 gate_note() {
   APPROVAL_BODY="Record — deterministic secret scan clean; no experiment, so no audit."
   note "note gate ok (secret scan runs on the staged set)"
@@ -753,18 +589,15 @@ copy_stage_paths() {
     [ "${p##*/}" = ".gitignore" ] || continue
     [ -n "${is_rule["$p"]:-}" ] || { is_rule["$p"]=1; rule_paths+=("$p"); }
   done < "$cand"
-  local i root
-  for i in "${!STAGE_PATHS[@]}"; do
-    p="${STAGE_PATHS[$i]}"; root="${STAGE_ROOTS[$i]}"
+  for p in "${STAGE_PATHS[@]}"; do
     d="$(dirname "$p")"
-    # Walk up while still at/inside this path's OWN root ($REL, or the --page-source root). A whole-dir run
-    # (STAGE_PATHS=("$root")) exits on the first test — its own `$root/.gitignore` is under the root, so
-    # $cand already carried it.
-    while [ "$d" = "$root" ] || [ "${d#"$root"/}" != "$d" ]; do
+    # Walk up while still at/inside $REL. A whole-dir run (STAGE_PATHS=("$REL")) exits on the first test —
+    # its own `$REL/.gitignore` is under the root, so $cand already carried it.
+    while [ "$d" = "$REL" ] || [ "${d#"$REL"/}" != "$d" ]; do
       if [ -f "$REPO_ROOT/$d/.gitignore" ] || [ -L "$REPO_ROOT/$d/.gitignore" ]; then
         [ -n "${is_rule["$d/.gitignore"]:-}" ] || { is_rule["$d/.gitignore"]=1; rule_paths+=("$d/.gitignore"); }
       fi
-      [ "$d" = "$root" ] && break
+      [ "$d" = "$REL" ] && break
       d="$(dirname "$d")"
     done
   done
@@ -815,13 +648,7 @@ stage_worktree() {
   declare -a sparse_args=(--repo "$REPO_ROOT" -b "$BRANCH")
   [ "$REL" = "." ] && sparse_args+=(--full)
   sparse_args+=("$WT" "origin/$BASE_BRANCH")
-  # Every staging ROOT must be in the cone, not just the record's: `git add` refuses a path outside the
-  # sparse set, so a --page-source root left out would be a loud error rather than a short commit — but a
-  # loud error on the one-landing close is not the behavior we want either.
-  if [ "$REL" != "." ]; then
-    local _root
-    for _root in "${ROOT_RELS[@]}"; do sparse_args+=("$_root"); done
-  fi
+  [ "$REL" = "." ] || sparse_args+=("$REL")
   # CREATED_BRANCH is set BEFORE the call, not after: the helper can fail at the sparse/checkout step with the
   # `-b` ref already created, and cleanup's `branch -D` must still reclaim it. Safe because the guard above
   # proved no branch of this name pre-existed, so cleanup can only ever delete THIS run's own ref.
@@ -872,7 +699,7 @@ if [ "$DRY_RUN" = 1 ]; then
   symlink_scan
   temp_handoff_scan
   scan_if_needed
-  note "--dry-run: classified=$KIND${PS_REL:+, page source $PS_REL staged in the same commit}, gate PASSED (staged secret/symlink/TEMP.md scan clean); stopping before any push."
+  note "--dry-run: classified=$KIND, gate PASSED (staged secret/symlink/TEMP.md scan clean); stopping before any push."
   exit 0
 fi
 
@@ -938,7 +765,7 @@ scan_if_needed
 # Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
 GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \
 GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
-  git -C "$WT" commit -q -m "Log $KIND: $REL${PS_REL:+ (+ page source $PS_REL)}"
+  git -C "$WT" commit -q -m "Log $KIND: $REL"
 # Push as the AUTHOR bot via a token-scoped remote, with credential helpers DISABLED so no ambient
 # credential machinery can participate (matches the hardened push convention). URL not persisted as a remote.
 # #560: a plain non-force push can be rejected non-fast-forward when a PRIOR run reused this same
@@ -1037,7 +864,7 @@ post_audit_thread(){
 # ---- PR -> bot approve -> merge ----
 BODY="$(printf '%s\n\nLogged by log-experiment.sh (gate: %s).' "$APPROVAL_BODY" "$KIND")"
 URL="$(GH_TOKEN="$ATOK" gh pr create -R "$RESEARCH_REPO" --head "$BRANCH" --base "$BASE_BRANCH" \
-        -t "Log $KIND: $REL${PS_REL:+ (+ page source $PS_REL)}" -b "$BODY")"
+        -t "Log $KIND: $REL" -b "$BODY")"
 PR="$(echo "$URL" | grep -oE '[0-9]+$')"
 note "opened PR #$PR ($URL)"
 post_audit_thread   # surface the already-run audit as a findings -> responses thread (experiment/design-stage only)
@@ -1052,4 +879,4 @@ if [ "$(git rev-parse --abbrev-ref HEAD)" = "$BASE_BRANCH" ]; then
 else
   note "checkout is on $(git rev-parse --abbrev-ref HEAD), not $BASE_BRANCH; skipping local sync"
 fi
-echo "OK: logged $KIND '$REL'${PS_REL:+ + page source '$PS_REL'} as PR #$PR (merged)."   # the EXIT trap removes the temp worktree + its local branch
+echo "OK: logged $KIND '$REL' as PR #$PR (merged)."   # the EXIT trap removes the temp worktree + its local branch

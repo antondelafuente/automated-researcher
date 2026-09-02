@@ -1,56 +1,25 @@
 - experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
-  (#819). Measured across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of
-  those minutes in the close leg, 30% of wall spent generating executor tokens, and half a run's output
-  tokens authored in the close. Four causes, four fixes. (1) **Ordering — science first, publish second.**
-  The publish leg was specified to run *before* the cross-family close audit "so the audit and the landed
-  record see the page", so every finding that moved a number cascaded through re-aggregate → refigure →
-  re-`RESULTS` → re-upload → re-reproduce → rebuild page → a second audit: an 11-min redo, hand-read on
-  `depv1-negemo-qwen-chat-selfref-rewrite-1`, for a 3-min edit. The close now runs `RESULTS.md` → close
-  audit → triage/fix → publish chain (fresh-pull reproduction against the FINAL numbers, manifest, page) →
-  land, and page presence — a mechanical property the audit never read anyway — moves to `log-experiment`'s
-  experiment gate, which BLOCKs a close whose frozen `START.md` snapshot carries `[recipes.viewer]` unless
-  the page source is landed here (`--page-source`) or recorded as landed elsewhere
-  (`--page-source-external`). The completion boundary (tear down only after a verified upload) does not
-  move. (2) **Audit once, the same rule `design-experiment` already runs on:** one cross-family pass per
-  surface, a fix earns a *mechanical* re-check (regenerate every quoted number from the committed CSVs),
-  and the soft "a second pass if your fixes were substantive" is retired — the close audit ran ≥2× in 19/61
-  runs and the `--data` audit in 36/61. (3) **One landing, not three:** `log-experiment.sh --page-source
-  <dir> [--page-source-only <path>]…` stages the viewer page source into the SAME commit and PR as the
-  record, with every per-root gate (TEMP.md, the ancestor-`.gitignore` walk behind the #340 guard, and the
-  secret scan the page source used to get as its own note PR) covering the second root; the record dir's
-  own `LANDED.md` rides the same commit. (4) **Paperwork is generated, not authored:** new
-  `close_record.sh` emits `LANDED.md`, `ARTIFACT_MANIFEST.md` (from an actual store listing — no listing,
-  no manifest, #331), a `REPRODUCTION.md` skeleton carrying the real diff output, an UNSTARTED close
-  self-audit checklist (#512), and the terminal ledger event through a new `EXPERIMENT_LEDGER_EVENT_CMD`
-  seam keyed on the registry dir name (#473) with the abstract outcome the caller states (#376, never
-  inferred); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record (#804's shape),
-  never a quiet no-op. A store that lists clean and comes back EMPTY takes that same gap path rather than
-  recording a zero-object "verified upload" (#331: an empty listing is evidence against the upload, not for
-  it) — and because paperwork is re-runnable the gap is a property of the RECORD, not of one call: the
-  record carries a generated `ARTIFACT_MANIFEST.md` only where THIS close observed a non-empty listing, so
-  an earlier run's manifest is REMOVED rather than left standing (a skipped write alone let a re-run against
-  an emptied or wrong root exit 3 while the record still read "objects | 1 … the upload was verified", with
-  the gap line asserting the opposite; a hand-authored manifest is never removed, the same generated-by rule
-  that keeps it from being overwritten). The observed listing is `rclone lsl`'s STDOUT alone — its routine
-  stderr diagnostics (`NOTICE:`/`WARNING:` lines) are never counted as listing content, since merging the two
-  streams let "empty stdout + one NOTICE + exit 0" read as one object, laundering an empty store past that
-  same gap and inflating real object/byte counts; stderr is quoted only in the could-not-list gap message.
-  Disjointness of the two staging roots is likewise decided by a
-  containment predicate rather than string-prefix arithmetic, which read the repo-root sentinel `.` as
-  disjoint from every path instead of containing all of them — so `--page-source <repo-root>` would have
-  staged the entire repository as page source. `finalize` proves the close actually MERGED — `LANDED.md` present at a required `--base-ref` and
-  byte-identical to this record's — before un-gating worktree/scratch/session reaping, since the generator's
-  own output is never evidence that its output landed (same never-default merged-proof as
-  `launch_record.sh preflight`). Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal
-  marker — 3,886 poll calls across 61 runs, 180 min of them polling drivers that had already exited, and
-  one run that re-`Read` the same task-output file 852 times. Both allowlist flags now require the named
-  path's PARENT to resolve physically inside its staging root, closing a disclosure hole in
-  `--page-source-only` and the identical pre-existing one in `--only`: the lexical `realpath -s` containment
-  check cannot see a symlinked INTERMEDIATE component, which the kernel resolves so `cp -P --parents`
-  materializes out-of-tree bytes as an ordinary file under real directories — leaving `symlink_scan`, which
-  only ever sees a symlink you name DIRECTLY, nothing to fire on. `RESULTS.md` and the audit responses stay
-  model-authored; every fail-closed gate (cross-family audit scope, fresh-pull reproduction, verified
-  upload) keeps full scope.
+  (#819, skill text only — the scripted-close and one-landing halves are re-specified in #821). Measured
+  across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of those minutes in the
+  close leg and 30% of wall spent generating executor tokens. Three fixes. (1) **Ordering — science first,
+  publish second.** The publish leg was specified to run *before* the cross-family close audit "so the audit
+  and the landed record see the page", so every finding that moved a number cascaded through re-aggregate →
+  refigure → re-`RESULTS` → re-upload → re-reproduce → rebuild page → a second audit: an 11-min redo,
+  hand-read on `depv1-negemo-qwen-chat-selfref-rewrite-1`, for a 3-min edit. The close now runs `RESULTS.md`
+  → close audit → triage/fix → publish chain (upload verification, fresh-pull reproduction against the FINAL
+  numbers, presentation manifest, page build) → land. The page still lands before the record, so the landed
+  record sees it exactly as before; what the reorder drops is only the claim that the AUDIT had to see it —
+  the audit reads the science, never the page. The completion boundary (tear down only after a verified
+  upload) does not move. (2) **Audit once, the same rule `design-experiment` already runs on:** one
+  cross-family pass per audit surface, a fix earns a *mechanical* re-check (regenerate every quoted number
+  from the committed CSVs) rather than a second pass, and the soft "a second pass if your fixes were
+  substantive" is retired — the close audit ran ≥2× in 19/61 runs and the `--data` audit in 36/61. (3)
+  **Wait in one call, not one API turn per poll:** the standing pattern for a detached driver is a single
+  capped `Monitor`/`until` wait on its own terminal marker — never a `sleep`-per-turn loop and never a
+  re-`Read` loop on a task-output file. Measured: 3,886 poll calls across 61 runs, 180 min of them polling
+  drivers that had already exited, and one run that re-`Read` the same task-output file 852 times. The cap
+  bounds the WAIT, never the work (#480). Every fail-closed gate (cross-family audit scope, fresh-pull
+  reproduction, verified upload) keeps full scope.
 - experiment-lifecycle 0.6.0 / verify-claims 0.8.2 (2026-09-02): a formal design was ~28 min wall / 19 min
   agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
   episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
