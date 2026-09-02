@@ -1,3 +1,25 @@
+- experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
+  (#819, skill text only — the scripted-close and one-landing halves are re-specified in #821). Measured
+  across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of those minutes in the
+  close leg and 30% of wall spent generating executor tokens. Three fixes. (1) **Ordering — science first,
+  publish second.** The publish leg was specified to run *before* the cross-family close audit "so the audit
+  and the landed record see the page", so every finding that moved a number cascaded through re-aggregate →
+  refigure → re-`RESULTS` → re-upload → re-reproduce → rebuild page → a second audit: an 11-min redo,
+  hand-read on `depv1-negemo-qwen-chat-selfref-rewrite-1`, for a 3-min edit. The close now runs `RESULTS.md`
+  → close audit → triage/fix → publish chain (upload verification, fresh-pull reproduction against the FINAL
+  numbers, presentation manifest, page build) → land. The page still lands before the record, so the landed
+  record sees it exactly as before; what the reorder drops is only the claim that the AUDIT had to see it —
+  the audit reads the science, never the page. The completion boundary (tear down only after a verified
+  upload) does not move. (2) **Audit once, the same rule `design-experiment` already runs on:** one
+  cross-family pass per audit surface, a fix earns a *mechanical* re-check (regenerate every quoted number
+  from the committed CSVs) rather than a second pass, and the soft "a second pass if your fixes were
+  substantive" is retired — the close audit ran ≥2× in 19/61 runs and the `--data` audit in 36/61. (3)
+  **Wait in one call, not one API turn per poll:** the standing pattern for a detached driver is a single
+  capped `Monitor`/`until` wait on its own terminal marker — never a `sleep`-per-turn loop and never a
+  re-`Read` loop on a task-output file. Measured: 3,886 poll calls across 61 runs, 180 min of them polling
+  drivers that had already exited, and one run that re-`Read` the same task-output file 852 times. The cap
+  bounds the WAIT, never the work (#480). Every fail-closed gate (cross-family audit scope, fresh-pull
+  reproduction, verified upload) keeps full scope.
 - experiment-lifecycle 0.6.0 / verify-claims 0.8.2 (2026-09-02): a formal design was ~28 min wall / 19 min
   agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
   episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
