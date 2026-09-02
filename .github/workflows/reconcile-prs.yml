@@ -134,10 +134,14 @@ jobs:
           BUDGET=3
           CONFLICT_MARKER="Reconciler: PR conflicts with main"
           REVIEW_MARKER="Reconciler: re-firing review actuator"
-          # Comfortably above address-review.yml's 45-minute Claude-CLI timeout (conflict path) / a codex
+          # Comfortably above address-review.yml's 75-minute Claude-CLI timeout (conflict path) / a codex
           # review's typical few-minute runtime (review-actuator path): a dispatch this recent against the
           # SAME head is treated as still in flight rather than re-dispatched or counted as a fresh round.
-          CONFLICT_GRACE_SECONDS=$((55 * 60))
+          # Tracks that timeout (automated-researcher#824 raised it 45 -> 75 for senior-directed
+          # whole-surface sweeps): a grace window BELOW the CLI timeout would declare a live addressing run
+          # dead and re-dispatch on top of it, which is the same over-eager-escalation class as the
+          # in-flight ordering fix in handle_stranded_rejected below. Keep the two in step.
+          CONFLICT_GRACE_SECONDS=$((85 * 60))
           REVIEW_GRACE_SECONDS=$((30 * 60))
           # Third leg (automated-researcher#515): a dispatch mention here also fires address-review.yml, so
           # the same in-flight window as the conflict leg's mention applies -- same idiom, same value.
@@ -331,13 +335,6 @@ jobs:
               | map(select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"))
               | reduce .[] as $r (0; if $r.state == "CHANGES_REQUESTED" then . + 1 else 0 end)' <<<"$review_info")
 
-            if [ "$round" -ge "$REVIEW_ADDRESS_LIMIT" ]; then
-              echo "PR #$n: stranded rejected review at head $short is round $round/$REVIEW_ADDRESS_LIMIT with no addressing dispatch; escalating to needs-senior-engineer"
-              gh pr comment "$n" --repo "$REPO" --body "Review loop: $round consecutive CHANGES_REQUESTED rounds from the Codex reviewer with no approve in between (limit $REVIEW_ADDRESS_LIMIT). Escalating to \`needs-senior-engineer\` for in-flight adjudication rather than continuing to auto-dispatch. See the review above for the latest findings."
-              gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
-              return
-            fi
-
             # Idempotency (automated-researcher#515): "addressing activity since the review" means a
             # newer allowlisted dispatch mention -- the head hasn't moved (this review is AT the current
             # head by construction), so "no newer commit" is already guaranteed and doesn't need its own
@@ -362,19 +359,38 @@ jobs:
               return 1
             fi
 
-            local mention_count
+            local mention_count last_mention mention_ts elapsed
             mention_count=$(jq 'length' <<<"$mentions_json")
 
+            # In-flight FIRST, round limit second (automated-researcher#824). This check used to sit after
+            # the round-limit escalation below, so once a PR passed the limit EVERY tick re-escalated it
+            # while an addressing run was still working -- observed on #820 (04:48 UTC) and #823 (06:58
+            # UTC), both of which pushed a commit within a minute of being re-labelled. The second
+            # senior-engineer run each of those summoned then tripped its own 2-round guard and bounced the
+            # PR to needs-human, a label a human had to clear by hand, for work that was never stranded.
+            # "Stranded" is the whole predicate this leg acts on, and a PR whose latest rejected review
+            # already carries an allowlisted dispatch mention inside the grace window is not stranded --
+            # whatever its round count. When that run really does die, the grace window expires and the
+            # round-limit branch below escalates on the next tick exactly as before; nothing is lost, it is
+            # only deferred until the evidence supports it.
             if [ "$mention_count" -gt 0 ]; then
-              local last_mention mention_ts elapsed
               last_mention=$(jq -c '.[-1]' <<<"$mentions_json")
               mention_ts=$(jq -r '.created_at' <<<"$last_mention")
               elapsed=$(( now_epoch - $(date -u -d "$mention_ts" +%s) ))
               if [ "$elapsed" -lt "$STRANDED_GRACE_SECONDS" ]; then
-                echo "PR #$n: dispatch mention posted ${elapsed}s ago against the rejected review at head $short; treating as still in flight, skipping this tick"
+                echo "PR #$n: dispatch mention posted ${elapsed}s ago against the rejected review at head $short (round $round/$REVIEW_ADDRESS_LIMIT); treating as still in flight, skipping this tick"
                 return
               fi
+            fi
 
+            if [ "$round" -ge "$REVIEW_ADDRESS_LIMIT" ]; then
+              echo "PR #$n: stranded rejected review at head $short is round $round/$REVIEW_ADDRESS_LIMIT with no addressing dispatch in flight; escalating to needs-senior-engineer"
+              gh pr comment "$n" --repo "$REPO" --body "Review loop: $round consecutive CHANGES_REQUESTED rounds from the Codex reviewer with no approve in between (limit $REVIEW_ADDRESS_LIMIT), and no addressing dispatch still in flight. Escalating to \`needs-senior-engineer\` for in-flight adjudication rather than continuing to auto-dispatch. See the review above for the latest findings."
+              gh pr edit "$n" --repo "$REPO" --add-label needs-senior-engineer
+              return
+            fi
+
+            if [ "$mention_count" -gt 0 ]; then
               # automated-researcher#516 P0: `round` only moves when a NEW review lands at a NEW head --
               # a dead addressing run (mention posted, grace elapsed, no commit landed since, so the head
               # is unchanged by construction) never produces either, so `round` cannot double as the

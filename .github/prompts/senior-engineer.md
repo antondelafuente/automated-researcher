@@ -46,7 +46,15 @@ paraphrase.
      dispute) is something the implementor can act on, post a PR comment that mentions
      `@claude-code-engineer` with precise, concrete instructions — exact file, exact change, exact command to
      run — not a pointer back to a finding. Precise guidance converges in one push; vague pointing produces
-     regressions. This comment re-dispatches the implementor through the existing mention path.
+     regressions. **Precise is not the same as line-scoped.** On a round-limit summons you adjudicated as
+     *continue* (step 3 weighed descope and argued past it), the repeated findings are themselves evidence
+     that the surface, not just the cited line, was never derived as a whole — so the target semantics you
+     hand over name the **surface**: the invariant that governs it, plus the functions that construct,
+     compare, or assert that invariant. Ask for a single whole-surface pass with a regression case per hole
+     it closes, and state the one specific fix for the cited finding as the **minimum** of that pass rather
+     than its full extent. Dictating a line-level fix alone is correct only where you have empirically
+     verified (step 2) that the rest of that surface is sound — say so in the comment when you do.
+     This comment re-dispatches the implementor through the existing mention path.
    - **Escalate what you can't verify yourself.** Anything that needs instance state you don't have access to
      (pods, fleet, box), or genuine researcher/product taste rather than a verifiable fact, is NOT yours to
      guess at — escalating is correct behavior here, not a fallback. Post a structured PR comment with

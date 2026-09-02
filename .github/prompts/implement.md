@@ -22,7 +22,11 @@ below in it, not in this prompt's paraphrase.
 4. Before opening a PR, run `.aar-ci/checks.sh` against your changed files (compute the changed-path list
    with `git diff --name-only origin/main...HEAD`) and fix anything it flags. A `checks.yml` Actions
    workflow will also run this as a required status check on your PR — running it yourself first saves a
-   round trip.
+   round trip. Push the branch and open the PR (step 6) as soon as those checks pass: the Codex review is
+   the review leg, so do not gate the push on a self-spawned reviewer subagent, and never block on polling a
+   transcript file for a completion marker — a background task's completion reaches you as a notification,
+   and subagent transcripts carry no such marker. This run has a wall-clock cap; a run killed with nothing
+   pushed loses the whole implementation.
 5. **If you are blocked, or if implementing the spec as written would contradict something the issue
    explicitly says, do NOT guess and do NOT implement a different thing than what's specified.** Instead:
    - If you have not yet opened a PR: comment on the issue explaining exactly what's blocking you or what
