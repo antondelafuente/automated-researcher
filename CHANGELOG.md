@@ -22,7 +22,13 @@
   writes `LANDED.md` itself, so its presence in the worktree only ever proved the generator ran, while
   closing the supervision record un-gates reaping the worktree that holds the record's only local copy.
   The canonical invocations live in `run-experiment/SKILL.md` and the smoke EXTRACTS AND RUNS them, so a
-  skill that documents an invocation the script rejects fails CI. **`log-experiment.sh --page-source` (one
+  skill that documents an invocation the script rejects fails CI. `paperwork` also takes
+  `--page-source-external <url>`, mutually exclusive with `--page-source` exactly as in `log-experiment`, so
+  `LANDED.md` renders the three states that exist rather than two: an external viewer is recorded WHERE it
+  landed and stated NOT to have ridden this PR. Passing that URL as `--page-source` would have claimed it rode
+  the record's own PR and dropping the flag would have claimed the `START.md` snapshot carried no
+  `[recipes.viewer]` recipe at all, so the external-viewer flow this same skill documents had no truthful
+  invocation. **`log-experiment.sh --page-source` (one
   landing).** Root containment is PHYSICAL and contains-all rather than lexical and disjoint-from-each-path:
   the repo root normalizes to `.`, which prefix arithmetic read as disjoint from every path, so
   `--page-source <repo-root>` would have staged the whole repository. The page-source tree is MIRRORED

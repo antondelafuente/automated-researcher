@@ -28,6 +28,9 @@
 #     name is refused outright.
 #   - A5: the ledger event goes through the seam keyed on the REGISTRY DIR NAME (#473), never the run-id, and
 #     the run-supervision record closes through its own helper (#376/#338).
+#   - invariant 11 (the paperwork half): `--page-source-external <url>` is mutually exclusive with
+#     `--page-source` and is RECORDED as an external landing — LANDED.md never renders an external viewer as
+#     riding this PR, nor as a close whose snapshot carried no `[recipes.viewer]` recipe at all.
 #   - #729 (sibling artifact root refused), #512 (the emitted checklist is UNSTARTED), #804 (a missing seam is
 #     exit 3 + a `CLOSE-RECORD-GAP:` line, distinct from exit 1).
 #
@@ -218,6 +221,33 @@ run paperwork run-XYZ-different "$D" --outcome completed-as-designed \
     --page-source "dashboard/exp-a" --pull-cmd 'rclone copy r2:artifacts/exp-a ./pull' --repro-diff "$T/diff.txt"
 [ "$before" = "$(grep -v 'closed at' "$D/LANDED.md")" ] \
   && pass "regeneration is idempotent apart from the close timestamp" || fail "regenerating changed the generated content"
+
+# ---- 3b. #821 invariant 11: an EXTERNAL viewer is recorded as external, never as riding this PR ----
+D="$(new_record exp-a)"
+run paperwork run-1 "$D" --outcome completed-as-designed \
+    --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" \
+    --page-source-external "https://github.com/org/viewer"
+[ "$RC" = 0 ] && pass "--page-source-external is accepted on its own (SKILL.md's external-viewer flow has a truthful invocation)" \
+  || fail "--page-source-external rejected (rc=$RC: $ERR)"
+grep -qF 'https://github.com/org/viewer' "$D/LANDED.md" \
+  && pass "LANDED.md records WHERE the external viewer landed" || fail "LANDED.md does not record the external page source"
+grep -qF 'SAME PR' "$D/LANDED.md" \
+  && fail "LANDED.md claims an EXTERNAL viewer rode this PR (#821 invariant 11)" \
+  || pass "LANDED.md does not claim the external viewer rode this PR"
+grep -qF 'manifest-only close' "$D/LANDED.md" \
+  && fail "LANDED.md records an external-viewer close as having had no [recipes.viewer] recipe at all" \
+  || pass "an external-viewer close is not recorded as manifest-only"
+grep -qF 'the record, the page source, and this file are one close' "$D/LANDED.md" \
+  && fail "the one-close paragraph still folds an EXTERNAL page source into this PR's landing" \
+  || pass "the one-close paragraph names the separate external landing instead of claiming it rode this PR"
+D="$(new_record exp-a)"
+run paperwork run-1 "$D" --outcome completed-as-designed \
+    --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" \
+    --page-source "dashboard/exp-a" --page-source-external "https://github.com/org/viewer"
+{ [ "$RC" = 1 ] && case "$ERR" in *"mutually exclusive"*) true;; *) false;; esac; } \
+  && pass "--page-source + --page-source-external refused, as log-experiment refuses the same pair (#821 invariant 11)" \
+  || fail "both page-source flags accepted, so LANDED.md could claim two landings (rc=$RC: $ERR)"
+no_paperwork "$D" && pass "the refused flag pair wrote NOTHING (#821 A3)" || fail "paperwork survived a refused flag pair"
 
 # ---- 4. regression R2: a successful but EMPTY listing is evidence AGAINST the upload ----
 D="$(new_record exp-a)"

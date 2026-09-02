@@ -69,7 +69,8 @@
 # invocation this script would reject fails the smoke, #820 round 1):
 #   close_record.sh paperwork <run-id> <registry-dir> --outcome <abstract-outcome>
 #                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-#                   [--page-source <path>] [--pull-cmd <cmd>]... [--repro-diff <file>]
+#                   [--page-source <path> | --page-source-external <url>]
+#                   [--pull-cmd <cmd>]... [--repro-diff <file>]
 #   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 #
 #   paperwork  runs BEFORE the TEMP.md delete + staging, so its output lands with the record.
@@ -101,7 +102,8 @@ usage() {
 usage:
   close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-                  [--page-source <path>] [--pull-cmd <cmd>]... [--repro-diff <file>]
+                  [--page-source <path> | --page-source-external <url>]
+                  [--pull-cmd <cmd>]... [--repro-diff <file>]
   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 USAGE
   exit 1
@@ -304,7 +306,7 @@ local_md5() {
 
 cmd_paperwork() {
   local run_id="$1" dir="$2"; shift 2
-  local outcome="" artifact_root="" no_artifacts=0 page_source="" repro_diff=""
+  local outcome="" artifact_root="" no_artifacts=0 page_source="" page_source_external="" repro_diff=""
   local -a pull_cmds=()
   UPLOADED_FROM=()
   while [ "$#" -gt 0 ]; do
@@ -314,11 +316,17 @@ cmd_paperwork() {
       --uploaded-from) [ "$#" -ge 2 ] || die "--uploaded-from requires a value"; UPLOADED_FROM+=("$2"); shift 2 ;;
       --no-artifacts)  no_artifacts=1; shift ;;
       --page-source)   [ "$#" -ge 2 ] || die "--page-source requires a value";   page_source="$2"; shift 2 ;;
+      --page-source-external)
+                       [ "$#" -ge 2 ] || die "--page-source-external requires a value"; page_source_external="$2"; shift 2 ;;
       --pull-cmd)      [ "$#" -ge 2 ] || die "--pull-cmd requires a value";      pull_cmds+=("$2"); shift 2 ;;
       --repro-diff)    [ "$#" -ge 2 ] || die "--repro-diff requires a value";    repro_diff="$2"; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
+  # #821 invariant 11, the same rule log-experiment.sh enforces on the same pair: the page source either
+  # rides this PR or it landed elsewhere. Refused here at parse time, so nothing is written (invariant 3).
+  [ -z "$page_source" ] || [ -z "$page_source_external" ] \
+    || die "--page-source and --page-source-external are mutually exclusive — the page source either rides this PR or it landed elsewhere, not both"
 
   [ -d "$dir" ] || die "not a directory: $dir"
   dir="$(cd "$dir" && pwd)"
@@ -463,6 +471,28 @@ EOF
   local artifact_cell
   if [ "$no_artifacts" = 1 ]; then artifact_cell='none (no heavy artifacts for this run)'
   else artifact_cell="\`$artifact_root\` ($OBJECTS objects, $BYTES bytes, byte-verified)"; fi
+  # The page-source row and the one-close paragraph below both ASSERT where the page source landed, so both
+  # have to read the THREE states that exist, not two. A viewer in a different repo cannot ride this PR
+  # (#821 invariant 11 / SKILL.md's external-viewer flow): rendering it off "was --page-source passed" alone
+  # left an external close with no truthful invocation — passing the URL as --page-source claimed it rode the
+  # record's PR, and dropping it claimed the START.md snapshot carried no `[recipes.viewer]` recipe at all.
+  # Either way the generated paperwork asserts something the state does not show, which is the one thing
+  # #821 exists to stop.
+  local page_source_cell landing_para
+  if [ -n "$page_source" ]; then
+    page_source_cell="\`$page_source\` — lands in the SAME PR as this record (#819)"
+  elif [ -n "$page_source_external" ]; then
+    page_source_cell="$page_source_external — external viewer repo; landed separately, NOT in this PR (#819)"
+  else
+    page_source_cell='none (manifest-only close — no [recipes.viewer] in the START.md snapshot)'
+  fi
+  if [ -n "$page_source_external" ]; then
+    landing_para="Landed in ONE \`log-experiment\` call: the record and this file are one close, one gated PR (#819); the
+page source lives in a different repo and landed separately at $page_source_external."
+  else
+    landing_para="Landed in ONE \`log-experiment\` call: the record, the page source, and this file are one close, so they are
+one gated PR (#819) — not three sequential ones."
+  fi
   stage_generated LANDED.md <<EOF
 $GEN_MARKER
 # Landed — $exp
@@ -472,12 +502,11 @@ $GEN_MARKER
 | record dir | \`$exp\` |
 | run id | \`$run_id\` |
 | artifact-store root | $artifact_cell |
-| page source | $([ -n "$page_source" ] && echo "\`$page_source\` — lands in the SAME PR as this record (#819)" || echo 'none (manifest-only close — no [recipes.viewer] in the START.md snapshot)') |
+| page source | $page_source_cell |
 | terminal ledger event | $ledger_line |
 | closed at (UTC) | $now |
 
-Landed in ONE \`log-experiment\` call: the record, the page source, and this file are one close, so they are
-one gated PR (#819) — not three sequential ones.
+$landing_para
 
 \`close_record.sh finalize\` proves THIS file is present and byte-identical at the base ref before the
 run-supervision record closes (#821 invariant 4) — so re-running \`paperwork\` after the record landed means

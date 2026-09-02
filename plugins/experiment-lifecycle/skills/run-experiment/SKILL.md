@@ -770,7 +770,12 @@ upstream of everything in this ordering.
   **terminal ledger event** (`run` = the registry dir name exactly, no suffix, #473; the terminal status is
   the operational outcome you pass it, #376 — the script refuses to invent one), and the close self-audit
   checklist, UNSTARTED (#512). A fact it cannot derive is emitted as a `TODO(close):` line you fill, never as
-  a plausible-looking value. Run it before the `TEMP.md` delete + staging below, so its output stages with the
+  a plausible-looking value. An **external-viewer close passes `--page-source-external <url>` instead of
+  `--page-source`** — the two are mutually exclusive, exactly as in `log-experiment` (#821 invariant 11) — so
+  `LANDED.md` records where the viewer actually landed and says it did NOT ride this PR, rather than claiming it
+  rode the record's own PR (what passing the URL as `--page-source` would assert) or that the `START.md`
+  snapshot carried no `[recipes.viewer]` recipe at all (what dropping the flag would assert).
+  Run it before the `TEMP.md` delete + staging below, so its output stages with the
   rest of the record. Three properties are worth knowing before you read its output (#821):
   - **The manifest is byte-verified or absent.** `--uploaded-from` names the local dir(s) this run uploaded
     (repeatable — the completion boundary uploads per artifact-completion, #460). The manifest is written only
