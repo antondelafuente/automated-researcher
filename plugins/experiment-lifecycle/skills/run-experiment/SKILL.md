@@ -749,9 +749,12 @@ upstream of everything in this ordering.
 - **Generate the mechanical paperwork — don't author it (#819).** The close touches ~15 record artifacts, and
   a measured half of a run's output tokens are spent in the close leg writing them by hand. **You author
   `RESULTS.md` and the audit responses** — those are judgment. Everything derivable from state is emitted by
-  `scripts/close_record.sh <run-id> <registry-dir> …`: `LANDED.md` (what landed where — record dir, artifact-store
+  `scripts/close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
+  (--artifact-root <rclone-dest> | --no-artifacts) [--page-source <path>] [--pull-cmd <cmd>]… [--repro-diff <file>]`:
+  `LANDED.md` (what landed where — record dir, artifact-store
   root, page path, ledger event), `ARTIFACT_MANIFEST.md` (R2 path + object count + key sizes, from the verified
-  upload listing), a `REPRODUCTION.md` skeleton carrying the actual pull commands and the reproduction diff
+  upload listing — a store that cannot be listed, or that lists clean and comes back EMPTY, produces **no**
+  manifest and a `CLOSE-RECORD-GAP:` line instead of a zero-object one, #331), a `REPRODUCTION.md` skeleton carrying the actual pull commands and the reproduction diff
   output from the gate above, the experiment-level **terminal ledger event** (`run` = the registry dir name
   exactly, no suffix, #473; the terminal status is the operational outcome you pass it, #376 — the script
   refuses to invent one), and the close self-audit checklist. It reads the run-supervision record for the
@@ -811,11 +814,17 @@ upstream of everything in this ordering.
   *finalizer*. The reason: if you cleared desired-active at the top of Close and then crashed before teardown
   finished, the supervisor would (correctly) refuse to relaunch a not-desired-active run while a pod still bills
   with no brain to tear it down — an orphaned, un-closed session. So keep the run **desired-active until the close
-  path is durably in charge**, then run the finalizer: `close_record.sh finalize <run-id> <registry-dir>`
-  (`--stop` for a deliberate `/quit`/kill — never to be relaunched). It re-checks that the close paperwork is
-  durable (`LANDED.md` present) before delegating to `run_supervision_record.sh close`/`stop` — closing the
-  record is what un-gates worktree/scratch/session reaping, so it must never run ahead of the paperwork it
-  certifies. After this, the supervisor will not resurrect the run.
+  path is durably in charge**, then run the finalizer — after a `git fetch origin`, so the ref it checks is
+  current: `close_record.sh finalize <run-id> <registry-dir> --base-ref origin/<base_branch>` (`<base_branch>`
+  is the `[github] base_branch` of this record's `START.md` snapshot; `--stop` for a deliberate `/quit`/kill —
+  never to be relaunched). **Durable means MERGED, and the proof is remote, not local:** the finalizer
+  re-derives that `LANDED.md` is present at `--base-ref` *and byte-identical* to this record's, because
+  `close_record.sh paperwork` writes `LANDED.md` itself — its mere presence in your worktree would only prove
+  that script ran, never that the close landed. Closing the record un-gates worktree/scratch/session reaping
+  and the worktree holds the only local copy of the record, so this is the same never-default `--base-ref`
+  merged-proof `launch-experiment`'s `launch_record.sh preflight` runs before a launch. A stale ref reads
+  exactly like an unlanded close — deliberately, since failing closed here costs a fetch and failing open
+  reaps an unlanded record. After this, the supervisor will not resurrect the run.
 - **Retro — file feedback** (you are the product's user): file product/scaffold friction via feedback-loop's
   `file-feedback` when installed/configured; record deployment-only incidents or ideas through the consuming instance's
   feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
@@ -1186,8 +1195,10 @@ through env seams; see the "three seams" note at the top of this skill.
 - **Generate the mechanical close paperwork, author only the judgment (#819).** `close_record.sh paperwork`
   emits `LANDED.md` / `ARTIFACT_MANIFEST.md` / `REPRODUCTION.md` / the close self-audit checklist / the
   terminal ledger event from state; `RESULTS.md` and the audit responses stay yours. It never claims what it
-  did not observe (no listing → no manifest) and never invents a terminal status (#376) or a ledger key
-  (#473); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, never a quiet no-op.
+  did not observe (no listing — or an empty one — → no manifest) and never invents a terminal status (#376)
+  or a ledger key (#473); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, never
+  a quiet no-op. Its `finalize` verb proves the close MERGED at `--base-ref` before un-gating the reaps —
+  evidence a *generator* produced is never evidence its own output landed.
 - **Wait in one call, not one API turn per poll (#819)** — a single capped wait on the driver's own terminal
   marker, never a `sleep`-per-turn loop and never a re-`Read` loop on a task-output file.
 - **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to

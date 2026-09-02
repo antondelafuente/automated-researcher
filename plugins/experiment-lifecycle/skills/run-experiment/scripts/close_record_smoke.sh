@@ -7,20 +7,23 @@
 #     purpose — a run-id-keyed event is exactly the suffix/aliasing bug that rendered a completed
 #     experiment `failed` on a downstream dashboard).
 #   - #729: an artifact root carrying a SIBLING's identifier is refused before anything is written.
-#   - #331/#232: a store that cannot be listed produces NO ARTIFACT_MANIFEST.md at all (never a hollow one).
+#   - #331/#232: a store that cannot be listed — or that lists clean and comes back EMPTY — produces NO
+#     ARTIFACT_MANIFEST.md at all (never a hollow one, and never a zero-object "verified upload").
 #   - #804: a missing seam is exit 3 + a CLOSE-RECORD-GAP: line on stdout, distinct from exit 1 (a real
 #     failure), with everything else still emitted.
 #   - #512: the emitted close self-audit checklist is UNSTARTED (no ☑/☒ gate lines).
-#   - the finalizer's ordering guard: no LANDED.md => refuse to close the run-supervision record.
+#   - the finalizer's ordering guard: the close must be MERGED at --base-ref (present AND byte-identical)
+#     before the run-supervision record closes — locally-generated paperwork is never its own landing proof.
 #   - hand-authored files (no generated-by marker) are never clobbered; generated ones regenerate idempotently.
 #
-# Hermetic: a stubbed `rclone` and a stubbed run_supervision_record.sh on PATH / alongside a copy of the
-# script under test. No network, no real store, no real record registry.
+# Hermetic: a stubbed `rclone`, a stubbed run_supervision_record.sh alongside a copy of the script under
+# test, and a local file-backed `origin` for the finalizer's merged-proof. No network, no real store, no
+# real record registry.
 #
-# Run it directly: `bash close_record_smoke.sh`. Wiring it into `.aar-ci/checks.sh` next to the other
-# run-experiment script smokes (run_supervision_record / reap_session / session_janitor) is a one-line
-# addition, deliberately left for a human pass — that file is the pipeline's trust boundary and an
-# automated implementor run does not edit it.
+# Run it directly: `bash close_record_smoke.sh`. Registering it in `.aar-ci/checks.sh` next to the other
+# run-experiment script smokes (run_supervision_record / reap_session / session_janitor — same guard shape,
+# gated on `close_record(_smoke)?\.sh` appearing in the changed paths) is deliberately left for a human
+# pass: that file is the pipeline's trust boundary and an automated implementor run does not edit it.
 set -uo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,11 +50,13 @@ chmod +x "$T/bin/run_supervision_record.sh"
 CR="$T/bin/close_record.sh"
 export RSR_CALLS="$T/rsr-calls"; : > "$RSR_CALLS"
 
-# Stub rclone: `lsl <dest>` prints a fixed listing for a configured dest, or fails (exit 1) when RCLONE_FAIL=1.
+# Stub rclone: `lsl <dest>` prints a fixed listing, fails (exit 1) when RCLONE_FAIL=1, or succeeds with an
+# EMPTY listing when RCLONE_EMPTY=1 — the "clean exit, nothing there" case a manifest must never launder.
 mkdir -p "$T/stub"
 cat > "$T/stub/rclone" <<'STUB'
 #!/usr/bin/env bash
 [ "${RCLONE_FAIL:-0}" = 1 ] && { echo "Listing error: directory not found" >&2; exit 1; }
+[ "${RCLONE_EMPTY:-0}" = 1 ] && exit 0
 if [ "$1" = "lsl" ]; then
   printf '%8d %s %s\n' 100 2026-08-31 'rollouts.jsonl'
   printf '%8d %s %s\n' 250 2026-08-31 'adapter.safetensors'
@@ -130,6 +135,17 @@ case "$OUT" in *"CLOSE-RECORD-GAP: could not list the artifact store"*) pass "un
   *) fail "unlistable store not reported: $OUT";; esac
 [ -f "$D/LANDED.md" ] && pass "the rest of the paperwork still emitted" || fail "an artifact gap suppressed the other emissions"
 
+# ---- 4b. store lists CLEAN but EMPTY: still no manifest — a successful exit is not an observed upload ----
+D="$(new_record exp-a)"
+RCLONE_EMPTY=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+[ "$RC" = 3 ] && pass "an empty store listing exits 3 (the gap path, not success)" || fail "empty listing exit was $RC, expected 3"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "wrote a ZERO-OBJECT manifest claiming a verified upload for an empty store (#331)" \
+  || pass "no zero-object manifest for an empty store (#331)"
+case "$OUT" in *"CLOSE-RECORD-GAP: the artifact store"*"is EMPTY"*) pass "empty store reported as a gap";;
+  *) fail "empty store not reported as a gap: $OUT";; esac
+grep -qF 'CLOSE-RECORD-GAP' "$D/LANDED.md" && pass "LANDED.md carries the empty-store gap" || fail "LANDED.md hides the empty-store gap"
+
 # ---- 5. ledger seam wired: invoked with the REGISTRY DIR NAME, not the run-id (#473) ----
 : > "$LEDGER_CALLS"
 D="$(new_record exp-a)"
@@ -165,22 +181,73 @@ run paperwork run-1 "$D" --outcome completed-as-designed --no-artifacts \
 grep -qF 'ROW 3 differs: 0.41 vs 0.44' "$D/REPRODUCTION.md" && pass "reproduction diff recorded verbatim" || fail "reproduction diff not recorded"
 grep -qF 'rclone copy r2:artifacts/exp-a ./pull' "$D/REPRODUCTION.md" && pass "pull command recorded" || fail "pull command not recorded"
 
-# ---- 9. finalize: refuses ahead of the paperwork, then delegates to the record helper ----
+# ---- 9. finalize: the close must be MERGED at --base-ref before the run-supervision record closes ----
+# `paperwork` writes LANDED.md itself, so its presence in the working tree proves only that the generator
+# ran. The evidence has to come from the ref the record merges into — modelled here with a real checkout
+# pushing to a real (local, file-backed) `origin`, so the git path under test is the production one.
 D="$(new_record exp-a)"
 : > "$RSR_CALLS"
-run finalize run-1 "$D"
+run finalize run-1 "$D" --base-ref origin/main
 { [ "$RC" = 1 ] && case "$ERR" in *"no LANDED.md"*) true;; *) false;; esac; } \
-  && pass "finalize refuses before the paperwork is durable" || fail "finalize ran ahead of the paperwork (rc=$RC: $ERR)"
+  && pass "finalize refuses before the paperwork exists" || fail "finalize ran ahead of the paperwork (rc=$RC: $ERR)"
 [ -s "$RSR_CALLS" ] && fail "finalize touched the run-supervision record anyway" || pass "record untouched on refusal"
-EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --no-artifacts
-run finalize run-1 "$D"
-[ "$RC" = 0 ] && pass "finalize exits 0 once the paperwork exists" || fail "finalize rc=$RC: $ERR"
-grep -qxF "close run-1" "$RSR_CALLS" && pass "finalize closes the run-supervision record" || fail "record close not delegated: $(cat "$RSR_CALLS")"
+
+BARE="$T/origin.git"; REPO="$T/repo"
+git init -q --bare "$BARE"
+git init -q "$REPO" && git -C "$REPO" symbolic-ref HEAD refs/heads/main
+git -C "$REPO" config user.email smoke@example.invalid; git -C "$REPO" config user.name smoke
+git -C "$REPO" remote add origin "$BARE"
+mkdir -p "$REPO/registry"; printf 'seed\n' > "$REPO/registry/.keep"
+git -C "$REPO" add -A >/dev/null && git -C "$REPO" commit -qm seed && git -C "$REPO" push -q origin main
+git -C "$REPO" fetch -q origin
+
+G="$REPO/registry/exp-a"; mkdir -p "$G/scripts"; printf '# results\n' > "$G/RESULTS.md"
+EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$G" --outcome completed-as-designed --no-artifacts
+[ -f "$G/LANDED.md" ] || fail "paperwork did not emit LANDED.md into the git-backed record"
+
 : > "$RSR_CALLS"
-run finalize run-1 "$D" --stop
+run finalize run-1 "$G"
+{ [ "$RC" = 1 ] && case "$ERR" in *"--base-ref is required"*) true;; *) false;; esac; } \
+  && pass "finalize requires --base-ref (never defaults to your own branch)" || fail "finalize defaulted the base ref (rc=$RC: $ERR)"
+run finalize run-1 "$G" --base-ref origin/main
+{ [ "$RC" = 1 ] && case "$ERR" in *"has NOT landed"*) true;; *) false;; esac; } \
+  && pass "locally-generated LANDED.md is NOT accepted as proof of a landing" \
+  || fail "finalize accepted its own generated paperwork as a durable landing (rc=$RC: $ERR)"
+[ -s "$RSR_CALLS" ] && fail "an unlanded close still closed the record" || pass "an unlanded close leaves reaping gated"
+run finalize run-1 "$G" --base-ref origin/nope
+{ [ "$RC" = 1 ] && case "$ERR" in *"base ref not found"*) true;; *) false;; esac; } \
+  && pass "a missing base ref is distinct from an unlanded close" || fail "missing base ref rc=$RC: $ERR"
+
+# Land it the way log-experiment does: commit the record onto the base branch and merge it.
+git -C "$REPO" add registry/exp-a >/dev/null && git -C "$REPO" commit -qm 'log exp-a' && git -C "$REPO" push -q origin main
+git -C "$REPO" fetch -q origin
+: > "$RSR_CALLS"
+run finalize run-1 "$G" --base-ref origin/main
+[ "$RC" = 0 ] && pass "finalize exits 0 once the close is merged at the base ref" || fail "finalize rc=$RC: $ERR"
+grep -qxF "close run-1" "$RSR_CALLS" && pass "finalize closes the run-supervision record" || fail "record close not delegated: $(cat "$RSR_CALLS")"
+
+# Byte-equality, not mere presence: a landed-but-different LANDED.md is a stale landing standing in for this one.
+cp "$G/LANDED.md" "$T/landed.bak"
+printf 'drifted after landing\n' >> "$G/LANDED.md"
+: > "$RSR_CALLS"
+run finalize run-1 "$G" --base-ref origin/main
+{ [ "$RC" = 1 ] && case "$ERR" in *"differs from this working tree"*) true;; *) false;; esac; } \
+  && pass "a landed LANDED.md that differs from this close's is refused" || fail "stale landing accepted (rc=$RC: $ERR)"
+[ -s "$RSR_CALLS" ] && fail "a stale landing still closed the record" || pass "a stale landing leaves reaping gated"
+cp "$T/landed.bak" "$G/LANDED.md"
+
+# A record dir outside git has no landing to confirm — it fails closed rather than falling back to presence.
+D="$(new_record exp-a)"
+EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --no-artifacts
+run finalize run-1 "$D" --base-ref origin/main
+{ [ "$RC" = 1 ] && case "$ERR" in *"not inside a git checkout"*) true;; *) false;; esac; } \
+  && pass "a non-git record dir fails closed" || fail "non-git record dir rc=$RC: $ERR"
+
+: > "$RSR_CALLS"
+run finalize run-1 "$G" --base-ref origin/main --stop
 grep -qxF "stop run-1" "$RSR_CALLS" && pass "--stop maps to the record's stop verb" || fail "--stop not delegated: $(cat "$RSR_CALLS")"
 : > "$RSR_CALLS"
-RSR_FAIL=1 run finalize run-1 "$D"
+RSR_FAIL=1 run finalize run-1 "$G" --base-ref origin/main
 { [ "$RC" = 1 ] && case "$ERR" in *"still desired-active"*) true;; *) false;; esac; } \
   && pass "a failed record close is loud (reaping stays gated)" || fail "failed record close swallowed (rc=$RC: $ERR)"
 

@@ -28,8 +28,9 @@
 #     REFUSED — a pulled driver stack's un-renamed path literal pointing at a SIBLING's root is exactly how
 #     41 objects of a closed record were permanently lost, and a manifest that pins the sibling's root is
 #     that incident written into the permanent record.
-#   - #331: a manifest never claims an upload it did not observe. If the store cannot be listed, no
-#     ARTIFACT_MANIFEST.md is written at all — a hollow manifest is worse than none.
+#   - #331: a manifest never claims an upload it did not observe. If the store cannot be listed — or lists
+#     clean and comes back EMPTY, which is evidence against the upload, not for it — no ARTIFACT_MANIFEST.md
+#     is written at all; a hollow manifest is worse than none.
 #   - #804: a missing instance seam is LOUD (exit 3 + a `CLOSE-RECORD-GAP:` line for the close record),
 #     never a quiet no-op — seven consecutive closes reaped nothing because a no-op said so only on stdout
 #     and exited 0.
@@ -40,13 +41,13 @@
 #   close_record.sh paperwork <run-id> <registry-dir> --outcome <abstract-outcome>
 #                   (--artifact-root <rclone-dest> | --no-artifacts)
 #                   [--page-source <path>] [--pull-cmd <cmd>]... [--repro-diff <file>]
-#   close_record.sh finalize  <run-id> <registry-dir> [--stop]
+#   close_record.sh finalize  <run-id> <registry-dir> --base-ref <ref> [--stop]
 #
 #   paperwork  runs BEFORE the TEMP.md delete + staging, so its output lands with the record.
-#   finalize   is the POST-AUDIT finalizer (ordering is load-bearing — see SKILL.md): it verifies the
-#              paperwork above is durable, then closes the run-supervision record via its own helper. It is
-#              deliberately a SECOND call: closing the record early would make the relaunch supervisor
-#              refuse to recover a run whose compute is still billing.
+#   finalize   is the POST-AUDIT finalizer (ordering is load-bearing — see SKILL.md): it proves the
+#              paperwork above actually MERGED at --base-ref, then closes the run-supervision record via its
+#              own helper. It is deliberately a SECOND call: closing the record early would make the relaunch
+#              supervisor refuse to recover a run whose compute is still billing.
 #
 # Instance seam:
 #   EXPERIMENT_LEDGER_EVENT_CMD  a command invoked as `<cmd> <run> <abstract-outcome> <registry-dir>` that
@@ -68,7 +69,7 @@ usage:
   close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
                   (--artifact-root <rclone-dest> | --no-artifacts)
                   [--page-source <path>] [--pull-cmd <cmd>]... [--repro-diff <file>]
-  close_record.sh finalize  <run-id> <registry-dir> [--stop]
+  close_record.sh finalize  <run-id> <registry-dir> --base-ref <ref-the-record-merges-into> [--stop]
 USAGE
   exit 1
 }
@@ -136,6 +137,14 @@ cmd_paperwork() {
       artifact_gap="rclone is not on PATH — no ARTIFACT_MANIFEST.md was written for '$artifact_root' (a manifest must pin an observed listing, never a claim); list the store and write it by hand, or install rclone and re-run"
     elif ! listing="$(rclone lsl "$artifact_root" 2>&1)"; then
       artifact_gap="could not list the artifact store '$artifact_root' (rclone lsl failed: $(printf '%s' "$listing" | head -n1)) — no ARTIFACT_MANIFEST.md was written; a manifest that claims an upload nobody observed is the #331 divergence, so this fails closed"
+    elif [ "$(printf '%s\n' "$listing" | grep -c . || true)" = 0 ]; then
+      # A listing that SUCCEEDS and comes back empty is not evidence of an upload — it is evidence of the
+      # opposite. `--artifact-root` is the caller asserting this run put heavy artifacts in the store, so
+      # zero objects means the upload landed somewhere else (the #729 wrong-root shape) or never ran. Writing
+      # the manifest anyway would put "objects | 0 … the upload was verified" into the permanent record: the
+      # same #331 divergence as an unlistable store, reached through a successful exit code, so it takes the
+      # same fail-closed path. A run that genuinely has nothing in the store says so with --no-artifacts.
+      artifact_gap="the artifact store '$artifact_root' listed successfully but is EMPTY (0 objects) — no ARTIFACT_MANIFEST.md was written; --artifact-root asserts this run HAS heavy artifacts there, so an empty listing means the upload went somewhere else (the #729 wrong-root shape) or never ran, and a zero-object manifest would record a verified upload nobody observed (#331). Verify the upload against this root and re-run, or pass --no-artifacts if this run genuinely stored nothing"
     else
       objects="$(printf '%s\n' "$listing" | grep -c . || true)"
       bytes="$(printf '%s\n' "$listing" | awk '{s+=$1} END {printf "%d", s+0}')"
@@ -267,7 +276,8 @@ Re-CHECK by inspection. "I ran the step" ≠ "the state is right". Every box sta
 - ☐ compute gone per the control plane of the DEPLOYING account (never SSH liveness)
 - ☐ \`RESULTS.md\` committed + pushed; close audit + responses present (#263)
 - ☐ waker + look-again marker cleared
-- ☐ run-supervision record closed via \`close_record.sh finalize $run_id <registry-dir>\` (the post-audit finalizer)
+- ☐ run-supervision record closed via \`close_record.sh finalize $run_id <registry-dir> --base-ref origin/<base_branch>\`
+  (the post-audit finalizer — it re-proves this close MERGED at that ref before un-gating the reaps below)
 - ☐ worktree reaped (\`reap_worktree.sh\`), scratch archived+reaped (\`reap_scratch.sh\`), session reaped
   (\`reap_session.sh\`) — in that order, all gated on the clean close
 EOF
@@ -285,19 +295,41 @@ EOF
 
 cmd_finalize() {
   local run_id="$1" dir="$2"; shift 2
-  local verb="close"
+  local verb="close" base_ref=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --stop) verb="stop"; shift ;;
+      --stop)     verb="stop"; shift ;;
+      --base-ref) [ "$#" -ge 2 ] || die "--base-ref requires a value"; base_ref="$2"; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
   [ -d "$dir" ] || die "not a directory: $dir"
   dir="$(cd "$dir" && pwd)"
-  # The finalizer runs only once the close paperwork is DURABLE — closing the record is what un-gates
-  # worktree/scratch/session reaping, and a record closed before the paperwork exists is a close whose
-  # evidence nobody can reconstruct afterwards.
-  [ -f "$dir/LANDED.md" ] || die "no LANDED.md in $dir — run 'close_record.sh paperwork' (and land the record) before finalizing: closing the run-supervision record un-gates worktree/scratch/session reaping, so it must never run ahead of the paperwork it certifies"
+
+  # The finalizer runs only once the close is DURABLY LANDED, and "durable" means MERGED — not "the
+  # paperwork exists here". Closing the run-supervision record un-gates worktree/scratch/session reaping,
+  # and the worktree holds the only local copy of the record, so a local file is exactly the wrong evidence:
+  # `paperwork` writes LANDED.md itself, so checking for its presence would only prove that this same script
+  # ran a moment ago (PR #820 review, P0). The evidence has to come from the ref the record merges into, and
+  # it has to be THIS close's paperwork byte-for-byte — a stale LANDED.md from an earlier landing of the same
+  # dir would otherwise certify a close that never landed. Same shape, and the same never-default rule, as
+  # `launch_record.sh preflight --base-ref` proving the design-stage PR merged before a launch.
+  [ -n "$base_ref" ] || die "--base-ref is required — pass the ref your instance's records merge into (the [github].base_branch of this record's START.md snapshot, e.g. origin/main). This check exists to prove the close actually MERGED before reaping is un-gated, so it can never default to your own branch; fetch it first (git fetch origin) so the ref is current"
+  [ -f "$dir/LANDED.md" ] || die "no LANDED.md in $dir — run 'close_record.sh paperwork' and land the record via log-experiment before finalizing: closing the run-supervision record un-gates worktree/scratch/session reaping, so it must never run ahead of the paperwork it certifies"
+
+  local root prefix
+  root="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)" \
+    || die "not inside a git checkout: $dir — the close lands as a commit on $base_ref, so a record dir outside git has no landing this finalizer can confirm"
+  prefix="$(git -C "$dir" rev-parse --show-prefix)"   # repo-relative, trailing slash (empty at the root)
+  [ -n "$prefix" ] || die "record dir is the repo root ($dir) — pass the experiment's own registry dir"
+  git -C "$root" rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null \
+    || die "base ref not found: $base_ref (fetch it first — a missing ref is not the same as an unlanded close)"
+  git -C "$root" cat-file -e "$base_ref:${prefix}LANDED.md" 2>/dev/null \
+    || die "${prefix}LANDED.md is not present at $base_ref — this close has NOT landed, so there is nothing durable for the run-supervision record to certify; land the record (log-experiment, one call for record + page source + LANDED.md) and re-run. If you already landed it, fetch $base_ref first: a stale ref reads exactly like an unlanded close, on purpose"
+  git -C "$root" show "$base_ref:${prefix}LANDED.md" | cmp -s - "$dir/LANDED.md" \
+    || die "${prefix}LANDED.md at $base_ref differs from this working tree's — the landed paperwork is not the paperwork this close produced (a re-run of 'paperwork' after landing, or an earlier close of the same dir still standing in for this one); re-land the record so what is merged is what this close certifies, then re-run"
+  note "close landed: ${prefix}LANDED.md matches $base_ref"
+
   local rsr="$SELF_DIR/run_supervision_record.sh"
   [ -x "$rsr" ] || die "missing/non-executable $rsr — it ships alongside close_record.sh; this install is incomplete"
   "$rsr" "$verb" "$run_id" || die "run_supervision_record.sh $verb $run_id failed — the record is still desired-active; do NOT reap the worktree/scratch/session until it closes cleanly"

@@ -24,8 +24,12 @@
   self-audit checklist (#512), and the terminal ledger event through a new `EXPERIMENT_LEDGER_EVENT_CMD`
   seam keyed on the registry dir name (#473) with the abstract outcome the caller states (#376, never
   inferred); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record (#804's shape),
-  never a quiet no-op, and `finalize` refuses to close the run-supervision record ahead of the paperwork it
-  certifies. Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal
+  never a quiet no-op. A store that lists clean and comes back EMPTY takes that same gap path rather than
+  recording a zero-object "verified upload" (#331: an empty listing is evidence against the upload, not for
+  it), and `finalize` proves the close actually MERGED — `LANDED.md` present at a required `--base-ref` and
+  byte-identical to this record's — before un-gating worktree/scratch/session reaping, since the generator's
+  own output is never evidence that its output landed (same never-default merged-proof as
+  `launch_record.sh preflight`). Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal
   marker — 3,886 poll calls across 61 runs, 180 min of them polling drivers that had already exited, and
   one run that re-`Read` the same task-output file 852 times. `RESULTS.md` and the audit responses stay
   model-authored; every fail-closed gate (cross-family audit scope, fresh-pull reproduction, verified
