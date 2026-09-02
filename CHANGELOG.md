@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.6.0 / verify-claims 0.8.1 (2026-09-02): a formal design was ~28 min wall / 19 min
+- experiment-lifecycle 0.6.0 / verify-claims 0.8.2 (2026-09-02): a formal design was ~28 min wall / 19 min
   agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
   episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
   so "audit ONCE" is being followed). The cost was 53k output tokens of cross-doc restatement, a gate
@@ -51,7 +51,14 @@
   bytes while the facts described both) and the facts name each included file's packet path; and a
   `check:` directive's target is always a citation, with the directive evaluations written into
   `MECHANICAL_FACTS.md` itself, so a mechanical verdict's `evidence:` quote is verbatim in the file it
-  attributes it to. The two-argument
+  attributes it to. The generated `MECHANICAL_FACTS.md` then RESERVES its packet-root name on that same
+  claim table before any citation is copied: a prior gate's own `MECHANICAL_FACTS.md` is an ordinary
+  primary record to cite, and it was being claimed at packet root, copied there, and then silently
+  overwritten by the generated write — leaving the facts and manifest describing bytes the packet no longer
+  held, which is exactly the self-contradictory packet this gate exists to prevent. Reserving rather than
+  claiming at write time is the point: the generated file must KEEP the fixed name the manifest, the
+  verifier preamble and SKILL.md all reference, so the cited record is the one disambiguated into
+  `cited/<hash>/`. The two-argument
   hand-assembled form is unchanged for existing callers, and `verify_claim_packet_smoke.sh` covers packet
   assembly, the mechanical facts, fail-closed directives, citation shapes, pinned revisions, listing
   truncation, name collisions, verdict attribution, the single-SUMMARY guarantee, and that legacy shape.

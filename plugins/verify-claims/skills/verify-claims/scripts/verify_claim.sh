@@ -327,6 +327,17 @@ def packet_rel(p):
 # too — a `<rel>.listing.txt` collides with a real cited `foo.listing.txt`, and a pinned `<rel>@<sha>`
 # with a real file of that name — so they are claimed on the same table.
 taken = {}      # packet-relative name -> the resolved source object it names
+# The generated facts file owns the packet-root name BY CONSTRUCTION: the manifest's first line, the
+# verifier preamble and SKILL.md all reference `MECHANICAL_FACTS.md` by that fixed name, and the write
+# at the end of this script opens that fixed path directly. So reserve it here, BEFORE any citation is
+# copied — otherwise a cited primary record of the same name is claimed at packet root, copied there,
+# and then silently overwritten by that write, while its facts entry and manifest line still describe
+# the original bytes and sha (#818 senior-engineer adjudication, round 4). Reserving instead of routing
+# the facts write through claim_name() is deliberate: at write time the cited file would already hold
+# the root name, and the facts would be pushed to a disambiguated path, breaking every fixed-name
+# reference to it. The sentinel source cannot collide with a real one — real sources are absolute
+# paths, `git:<sha>:<relroot>`, or `<abs>/` listing markers, never `generated:`-prefixed.
+taken["MECHANICAL_FACTS.md"] = "generated:MECHANICAL_FACTS.md"
 
 
 def claim_name(preferred, source, cited_string):

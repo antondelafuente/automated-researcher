@@ -416,5 +416,38 @@ n_sum11=$(grep -cE "^[[:space:]]*SUMMARY:" "$TMP/out11.md")
 [ "$n_sum11" = 1 ] && ok "still exactly one SUMMARY record with both halves present" \
   || bad "verdict carries $n_sum11 SUMMARY records"
 
+# ------------------------------- 11. a cited record named MECHANICAL_FACTS.md is not overwritten
+# The generated facts file owns the packet-root name by construction (manifest line, verifier preamble
+# and SKILL.md all reference it there). A prior gate's own MECHANICAL_FACTS.md is a perfectly ordinary
+# primary record to cite, and it used to be claimed at packet root, copied, and then silently
+# overwritten by the generated write — leaving the facts and manifest describing bytes the packet no
+# longer held (#818 senior-engineer adjudication, round 4).
+printf 'CITED-PRIMARY-RECORD-BYTES\n' > "$EXPD/MECHANICAL_FACTS.md"
+CL12="$TMP/claims12.txt"
+cat > "$CL12" <<'EOF'
+1. The prior gate's mechanical facts are preserved verbatim in `MECHANICAL_FACTS.md`.
+EOF
+run_vc "$CL12" "$TMP/out12.md"
+PKT12=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
+FACTS12="$PKT12/MECHANICAL_FACTS.md"
+
+head -1 "$FACTS12" 2>/dev/null | grep -q '^# MECHANICAL_FACTS.md — resolved by code' \
+  && ok "the packet-root MECHANICAL_FACTS.md is the GENERATED facts file, not a cited copy" \
+  || bad "packet root MECHANICAL_FACTS.md is not the generated file: '$(head -1 "$FACTS12" 2>/dev/null)'"
+
+M_REL=$(packet_copy_of 'MECHANICAL_FACTS.md' "$FACTS12")
+M_SHA=$(facts_sha_of 'MECHANICAL_FACTS.md' "$FACTS12")
+printf '%s' "$M_REL" | grep -qE '^cited/[0-9a-f]{8}/MECHANICAL_FACTS\.md$' \
+  && ok "the cited record's facts entry names a disambiguated packet copy under cited/<8-hex>/" \
+  || bad "cited MECHANICAL_FACTS.md's packet copy is '$M_REL', not cited/<8-hex>/MECHANICAL_FACTS.md"
+M_GOT=""; [ -n "$M_REL" ] && [ -f "$PKT12/$M_REL" ] && M_GOT=$(sha256sum "$PKT12/$M_REL" | cut -d' ' -f1)
+[ -n "$M_SHA" ] && [ "$M_SHA" = "$M_GOT" ] \
+  && ok "the cited record's bytes survive in the packet and hash to its OWN facts sha256" \
+  || bad "cited MECHANICAL_FACTS.md: packet copy '$M_REL' hashes '$M_GOT' but its facts say '$M_SHA'"
+n_mf=$(grep -cE '^- `MECHANICAL_FACTS\.md`' "$(dirname "$PKT12")/packet_manifest.md")
+[ "$n_mf" = 1 ] && ok "the manifest names the generated file and the cited copy distinctly" \
+  || bad "the manifest carries $n_mf \`MECHANICAL_FACTS.md\` entries"
+rm -f "$EXPD/MECHANICAL_FACTS.md"
+
 [ "$fail" = 0 ] && echo "[verify_claim_packet_smoke] PASS" >&2 || echo "[verify_claim_packet_smoke] FAIL" >&2
 exit "$fail"
