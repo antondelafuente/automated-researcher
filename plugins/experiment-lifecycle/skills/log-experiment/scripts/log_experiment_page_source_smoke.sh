@@ -20,12 +20,19 @@
 #               overlaid onto a fresh base worktree without clearing the staged root first, so `git add`
 #               never saw a removal and the landed page kept serving a file its source no longer had.
 #
-# PR #823's own review round 1 added two more, same convention (`regression: 823-P0`, and case 27 for its P1):
+# PR #823's own review rounds added three more, same convention (`regression: 823-P0` / `823-P0b`, and case
+# 27 for round 1's P1). The two P0s are ONE defect at two granularities — the landing claim was read off
+# something coarser than the thing it asserts — so their cases sit together:
 #   regression: 823-P0 — the page-source half of the approval body was written by the pre-staging gate, from
 #               the FLAG's presence alone. A page-source dir that reached the commit nowhere (empty, or
 #               wholly ignore-excluded and waved through with --skip-ignored) therefore merged a PR whose
 #               paperwork said the page source rode it, because the RECORD's changes kept the overall
 #               staged diff non-empty and "nothing to commit" never fired.
+#   regression: 823-P0b — the fix for it still aggregated over the ROOT. A dashboard root is multi-tenant
+#               (that is what --page-source-only is for, #374), so "some tracked file exists under the root"
+#               was satisfiable by a CO-TENANT's file the close never selected: a narrowed landing whose
+#               selected path was empty/ignore-excluded read as "unchanged" off a neighbour's bytes. The
+#               verdict is now per SELECTED path (case 29), and a mixed selection still passes (case 30).
 #   823-P1    — the allowlist refused a --page-source-only path that was already deleted, so the one thing
 #               the mirror exists to express could not be named directly: you had to widen the allowlist to
 #               a surviving parent dir.
@@ -378,6 +385,47 @@ if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only nosu
   fail "a page-source allowlist path that exists nowhere was accepted"; else
   case "$LAST_ERR" in *"nothing at dashboard/exp/nosuchfile.py to mirror as a deletion"*) pass "a nonexistent, never-committed allowlist path still fails closed";;
     *) fail "blocked, but not on the allowlist existence check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 29: regression 823-P0b — a --page-source-only path that lands nothing is NOT rescued by a CO-TENANT's file under the shared root -> BLOCK"
+# PR #823 round 2 P0: the landing verdict was computed over the whole root, so "some tracked file exists under
+# dashboard/exp" passed — and on a multi-tenant dashboard (the very reason --page-source-only exists, #374)
+# that file can belong to a co-tenant this close never selected. make_landed_repo's base already carries
+# page.py / stale.py / sub/inner.py under the root; `mine/` is this close's own selection and reaches the
+# commit nowhere. The record changes (a late audit response) so the run cannot die on "nothing to commit".
+T=$(mktemp_d); make_landed_repo "$T"
+printf 'a late audit response\n' > "$T/reg/exp/AUDIT_RESPONSE.md"
+mkdir -p "$T/dashboard/exp/mine"          # selected, present, and EMPTY: stages nothing, base has nothing
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only mine; then
+  fail "regression 823-P0b: an empty selected path was approved as landed off a co-tenant's tracked file"; else
+  case "$LAST_ERR" in *"contributes NOTHING to this commit"*)
+      case "$LAST_ERR" in *"dashboard/exp/mine"*) pass "regression 823-P0b: the verdict is per selected path, and names the one that lands nothing";;
+        *) fail "regression 823-P0b: blocked, but without naming the selected path: $LAST_ERR";; esac;;
+    *) fail "regression 823-P0b: blocked, but not on the staged-landing check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+# Same bypass through the ignore guard's escape hatch: the selected path has content, all of it excluded.
+T=$(mktemp_d); make_landed_repo "$T"
+printf 'a late audit response\n' > "$T/reg/exp/AUDIT_RESPONSE.md"
+mkdir -p "$T/dashboard/exp/mine"
+printf '<html>\n' > "$T/dashboard/exp/mine/index.html"
+printf '*\n' > "$T/dashboard/exp/mine/.gitignore"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only mine --skip-ignored; then
+  fail "regression 823-P0b: --skip-ignored on a narrowed selection bought a landing claim off a co-tenant's file"; else
+  case "$LAST_ERR" in *"contributes NOTHING to this commit"*) pass "regression 823-P0b: a wholly-ignored selected path is refused under narrowing too";;
+    *) fail "regression 823-P0b: blocked, but not on the staged-landing check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 30: invariant 9 — a MIXED narrowed selection (one path changed, one unchanged) passes, and the approval says which is which"
+# The counterpart to case 29: per-path evaluation must not turn a legitimately-unchanged co-selected path into
+# a block. `sub` is unchanged from base; `stale.py` is edited, so it is the one that actually rides the PR.
+T=$(mktemp_d); make_landed_repo "$T"
+printf 'edited page\n' > "$T/dashboard/exp/stale.py"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only stale.py --page-source-only sub; then
+  case "$LAST_ERR" in *"staged (mirrored) in the same commit"*)
+      case "$LAST_ERR" in *"unchanged from origin/main: dashboard/exp/sub"*) pass "the mixed selection lands, and the unchanged path is reported as unchanged rather than as staged";;
+        *) fail "passed, but the unchanged selected path was folded into the landing claim: $LAST_ERR";; esac;;
+    *) fail "passed, but the changed selected path was not reported as staged: $LAST_ERR";; esac
+else fail "a mixed narrowed selection was BLOCKED: $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment page-source: ALL PASS"; exit 0; else

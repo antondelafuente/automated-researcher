@@ -139,14 +139,18 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   handed. No `START.md`, or no viewer recipe in it, is a legitimate manifest-only close and requires nothing —
   and neither does the eval-only/no-go path above: a run stopped at an instrument/data/validity gate has no
   headline page to build, so the page-source check applies only to a normal, audited close.
-  **What the approval body claims about the page source is read off the STAGED SET, not off the flag.** The
-  gate above runs before anything is staged, so all it can see is that `--page-source` was *passed*; a dir
-  that is empty (or wholly excluded by an ignore rule and waved through with `--skip-ignored`) contributes
-  nothing while the record's own changes keep the commit non-empty, and the PR would merge saying the page
-  landed with no page in it. After staging, the landing is therefore re-derived: page-source paths staged →
-  *"rides this same PR"* with the count; none staged but the base branch already carries that tree →
-  recorded as **unchanged**, which is the honest wording for re-logging a record whose page already landed;
-  neither → **BLOCK**, because after the merge there would be no page source there at all.
+  **What the approval body claims about the page source is read off the STAGED SET, per selected path — not
+  off the flag, and not off the root.** The gate above runs before anything is staged, so all it can see is
+  that `--page-source` was *passed*; a dir that is empty (or wholly excluded by an ignore rule and waved
+  through with `--skip-ignored`) contributes nothing while the record's own changes keep the commit
+  non-empty, and the PR would merge saying the page landed with no page in it. After staging, the landing is
+  therefore re-derived **for each path this close selected** — the `--page-source` root itself, or one entry
+  per `--page-source-only` path: paths staged under it → *"rides this same PR"* with the count; none staged
+  but the base branch already carries that path → recorded as **unchanged**, which is the honest wording for
+  re-logging a record whose page already landed; neither → **BLOCK**, because after the merge there would be
+  no page source there at all. The unit is the selected path and not the root because a dashboard root is
+  typically multi-tenant: aggregated over the root, a **co-tenant's** tracked file would answer for a
+  selected path that lands nothing.
 - **Design-stage.** The **pre-launch leg** of the two-PR flow (`DESIGN.md` present, no `RESULTS.md` yet). The
   design-audit ran during `design-experiment`; this **verifies it ran** — BLOCK unless at least one
   `DESIGN_AUDIT*.md` is present (the numbered `DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, … chain is the validity

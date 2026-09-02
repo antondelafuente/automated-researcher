@@ -547,25 +547,38 @@ temp_handoff_scan() {
   [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
 }
 verify_page_source_landing() {
-  # The page-source half of the approval, DERIVED FROM THE STAGED SET at the point the claim is made (#823
-  # review P0). gate_page_source above runs before a single byte is staged, so it can only ever observe that
-  # --page-source was PASSED; it used to write "Page source (<dir>) rides this same PR" on that basis alone.
-  # An empty page-source dir — or one whose every file the ignore rules exclude, waved through with
-  # --skip-ignored — then contributed nothing at all, while the RECORD's own changes kept the overall staged
-  # diff non-empty so stage_worktree's "nothing to commit" check never fired. The PR merged with paperwork
-  # saying the page source landed and no page source in it: the silent miss #347/#819 exist to prevent,
-  # restated one level in (the record no longer just loses its page — it acquires a document saying it has
-  # one). Same invariant the rest of this close now runs on: a gate asserts only what the artifact proves.
+  # The page-source half of the approval, DERIVED FROM THE STAGED SET at the point the claim is made, and
+  # derived PER SELECTED PATH — the unit the caller actually asked to land (#823 review rounds 1 and 2, which
+  # are one defect at two granularities: the claim was read off something coarser than the thing it asserts).
   #
-  # Three outcomes, kept distinct rather than collapsed into pass/fail:
-  #   * this PR stages page-source paths -> "rides this same PR", with the count, the one-landing close;
-  #   * it stages none, but the tree this PR lands on ALREADY carries the page source at $PS_REL
-  #     byte-identically -> say exactly that. Blocking instead would deadlock the legitimate re-log (a record
-  #     re-logged after its page already landed — e.g. an AUDIT_RESPONSE.md appended afterwards): the gate
-  #     above REQUIRES --page-source whenever the brief carries a [recipes.viewer] recipe, and there is no
-  #     honest flag for "already in this repo" (--page-source-external means a DIFFERENT repo). Nothing is
-  #     missing in this case; only the wording would have been false.
-  #   * neither -> BLOCK. After this PR merges there is no page source at $PS_REL at all.
+  # Round 1: gate_page_source runs before a single byte is staged, so it can only ever observe that
+  # --page-source was PASSED; it wrote "Page source (<dir>) rides this same PR" on that basis alone. An empty
+  # page-source dir — or one whose every file the ignore rules exclude, waved through with --skip-ignored —
+  # contributed nothing at all, while the RECORD's own changes kept the overall staged diff non-empty so
+  # stage_worktree's "nothing to commit" check never fired.
+  #
+  # Round 2: reading the staged set at the ROOT ($PS_REL) is still coarser than the claim. A dashboard root is
+  # typically MULTI-TENANT — that is why --page-source-only exists (#374) — so "some tracked file exists under
+  # $PS_REL" is satisfied by a CO-TENANT's file that this close never selected and never touched. A selected
+  # path that is empty, or wholly ignore-excluded under --skip-ignored, then read as "unchanged" off a
+  # neighbour's bytes, and the narrowed close merged claiming a page source none of whose selected paths is in
+  # the tree. So the verdict is computed over MIRROR_PATHS — exactly the set this run told the mirror to stage
+  # ($PS_REL itself when un-narrowed, else one entry per --page-source-only path) — and EVERY selected path
+  # must clear it on its own. Aggregating over the root is precisely the arithmetic that let one path's
+  # evidence answer for another's.
+  #
+  # Both rounds are the same invariant the rest of this close runs on: a gate asserts only what the artifact
+  # proves, about the thing it is asserting it of.
+  #
+  # Three outcomes per selected path, kept distinct rather than collapsed into pass/fail:
+  #   * this PR stages paths under it -> it rides this same PR, the one-landing close;
+  #   * it stages none, but the tree this PR lands on ALREADY carries that path byte-identically -> say
+  #     exactly that. Blocking instead would deadlock the legitimate re-log (a record re-logged after its page
+  #     already landed — e.g. an AUDIT_RESPONSE.md appended afterwards): the gate above REQUIRES
+  #     --page-source whenever the brief carries a [recipes.viewer] recipe, and there is no honest flag for
+  #     "already in this repo" (--page-source-external means a DIFFERENT repo). Nothing is missing in this
+  #     case; only the wording would have been false.
+  #   * neither -> BLOCK. After this PR merges there is no page source at that path at all.
   # A staged DELETION counts as a page-source change, so the mirror's own reason for existing (#821
   # invariant 9) still reads as a landing.
   #
@@ -573,27 +586,52 @@ verify_page_source_landing() {
   # needs no code of its own to satisfy it: it OVERLAYS rather than mirrors, so every non-ignored file under
   # $DIR is in the resulting tree; its gate already requires its evidence files to be present under $DIR;
   # and the two ways it could still reach the commit empty are both already loud — nothing staged anywhere
-  # (stage_worktree's "nothing to commit") or everything ignored (check_ignored_files).
+  # (stage_worktree's "nothing to commit") or everything ignored (check_ignored_files). Its own --only
+  # narrowing cannot combine with a page source either (--only is KIND=note, --page-source is KIND=experiment).
   [ -n "$PS_REL" ] || return 0
   [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: verify_page_source_landing called before stage_worktree (no staged worktree)"
+  [ "${#MIRROR_PATHS[@]}" -gt 0 ] || die "internal: a page-source root ($PS_REL) with no mirrored path to verify"
   # PS_LANDING_NOTE is the --dry-run summary's page-source clause, set from the same verdict for the same
   # reason the approval body is: --dry-run exists to preview the real landing, so it must not report the
   # page source as "staged" in the one case where nothing of it was.
-  local staged landed
-  # NUL-counted rather than line-counted: a page file with a newline in its name must not inflate either
-  # number (the same path-safety reason secret_scan reads its paths raw).
-  staged="$(git -C "$WT" diff --cached --name-only -z -- "$PS_REL" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
-  if [ "$staged" -gt 0 ]; then
-    APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) rides this same PR — $staged staged path(s); one landing, not three (#819)."
-    PS_LANDING_NOTE="page source $PS_REL staged (mirrored) in the same commit, $staged path(s)"
-    note "page-source landing verified: $staged path(s) staged under $PS_REL"
+  local sel staged landed staged_total=0 landed_total=0
+  local -a staged_sel=() unchanged_sel=() missing_sel=()
+  for sel in "${MIRROR_PATHS[@]}"; do
+    # NUL-counted rather than line-counted: a page file with a newline in its name must not inflate either
+    # number (the same path-safety reason secret_scan reads its paths raw). Both pathspecs are the selected
+    # path itself, so a file selection and a subtree selection are answered the same way.
+    staged="$(git -C "$WT" diff --cached --name-only -z -- "$sel" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+    if [ "$staged" -gt 0 ]; then
+      staged_sel+=("$sel"); staged_total=$((staged_total + staged)); continue
+    fi
+    # Only reached when NOTHING under $sel is staged, so the index here still holds exactly the base tree's
+    # content for it — `ls-files` is therefore reading origin/$BASE_BRANCH, not this run's own additions.
+    landed="$(git -C "$WT" ls-files -z -- "$sel" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+    if [ "$landed" -gt 0 ]; then
+      unchanged_sel+=("$sel"); landed_total=$((landed_total + landed))
+    else
+      missing_sel+=("$sel")
+    fi
+  done
+  if [ "${#missing_sel[@]}" -gt 0 ]; then
+    echo "page-source path(s) this landing selected that reach the commit nowhere:" >&2
+    printf '  %s\n' "${missing_sel[@]}" >&2
+    die "the page source contributes NOTHING to this commit at the ${#missing_sel[@]} selected path(s) listed above, and origin/$BASE_BRANCH carries nothing at them either — so after this PR merged there would be no page source there at all, while the PR body claimed one landed (#347's silent miss). A tracked file elsewhere under $PS_REL does NOT answer for them: a dashboard root is multi-tenant, so that file can be a co-tenant's. Check that the page was actually built into those paths (an empty dir stages nothing), that a .gitignore is not excluding all of them (any exclusion is listed above), and that --page-source-only names the paths you meant; or pass --page-source-external <url> instead if the page source really lives in another repo"
+  fi
+  if [ "${#staged_sel[@]}" -gt 0 ]; then
+    APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) rides this same PR — $staged_total staged path(s); one landing, not three (#819)."
+    PS_LANDING_NOTE="page source $PS_REL staged (mirrored) in the same commit, $staged_total path(s)"
+    note "page-source landing verified: $staged_total path(s) staged under ${staged_sel[*]}"
+    if [ "${#unchanged_sel[@]}" -gt 0 ]; then
+      APPROVAL_BODY="$APPROVAL_BODY ${#unchanged_sel[@]} selected page-source path(s) are unchanged from origin/$BASE_BRANCH and stay as they are: ${unchanged_sel[*]}."
+      PS_LANDING_NOTE="$PS_LANDING_NOTE; unchanged from origin/$BASE_BRANCH: ${unchanged_sel[*]}"
+      note "page-source: ${#unchanged_sel[@]} selected path(s) unchanged from origin/$BASE_BRANCH (${unchanged_sel[*]})"
+    fi
     return 0
   fi
-  landed="$(git -C "$WT" ls-files -z -- "$PS_REL" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
-  [ "$landed" -gt 0 ] || die "the page source ($PS_REL) contributes NOTHING to this commit and origin/$BASE_BRANCH carries nothing at $PS_REL either — so after this PR merged there would be no page source there at all, while the PR body claimed one landed (#347's silent miss). Check that the page was actually built into that dir (an empty dir stages nothing), that a .gitignore is not excluding all of it (any exclusion is listed above), and that --page-source-only names the paths you meant; or pass --page-source-external <url> instead if the page source really lives in another repo"
-  APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) is unchanged from origin/$BASE_BRANCH ($landed file(s) already there) — this PR carries no page-source change (#819)."
-  PS_LANDING_NOTE="page source $PS_REL unchanged from origin/$BASE_BRANCH (nothing of it is staged; the $landed file(s) already there stay as they are)"
-  note "page-source: nothing staged under $PS_REL, but the tree this PR lands on already carries it ($landed file(s), byte-identical) — recorded as-is rather than claimed as a landing"
+  APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) is unchanged from origin/$BASE_BRANCH ($landed_total file(s) already there under ${#unchanged_sel[@]} selected path(s)) — this PR carries no page-source change (#819)."
+  PS_LANDING_NOTE="page source $PS_REL unchanged from origin/$BASE_BRANCH (nothing of it is staged; the $landed_total file(s) already there stay as they are)"
+  note "page-source: nothing staged under ${unchanged_sel[*]}, but the tree this PR lands on already carries it ($landed_total file(s), byte-identical) — recorded as-is rather than claimed as a landing"
 }
 # Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved), plus
 # the --page-source tree riding an experiment PR (#819), which carries the scan it had when it landed as its

@@ -27,12 +27,16 @@
   exactly as before. Every staged file's real path is required to be inside its own root, per file by name,
   and the record root's guards (TEMP.md, the ignored-file guard, the secret scan) run over the page tree.
   What the PR's approval body CLAIMS about the page source is derived from the staged set at the point the
-  claim is made, never from the flag's presence: the gate runs before staging, so an empty (or wholly
-  ignore-excluded, `--skip-ignored`) page-source dir contributed nothing while the record's own changes kept
-  the commit non-empty, and the PR merged saying the page source rode it with no page source in it. Staged
-  page paths now read as *"rides this same PR"* with the count; none staged but the base branch already
-  carrying that tree reads as *unchanged* (the honest wording for re-logging a record whose page already
-  landed, and no deadlock for it); neither BLOCKS. And because the page root mirrors, `--page-source-only`
+  claim is made and PER SELECTED PATH — never from the flag's presence, and never aggregated over the root.
+  The gate runs before staging, so an empty (or wholly ignore-excluded, `--skip-ignored`) page-source dir
+  contributed nothing while the record's own changes kept the commit non-empty, and the PR merged saying the
+  page source rode it with no page source in it; and a dashboard root is multi-tenant (which is exactly what
+  `--page-source-only` is for), so a root-level "something is tracked here" would let a CO-TENANT's file
+  answer for a selected path that lands nothing. Each selected path — the root itself, or one entry per
+  `--page-source-only` path — is now judged on its own: paths staged under it read as *"rides this same PR"*
+  with the count; none staged but the base branch already carrying that path reads as *unchanged* (the honest
+  wording for re-logging a record whose page already landed, and no deadlock for it); neither BLOCKS, naming
+  the selected paths that reach the commit nowhere. And because the page root mirrors, `--page-source-only`
   now accepts a path that is already gone locally as long as the base branch has it — naming one deletion no
   longer requires widening the allowlist to a surviving parent dir, while a path in neither place is still
   refused as a typo.
