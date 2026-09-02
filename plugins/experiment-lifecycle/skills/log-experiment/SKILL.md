@@ -35,7 +35,8 @@ does **not** source `wf.sh`. (Why here: logging/auditing experiments is a resear
 ## How
 
 ```bash
-scripts/log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]...
+scripts/log-experiment.sh <registry-dir> [--dry-run] [--skip-ignored] [--only <path>]... \
+                          [--page-source <dir> [--page-source-only <path>]... | --page-source-external <url>]
 ```
 
 That one command does everything: classify → gate → branch (in a dedicated worktree) → PR → cross-family
@@ -55,6 +56,19 @@ file it happens to point at. Only supported when `<registry-dir>` classifies as 
 experiment/design-stage gates read their audit/design evidence straight from the dir itself, not the
 allowlisted staged set, so narrowing there is refused rather than risk approving evidence that never actually
 lands in the commit.
+
+`--page-source <dir>` (#819) makes an experiment close **one landing instead of three**: the viewer/dashboard
+page source stages into the SAME commit and the SAME gated PR as the record. Today's close landed the record,
+then the page source, then `LANDED.md` as three sequential gated PRs (~10 min of a measured 51-min median
+close leg) — the same close, gated the same way, three times. The dir must live in this repo, be disjoint
+from the record dir, and be **note-shaped** (no `DESIGN.md`/`RESULTS.md`/`KIND` of its own): it rides the
+record's gate, so it must carry no evidence of its own to verify. `--page-source-only <path>` narrows it
+exactly as `--only` narrows the record dir — a dashboard tree is typically multi-tenant, so a co-tenant's
+untracked files must not sweep in (#374). Both roots get every staged-set gate (symlink, `TEMP.md`, the
+ignored-file guard, and — for the page-source tree specifically — the deterministic secret scan it got when
+it landed as its own note PR). `--page-source-external <url>` is the answer for a viewer living in a
+**different repo**, which no single PR can reach: it records where the page source went instead of staging it.
+Both are refused on a non-experiment kind — the publish leg belongs to an experiment's close.
 
 Staging into that worktree copies **only what could actually be committed**: both the `--only` allowlist and
 the research repo's `.gitignore` are applied *before* any bytes move, so a gitignored multi-GB tree living in
@@ -102,6 +116,18 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   documented future hardening. An eval-only / anchor-failed run with no close-audit is allowed **only** if
   `RESULTS.md` records a closed decision *at line start* (e.g. `Decision: ANCHOR_FAILED`, no-go); otherwise it
   BLOCKS and you surface it to the researcher.
+  **It also owns the page-source check (#819).** When the record's **frozen** `START.md` instance-profile
+  snapshot carries a `[recipes.viewer]` recipe, the publish leg is part of that close (#347) — so BLOCK unless
+  the landing either stages the page source (`--page-source`) or records that it landed in another repo
+  (`--page-source-external`). This is deliberately *mechanical* and deliberately *here*: `run-experiment` used
+  to build and publish the page **before** the cross-family close audit purely "so the audit sees the page",
+  which exposed the whole publish chain (upload → reproduction → page → gallery rebuild) to a redo after every
+  audit finding that moved a number. The audit reads the science; page presence is a property of the tree, and
+  a gate reads it in milliseconds. The trigger is the frozen snapshot, not the live profile — snapshot
+  freshness is the design-stage gate's job, and the executor's publish leg is defined by the brief it was
+  handed. No `START.md`, or no viewer recipe in it, is a legitimate manifest-only close and requires nothing —
+  and neither does the eval-only/no-go path above: a run stopped at an instrument/data/validity gate has no
+  headline page to build, so the page-source check applies only to a normal, audited close.
 - **Design-stage.** The **pre-launch leg** of the two-PR flow (`DESIGN.md` present, no `RESULTS.md` yet). The
   design-audit ran during `design-experiment`; this **verifies it ran** — BLOCK unless at least one
   `DESIGN_AUDIT*.md` is present (the numbered `DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, … chain is the validity

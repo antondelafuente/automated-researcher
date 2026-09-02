@@ -354,6 +354,27 @@ situational judgment call.
   Let the harness auto-background the call, don't add your own timeout wrapper around it, and poll for the
   call's own output-file marker (e.g. `AUDIT.md`/`DATA_AUDIT.md`) the same way you'd poll any other detached
   driver's done-marker.
+- **Wait in ONE call with a hard cap — never one API turn per poll, and never a re-`Read` loop on a
+  task-output file (#819).** Every poll you take as its own turn is a full round-trip of your whole context:
+  measured across 61 runs, 3,886 poll/sleep/`Monitor`/`TaskOutput` calls (median 56/run, ~1 tool call per API
+  turn overall), including 180 min across 6 runs spent polling drivers that had **already exited** (one run
+  kept polling 24× / 20 min after "not running", then 13× / 15 min after "CHAIN EXITED") and one run that
+  re-`Read` the same background-task output file **852 times, 784 of them in a single 43-minute stretch**.
+  The standing pattern for waiting on a detached driver is a single call that blocks on the driver's own
+  terminal condition — its done-marker, or its recorded PID going away (`kill -0`, per the PID rule above) —
+  with a sane cadence and a hard cap, so one turn covers the whole wait:
+  ```bash
+  # ONE call: exits the moment the driver's own marker lands or its PID is gone; the cap bounds the WAIT,
+  # never the work (#480 — a timeout wrapper around the audit itself killed a full audit attempt).
+  timeout 3600 bash -c 'until [ -f "$1/.done" ] || ! kill -0 "$(cat "$1/driver.pid")" 2>/dev/null
+                        do sleep 120; done' _ /path/to/run
+  ```
+  Read the driver's log/output ONCE when that call returns — not in a loop while it runs. The cap returning
+  without the marker is a signal to diagnose (and it is exactly the look-again-deadline miss the self-wake
+  tick already owns), not to immediately re-issue the same wait; a terminal marker already observed is
+  **final** — re-polling a driver that reported EXITED cannot learn anything new. This layers on top of the
+  independent self-wake, never replaces it (see the `run_in_background` bullet above: a killed waiter means
+  re-verify the remote job directly, never that the job died).
 
 ## Step 1 — Acquire the compute
 
@@ -577,6 +598,18 @@ driver instead.
 
 Idle compute burns money. **Teardown is the default the moment a run completes.**
 
+**Close order — science first, publish second (#819).** Aggregate → figures → `RESULTS.md` → the
+cross-family **close audit** → triage/fix → *then* the publish chain (`presentation_manifest.json`, the page
+build, the fresh-pull reproduction of the FINAL numbers) → **one** landing via `log-experiment`. The audit
+reads the science, so nothing the audit can invalidate is built before it runs. Publishing first is what made
+a single audit finding (an aggregate estimand that should have been equal-weight) cascade through
+re-aggregate → refigure → re-`RESULTS` → **re-upload → re-reproduce → rebuild page** → a second audit: an
+11-minute redo for what is a 3-minute edit when the audit comes first (measured on
+`depv1-negemo-qwen-chat-selfref-rewrite-1`; across 61 runs the close leg ran a median 51 min of a 136-min
+median run, #819). **The completion boundary does not move:** compute tears down only once *this run's own
+artifacts* are verified-uploaded — that is Step 4's gate, fired per artifact-completion (#460), and it is
+upstream of everything in this ordering.
+
 - **Tear-down-on-block:** a BLOCKED / errored run, OR a run stopped by an instrument/data/validity gate,
   tears down the SAME as a completed one — preserve logs/partials to the store if possible → ledger it per
   the ledger-status definition above (a gate stop is not automatically `technical-failure`; teardown urgency
@@ -609,14 +642,37 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   spec**; any lightweight qualitative read stays separable from the numbers — no pre-registered verdict (if RESULTS *does*
   assert a claim, state it at the level the design varied — upgrading a bundle-level contrast into a component
   attribution is overclaim — and separate conclusions from postdictions). One `RESULTS.md` at close for a multi-arm
-  wave, not per-arm. **Before checking this gate, run ONE real fresh-pull reproduction of the aggregation/rendering
-  script(s) that produced the headline numbers/figures (#447):** commit every driver script whose output is
-  reported, not just its CSV/PNG output; then from a clean state — remove local scratch, re-run exactly the pull
-  commands the record documents (`ARTIFACT_MANIFEST.md` / `scripts/README.md`), re-run the committed scripts —
-  diff the regenerated output against the previously-committed one. "The script ran during the live run" is a
-  different, weaker claim than "the committed script reproduces the committed artifact from the documented
-  recipe against a fresh pull"; only the second is what a future reader/auditor needs, and only the second
-  passes this gate.
+  wave, not per-arm. This is the **input to the close audit**, which runs next — the fresh-pull reproduction
+  gate (#447) runs *after* the audit's fixes, against the final numbers (below), so a finding that moves a
+  number costs one edit rather than a rerun of the whole publish chain (#819).
+- **Independent close audit — the OUTPUT-side gate, and the FIRST thing `RESULTS.md` meets (#819).** Your
+  self-audit can't catch your own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via
+  **`verify-claims`** (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the
+  work). **Respond to every finding** — fix (commit) or a one-line accept/defer with reason; HIGH findings
+  fixed or explicitly justified. Record the responses either in a separate **`AUDIT_RESPONSE.md`** or
+  **inline in `AUDIT.md`** (a `## Executor responses` section) — `log-experiment` accepts either form (#263).
+  **Triage as a PEER, autonomously — close is execution, you don't need the human here.**
+  - **Audit ONCE — the same rule design already runs on (`design-experiment` Step 2).** One cross-family pass
+    per audit surface: one close audit, one `--data` pass per data surface. A fix earns a **mechanical
+    re-check**, not another cross-family pass: regenerate every number `RESULTS.md` quotes straight from the
+    committed CSVs and assert it matches (a small committed `verify_reported_numbers.py`-style checker —
+    executors already write these ad hoc; commit it with the other aggregation scripts so the reproduction
+    gate below covers it too). The soft "a second pass if your fixes were substantive" is **retired**: it read
+    as licence to re-run the whole pass after any fix, and did — the close audit ran ≥2× in 19/61 runs and the
+    `--data` audit in 36/61, at 4-7 min of detached wait each plus a full pass-2 response set, for findings a
+    number-regeneration check settles deterministically (#819).
+  - Do **NOT** auto-iterate to zero findings (it never converges) — stop when only polish remains. A finding
+    you dispute is a one-line DISPUTE with the reason, not another pass.
+- **Then the publish chain, once and against the FINAL numbers. Run ONE real fresh-pull reproduction of the
+  aggregation/rendering script(s) that produced the headline numbers/figures (#447):** commit every driver
+  script whose output is reported, not just its CSV/PNG output; then from a clean state — remove local
+  scratch, re-run exactly the pull commands the record documents (`ARTIFACT_MANIFEST.md` /
+  `scripts/README.md`), re-run the committed scripts — diff the regenerated output against the
+  previously-committed one. "The script ran during the live run" is a different, weaker claim than "the
+  committed script reproduces the committed artifact from the documented recipe against a fresh pull"; only
+  the second is what a future reader/auditor needs, and only the second passes this gate. It runs **after**
+  the audit's fixes are in (#819) so it reproduces what actually lands — reproducing pre-audit numbers proves
+  nothing about the record, and re-running the whole chain per finding is the rework this ordering removes.
 - **Write `presentation_manifest.json` next to `RESULTS.md` — unconditional, config-free.** Every close writes this file,
   whether or not an instance viewer is configured (a no-op consumer is fine — the manifest still stands alone as
   plain-language arm documentation). Required: `{title, labels: [{match, label}]}` (`title` — one plain sentence
@@ -634,9 +690,12 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   any other — you read ONLY the snapshot, never a live profile or env var). **No viewer recipe in the snapshot →
   the close is manifest-only** — the manifest still stands on its own as plain-language arm documentation, and
   any later page build is consuming-instance work. **Recipe present → building and publishing the page is part
-  of YOUR close**, after upload verification + `RESULTS.md` + `presentation_manifest.json` (it consumes the same verified
-  artifacts) and **before the independent close audit and `log-experiment`**, so the audit and the landed
-  record see the committed source + the gate's evidence:
+  of YOUR close**, after the close audit is triaged and the reproduction above passed (it consumes the same
+  verified artifacts and the same final numbers) and **before `log-experiment`**, which lands the page source
+  in the SAME PR as the record (below). It used to run *before* the audit "so the audit and the landed record
+  see the page" — the audit reads the science, never the page, and page presence is a **mechanical** property
+  that now belongs to `log-experiment`'s experiment gate (`--page-source`, below), so that rationale bought
+  nothing and cost the whole publish chain a redo on every finding that touched a number (#819):
   - **The recipe doc must name** (1) the viewer repo and its gated landing path (reusing the instance's existing
     engineer-identity seams — no new credential surface), (2) the shared page-building library and at least one
     committed prior page as the pattern, (3) the assemble → render → bundle → gallery-rebuild commands or worked
@@ -644,7 +703,10 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     these is a **load-bearing brief gap**: flag it and fall back to manifest-only — don't improvise a publish path.
   - **The work:** assemble the per-cell transcripts, author the bespoke per-experiment builder against the
     cleared `DESIGN.md` Presentation spec, render the pinned figures, bundle, update the gallery, and land the
-    viewer change through the recipe's gated path. The page is deliberately **bespoke, not a generic
+    viewer change. **Landing it is the record's own landing when the viewer lives in the research repo** —
+    `log-experiment.sh <exp-dir> --page-source <viewer-dir>`, one PR for the whole close (#819); the recipe's
+    own gated landing path is what you use when the viewer is a *separate* repo, and then the close records
+    where it went with `--page-source-external <url>`. The page is deliberately **bespoke, not a generic
     manifest-to-template generator** — a template flattens the "tell this experiment's story" quality; share only
     house style (the page lib + prior pages as pattern).
   - **The gallery rebuild is a verified gate, not a named step.** The recipe's gallery-rebuild command must
@@ -684,12 +746,24 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
     no-verdict / mark-postdictions discipline is exactly what's easy to get wrong; produce a live first-pass
     page, never a finished story. The mechanical bar (figures per spec, source committed, page landed) is the
     checklist gate; prose quality is explicitly not.
+- **Generate the mechanical paperwork — don't author it (#819).** The close touches ~15 record artifacts, and
+  a measured half of a run's output tokens are spent in the close leg writing them by hand. **You author
+  `RESULTS.md` and the audit responses** — those are judgment. Everything derivable from state is emitted by
+  `scripts/close_record.sh <run-id> <registry-dir> …`: `LANDED.md` (what landed where — record dir, artifact-store
+  root, page path, ledger event), `ARTIFACT_MANIFEST.md` (R2 path + object count + key sizes, from the verified
+  upload listing), a `REPRODUCTION.md` skeleton carrying the actual pull commands and the reproduction diff
+  output from the gate above, the experiment-level **terminal ledger event** (`run` = the registry dir name
+  exactly, no suffix, #473; the terminal status is the operational outcome you pass it, #376 — the script
+  refuses to invent one), and the close self-audit checklist. It reads the run-supervision record for the
+  run's own state and never guesses: a fact it cannot derive is emitted as a `TODO(close):` line you fill,
+  never as a plausible-looking value. Run it before the TEMP.md delete + staging below, so its output stages
+  with the rest of the record.
 - **Delete the transient successor handoff (`TEMP.md`) before staging (#332).** It is working scratch (progress
   timestamps, next-action notes) — never part of the record convention (DESIGN/RESULTS/AUDIT/manifests) — and it
   silently contradicts the final `RESULTS.md` at whatever checkpoint it was last refreshed if it lands in the
   merged registry PR. Delete it here, before staging below (`log-experiment.sh` also rejects a staged `TEMP.md`
   as a belt-and-braces backstop, but don't rely on that — make deleting it your own close step).
-- **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (below), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
+- **Stage the record locally** (path-scoped if your tree is shared). It is *landed to GitHub* by `log-experiment` **after** the close audit (above), not by a raw push — the experiment gate needs `AUDIT.md` to exist first.
 - **R2-backed record: what goes in git vs the artifact store (#232).** Heavy artifacts (full rollout JSONL,
   adapters, raw logs) belong in **R2**, not git — the profile + `.gitignore` deliberately exclude them. The
   **canonical self-sufficient record** is: commit the **lightweight** files (`RESULTS.md`, the audit + its
@@ -717,18 +791,17 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   script's original directory, a sibling's live judge-verdict file), pull the RELEVANT SLICE into a local
   durable artifact first — don't duplicate a sibling's multi-GB rollouts wholesale, just the small slice this
   aggregation actually reads — then write the aggregator against that local copy.
-- **Independent close audit — the OUTPUT-side gate (before clearing the self-wake).** Your self-audit can't catch your
-  own reproducibility gaps/overclaims/confounds. Run a **cross-family** audit via **`verify-claims`**
-  (`audit_experiment <exp>` → `AUDIT.md`; always the *other* family from whoever ran the work). **Respond to every
-  finding** — fix (commit) or a one-line accept/defer with reason; HIGH findings fixed or explicitly justified. Record
-  the responses either in a separate **`AUDIT_RESPONSE.md`** or **inline in `AUDIT.md`** (a `## Executor responses`
-  section) — `log-experiment` accepts either form (#263). **Triage
-  as a PEER, autonomously — close is execution, you don't need the human here.** Audit once (a second pass if your fixes
-  were substantive); do NOT auto-iterate to zero findings (it never converges) — stop when only polish remains.
-- **Land the record on GitHub via `log-experiment`** (the research counterpart to `ship-change`):
-  `log-experiment.sh <exp-dir>` opens a gated PR, verifies the close-audit is present + clean (or, for a
-  no-go/eval-only run, a closed `RESULTS.md` decision), takes the cross-family bot approval, and merges — one
-  command, not the by-hand branch/approve/merge dance. This is how a finished experiment becomes a GitHub record.
+- **Land it in ONE landing via `log-experiment` (the research counterpart to `ship-change`) — not three
+  (#819).** The record, the page source, and `LANDED.md` are one close, so they are **one call and one PR**:
+  `log-experiment.sh <exp-dir> [--page-source <viewer-dir> [--page-source-only <path>]…]` opens a gated PR, verifies the
+  close-audit is present + triaged (or, for a no-go/eval-only run, a closed `RESULTS.md` decision), verifies
+  the page source is present when the `START.md` snapshot carries a `[recipes.viewer]` recipe — the mechanical
+  half of the publish leg the close audit no longer has to see — takes the cross-family bot approval, and
+  merges. Three sequential gated PRs at the end of every run (record, then page source, then `LANDED.md`)
+  cost ~10 min of the measured close leg and bought nothing: they land the same close, gated the same way.
+  `LANDED.md` lives in the record dir, so it rides the same commit (`close_record.sh` writes it above). A
+  viewer that lives in a **different repo** from the research repo cannot ride this PR — land it its own way
+  and pass `--page-source-external <url>` so the gate records where it went instead of blocking.
 - **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
@@ -738,9 +811,11 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
   *finalizer*. The reason: if you cleared desired-active at the top of Close and then crashed before teardown
   finished, the supervisor would (correctly) refuse to relaunch a not-desired-active run while a pod still bills
   with no brain to tear it down — an orphaned, un-closed session. So keep the run **desired-active until the close
-  path is durably in charge**, then run the finalizer: `run_supervision_record.sh stop <run-id>` for a deliberate
-  stop (a `/quit`/kill — never to be relaunched), or `close <run-id>` for a finished run (marks it inactive). After
-  this, the supervisor will not resurrect the run.
+  path is durably in charge**, then run the finalizer: `close_record.sh finalize <run-id> <registry-dir>`
+  (`--stop` for a deliberate `/quit`/kill — never to be relaunched). It re-checks that the close paperwork is
+  durable (`LANDED.md` present) before delegating to `run_supervision_record.sh close`/`stop` — closing the
+  record is what un-gates worktree/scratch/session reaping, so it must never run ahead of the paperwork it
+  certifies. After this, the supervisor will not resurrect the run.
 - **Retro — file feedback** (you are the product's user): file product/scaffold friction via feedback-loop's
   `file-feedback` when installed/configured; record deployment-only incidents or ideas through the consuming instance's
   feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
@@ -880,6 +955,7 @@ yours to configure mid-run.
 | `EXPERIMENT_SCRATCH_ROOT` | `reap_scratch.sh` — the one root whose direct children are reapable | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; scratch accumulates until the disk fills |
 | `EXPERIMENT_SCRATCH_ARCHIVE_DEST` | `reap_scratch.sh` — the rclone destination root archives land under | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; same accumulation |
 | `SESSION_JANITOR_LIST_CMD` / `_IDLE_CMD` / `_KILL_CMD` | `session_janitor.sh` (the crashed-close backstop, scheduled by the instance) | the backstop doesn't run; only self-reap frees sessions |
+| `EXPERIMENT_LEDGER_EVENT_CMD` | `close_record.sh paperwork` — writes the instance's terminal ledger event (`<cmd> <run> <abstract-outcome> <registry-dir>`; the abstract→concrete status mapping is the instance's ledger recipe, #376) | **exit 3 + a `CLOSE-RECORD-GAP:` line for the close record**; the rest of the paperwork is still emitted, but nothing wrote the run's terminal event, so every consumer still reads it as open (#473) |
 
 `reap_scratch.sh` additionally needs `rclone` on `PATH` and a readable mount table (`/proc/self/mountinfo`)
 — both absent take the same exit-3 recorded-gap path as an unset seam. Everything else this skill depends
@@ -989,7 +1065,9 @@ through env seams; see the "three seams" note at the top of this skill.
   rollouts are where parse/truncation/empty-`<think>`/grader-failure bugs live): the **`verify-claims`** deterministic
   `audit_data.py` (full pool + a stratified high-risk sample) on each surface ALWAYS, **then** its cross-family `--data`
   on each surface vs the design intent — **always, no N.A.; the rollouts every run** (generated fresh). A 2-sample
-  self-smoke is exactly what misses a truncation bug. When training and eval domains overlap, this includes the
+  self-smoke is exactly what misses a truncation bug. **One cross-family `--data` pass per surface** (#819, same
+  audit-once rule as the close audit): a fix earns a deterministic re-run of `audit_data.py` on that surface,
+  not a second cross-family pass — the `--data` audit ran ≥2× in 36 of 61 measured runs. When training and eval domains overlap, this includes the
   train/eval leakage screen — DEFAULT to `design-experiment` SKILL.md's semantic-embedding near-dup recipe
   (cross-battery + within-pool), not a token-overlap screen alone. **Always pass `--label-field`** when auditing a surface where
   an added/edited subset sits inside a much larger unchanged base (ablations, add-back waves, targeted edits) — the
@@ -1100,6 +1178,18 @@ through env seams; see the "three seams" note at the top of this skill.
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +
   the routed close report; the transcript survives the kill), and the janitor is the crashed-close backstop, not an
   opt-out. A parked/blocked run keeps its session for resume; no seam configured is a no-op.
+- **The close runs science-first: `RESULTS.md` → close audit → triage → publish chain → ONE landing (#819).**
+  Audit once per surface (the design skill's rule), re-check a fix mechanically instead of re-running the
+  cross-family pass, and land the record + page source + `LANDED.md` in one `log-experiment` call. Nothing the
+  audit can invalidate is built before it runs; the completion boundary (tear down only after a verified
+  upload) is upstream of all of it and does not move.
+- **Generate the mechanical close paperwork, author only the judgment (#819).** `close_record.sh paperwork`
+  emits `LANDED.md` / `ARTIFACT_MANIFEST.md` / `REPRODUCTION.md` / the close self-audit checklist / the
+  terminal ledger event from state; `RESULTS.md` and the audit responses stay yours. It never claims what it
+  did not observe (no listing → no manifest) and never invents a terminal status (#376) or a ledger key
+  (#473); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, never a quiet no-op.
+- **Wait in one call, not one API turn per poll (#819)** — a single capped wait on the driver's own terminal
+  marker, never a `sleep`-per-turn loop and never a re-`Read` loop on a task-output file.
 - **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to
   the researcher), and a question you can check from the records or the live state you answer yourself.
 

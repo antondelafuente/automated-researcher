@@ -1,3 +1,35 @@
+- experiment-lifecycle 0.6.0 (2026-09-02): the executor's close leg stops paying for its own ordering
+  (#819). Measured across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of
+  those minutes in the close leg, 30% of wall spent generating executor tokens, and half a run's output
+  tokens authored in the close. Four causes, four fixes. (1) **Ordering — science first, publish second.**
+  The publish leg was specified to run *before* the cross-family close audit "so the audit and the landed
+  record see the page", so every finding that moved a number cascaded through re-aggregate → refigure →
+  re-`RESULTS` → re-upload → re-reproduce → rebuild page → a second audit: an 11-min redo, hand-read on
+  `depv1-negemo-qwen-chat-selfref-rewrite-1`, for a 3-min edit. The close now runs `RESULTS.md` → close
+  audit → triage/fix → publish chain (fresh-pull reproduction against the FINAL numbers, manifest, page) →
+  land, and page presence — a mechanical property the audit never read anyway — moves to `log-experiment`'s
+  experiment gate, which BLOCKs a close whose frozen `START.md` snapshot carries `[recipes.viewer]` unless
+  the page source is landed here (`--page-source`) or recorded as landed elsewhere
+  (`--page-source-external`). The completion boundary (tear down only after a verified upload) does not
+  move. (2) **Audit once, the same rule `design-experiment` already runs on:** one cross-family pass per
+  surface, a fix earns a *mechanical* re-check (regenerate every quoted number from the committed CSVs),
+  and the soft "a second pass if your fixes were substantive" is retired — the close audit ran ≥2× in 19/61
+  runs and the `--data` audit in 36/61. (3) **One landing, not three:** `log-experiment.sh --page-source
+  <dir> [--page-source-only <path>]…` stages the viewer page source into the SAME commit and PR as the
+  record, with every per-root gate (TEMP.md, the ancestor-`.gitignore` walk behind the #340 guard, and the
+  secret scan the page source used to get as its own note PR) covering the second root; the record dir's
+  own `LANDED.md` rides the same commit. (4) **Paperwork is generated, not authored:** new
+  `close_record.sh` emits `LANDED.md`, `ARTIFACT_MANIFEST.md` (from an actual store listing — no listing,
+  no manifest, #331), a `REPRODUCTION.md` skeleton carrying the real diff output, an UNSTARTED close
+  self-audit checklist (#512), and the terminal ledger event through a new `EXPERIMENT_LEDGER_EVENT_CMD`
+  seam keyed on the registry dir name (#473) with the abstract outcome the caller states (#376, never
+  inferred); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record (#804's shape),
+  never a quiet no-op, and `finalize` refuses to close the run-supervision record ahead of the paperwork it
+  certifies. Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal
+  marker — 3,886 poll calls across 61 runs, 180 min of them polling drivers that had already exited, and
+  one run that re-`Read` the same task-output file 852 times. `RESULTS.md` and the audit responses stay
+  model-authored; every fail-closed gate (cross-family audit scope, fresh-pull reproduction, verified
+  upload) keeps full scope.
 - experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
   `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
   (#813). Step 4 assumed the designing session is also the launching session; that broke in production
