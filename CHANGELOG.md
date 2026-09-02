@@ -1,3 +1,37 @@
+- experiment-lifecycle 0.6.0 / verify-claims 0.8.0 (2026-09-02): a formal design was ~28 min wall / 19 min
+  agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
+  episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
+  so "audit ONCE" is being followed). The cost was 53k output tokens of cross-doc restatement, a gate
+  launched after work that didn't gate on it, and a second researcher touch that was pure wait. Five changes,
+  none of which touch the single full-scope cross-family design audit, the proposal touch, or
+  `log-experiment`'s design-stage gates. (1) **Fire both gates the moment `DESIGN.md` is written**, in the
+  background and concurrently, and draft `START.md`/`CHECKLIST.md`/manifest/snapshot WHILE they run — neither
+  gate reads those docs (in one metered design the audit launched 3.7 min late purely because the siblings
+  were drafted first), so the ~5-7 min gate window comes off the critical path instead of adding to it.
+  (2) **Cite `DESIGN.md`, don't restate it — inside one experiment**, generalizing the light path's
+  inherit-by-citation precedent to sibling docs: `START.md`/`CHECKLIST.md`/`data_audit_manifest.md` reference
+  the design by heading for arms/pins/metric/fan-out/comparability/Presentation and carry only what is
+  operationally theirs. That RETIRES the standing grep-every-sibling-doc-after-an-ACCEPT rule (#375) rather
+  than enforcing it — the rule existed because the siblings held copies; with no copies an ACCEPT amends one
+  file, so the CHECKLIST template's matching gate is removed and templates now cite. (3) **After the
+  researcher's "looks good" on the proposal, one unbroken run to landed:** draft → gates → triage → apply
+  unanimous ACCEPTs → design-stage PR → *then* report the survivors, as a report rather than a second gate
+  (researcher instruction, 2026-09-02: "waiting on them is fine only at the very end, as a report, not a
+  gate"; the measured second touch was 3-12 min of pure wait). The run still STOPS for a `verify_claim`
+  DISPUTE or any finding whose resolution moves what is measured, the cleared budget, or the locked
+  Presentation. (4) **The light design path becomes the DEFAULT for a same-shape rerun** — the designer
+  proposes it in the proposal message and takes it unless the researcher says "full"; the old per-experiment
+  opt-in meant 13 unattended reruns each fell back to the full path at ~30k tokens of restating a parent they
+  should have cited. The authorization line stays as the record of the clearance already given.
+  (5) **`verify_claim.sh --exp` builds the evidence packet BY CODE:** `DESIGN.md` plus every path the claims
+  file actually cites, plus a computed `MECHANICAL_FACTS.md` (existence / sha256 / line counts / git
+  ancestry) that the verifier is told is a primary record. This kills the UNKNOWN→reassemble→rerun loop at
+  its cause — the verifier saw only a hand-packed dir, so a forgotten path was UNKNOWN *by construction*
+  (found in 3/3 recent designs, ~2-3 min and ~$1-2 each, never once surfacing a new contradiction). Opt-in
+  `check:` directives (`exists`/`sha256`/`rows`/`commit`) settle a claim deterministically and skip the
+  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed. The two-argument
+  hand-assembled form is unchanged for existing callers, and `verify_claim_packet_smoke.sh` covers packet
+  assembly, the mechanical facts, fail-closed directives, and that legacy shape.
 - experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
   `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
   (#813). Step 4 assumed the designing session is also the launching session; that broke in production

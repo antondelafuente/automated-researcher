@@ -5,10 +5,11 @@ description: >-
   design-stage record and hand it to `launch-experiment`. The "together" stage: propose with taste + a
   recommendation, surface the load-bearing choices, write the DESIGN.md
   data-collection spec (purpose — what the data is designed to inform; arms; the canonical
-  metric + exact eval definitions; comparability; cost — but NOT a pre-registered verdict), run the
-  pre-launch gates (verify-claim on the FACTS + cross-family design-audit on the
-  DATA-TRUSTABILITY), iterate till the researcher clears it, write the thin START.md executor
-  brief + CHECKLIST.md gates, and land the design-stage PR. Its LAST step is a question, not an
+  metric + exact eval definitions; comparability; cost — but NOT a pre-registered verdict), fire the
+  pre-launch gates (verify-claim on the FACTS + cross-family design-audit on the DATA-TRUSTABILITY)
+  the moment it lands and draft the thin START.md executor brief + CHECKLIST.md gates while they
+  run, triage the findings, and land the design-stage PR — the triage goes to the researcher as a
+  report at the end, not as a second gate. Its LAST step is a question, not an
   action: launch from this session (invoke `launch-experiment`) or hand the launch off to a session
   that holds the supervision machinery — the launching session, whichever it is, becomes
   designer-of-record. Use when starting to design / scope / propose an experiment ("let's design X",
@@ -54,8 +55,10 @@ by **`launch-experiment`** (Step 4).
 - **One change vs a matched reference recipe** — design so only the variable under test differs from a known baseline;
   that's what makes a delta interpretable. A validity/comparability slip here ("are these two numbers even on the same
   scale?") is the silent-failure mode that needs a human — adversarially check your own comparisons.
-- **Iterate till the researcher stops** (they are the convergence stop — see the gates). Don't over-engineer past the
-  real flaws.
+- **Iterate till the researcher stops — at the PROPOSAL** (they are the convergence stop *there*, on arms /
+  metric / comparability / presentation). Once they clear the proposal, the draft → gates → triage → land
+  sequence runs unbroken and the triage reaches them as a report (Step 2's loop, automated-researcher#817);
+  only a load-bearing arbitration re-opens the conversation. Don't over-engineer past the real flaws.
 
 ## Step 1 — Write `DESIGN.md` (the data-collection spec)
 
@@ -291,10 +294,33 @@ are not.** Pin:
 
 Both gates are supplied by the **`verify-claims`** companion skill — invoke it; do not reimplement or path-hardcode it.
 
+**Fire BOTH gates the moment `DESIGN.md` is written — concurrently, in the background — then draft Steps 3/3b
+while they run (automated-researcher#817).** Neither gate reads `START.md`, `CHECKLIST.md`, or the manifest:
+`verify_claim` reads the claims plus its evidence packet, and `design-audit` audits `DESIGN.md` (even its
+schedule-efficiency dimension reads fan-out that `DESIGN.md` already carries). So the ordering is:
+
+1. `DESIGN.md` written →
+2. **start both gates at once, in the background** — `verify_claim` and `audit_experiment --design` are
+   independent processes with no ordering between them; launch them in the same breath, do not serialize
+   them and do not wait on the first before starting the second →
+3. write `START.md` / `CHECKLIST.md` / `data_audit_manifest.md` / the profile snapshot (Steps 3, 3b) while
+   they run →
+4. read both verdicts and run the triage loop below.
+
+The drafting IS the wait — don't idle-poll. Measured (#817): the gate window runs ~5-7 min against ~3-6 min
+of executor-doc drafting, so overlapping takes the gate off the critical path entirely instead of adding it
+to the wall clock. In one metered design the audit launched 3.7 min after `DESIGN.md` existed purely because
+the sibling docs were drafted first — that 3.7 min bought nothing.
+
 - **verify-claim — the brief's FACTS:** an independent model family adversarially fact-checks the load-bearing claims —
   anchors, provenance, comparison references — read-only. **DISPUTE blocks until resolved. UNKNOWN = the records can't
   support the claim** (a records-sufficiency finding, not a pass). Don't check your own claim; route it to independent
-  context.
+  context. **Run it in the experiment-dir mode that builds the evidence packet BY CODE** (the skill's `--exp`
+  form) rather than hand-copying files into an evidence dir: a path you forget to copy comes back UNKNOWN by
+  construction, and the reassemble-and-rerun that follows was found in 3 of 3 recent designs, cost ~2-3 min
+  and ~$1-2 each, and never once turned up a new contradiction (automated-researcher#817). Where a claim is
+  settled by a hash, a count, a file's existence, or whether a commit landed, declare it with that mode's
+  `check:` directives so it resolves deterministically and never spends a verifier pass.
 - **design-audit — the design's DATA-TRUSTABILITY** (`audit_experiment --design` → `DESIGN_AUDIT.md`): a cross-family
   review of the *proposal* — does it produce reliable, comparable data for its stated purpose? Instrument pins (unpinned
   judge/rubric/battery/eval definitions), cross-scale band hygiene (the scale unit is the serving SESSION, not the
@@ -316,7 +342,8 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
   (Origin: a real case where two design flaws survived until close because
   nothing audited the *logic* pre-launch — and two later cases where every claim-rigor HIGH dissolved the moment the
   researcher said "just plot the data," while every measurement-validity finding survived and mattered.)
-- **The loop: audit ONCE → triage as a PEER → surface survivors to the researcher → they arbitrate.**
+- **The loop: audit ONCE → triage as a PEER → run on to landed → REPORT the survivors** (a load-bearing
+  arbitration is the one thing that stops the run and goes back to the researcher).
   1. **Audit ONCE.** Do NOT auto-iterate to "no new findings" — an adversarial auditor is *told* to find the next
      thing, so it never converges (real case: a design ran to 9 passes; confounds settled by ~pass 4, the rest was
      polish + over-engineering, which is most of what a long audit costs in added arms/bug-surface). Cross-checking a
@@ -329,20 +356,37 @@ Both gates are supplied by the **`verify-claims`** companion skill — invoke it
      is marked resolved — `git show <ref>:<path>` for a git-committed artifact, or the equivalent existence check under
      the experiment's R2 prefix — a pinned `SHA256SUMS` hash is a claim, not proof of presence (real incident: a
      `DESIGN_AUDIT_RESPONSE.md` certified an artifact "committed" from its SHA256SUMS line alone; it existed nowhere,
-     #356). **Any ACCEPT that amends `DESIGN.md`/`START.md`** must grep every already-drafted sibling doc
-     (`data_audit_manifest.md`, `CHECKLIST.md`, `gate_evidence/*`) for the amended clause and update it before the
-     design is cleared — `grep -l "<amended term>" <dir>/*.md <dir>/gate_evidence/*` (#375; recurred twice in 3 days
-     via both a design-audit ACCEPT and an executor-cleared mid-run correction, so the matching gate lives on the
-     CHECKLIST template both phases consult, below).
-  3. **SURFACE the survivors to the researcher with your recommendation on each** — your judgments
-     (ACCEPT/DISPUTE/DEFER + why), not raw auditor output. **The researcher is the convergence stop:** they arbitrate
-     with domain knowledge and either call another pass or clear it to run. This is the last step of the "together"
-     stage — the human's judgment at the design-validity moment is the highest-value, cheapest touch. What's wrong is
-     *finishing the audit yourself and rubber-stamping.* Number the outputs (`DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, …) —
-     the chain is the validity record.
-  - **EXCEPTION:** a simple parameter-rerun of an already-audited design may skip this surfacing loop under the
-    **light design path** below — the researcher's authorization there IS the exception's trigger. Default to the
-    full loop for genuinely new designs.
+     #356). **An ACCEPT amends ONE file.** The old rule — grep every already-drafted sibling doc for the amended
+     clause and update it there too (#375) — is **retired** (automated-researcher#817). It existed only because the
+     sibling docs RESTATED `DESIGN.md`'s clauses, so an amendment had to be chased into every copy; the
+     cite-don't-restate rule (Steps 3/3b) removes the copies, so there is nothing to chase — fix the clause where it
+     lives and every citation follows it. If you ever find yourself wanting that grep, the sibling doc is restating
+     something it should be citing: fix THAT instead.
+  3. **RUN ON to landed, then REPORT the survivors — do not gate on a second "ok"
+     (automated-researcher#817).** The researcher's touch is the PROPOSAL (Step 1: arms / metric /
+     comparability / presentation, in plain language, before drafting) — that is where 26 of 37 measured
+     designs got their real researcher input, and it is unchanged. Once they have said "looks good" there,
+     the rest of this skill is ONE unbroken run: draft → gates → triage → apply every ACCEPT you and the
+     auditor agree on → the `log-experiment` design-stage PR (Step 4) → **then** report the triage outcome —
+     your judgments (ACCEPT/DISPUTE/DEFER + why), not raw auditor output — as a REPORT, not a gate.
+     Researcher instruction (2026-09-02): *waiting on them is fine only at the very end, as a report, not a
+     gate.* The measured second touch cost 3-12 min of pure wait per design and changed nothing. Number the
+     outputs (`DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, …) — the chain is the validity record.
+     - **STOP and ask only on a load-bearing arbitration:** a `verify_claim` DISPUTE (always blocking), or a
+       design-audit finding whose resolution would change what is being measured, the cleared budget, or the
+       locked Presentation. Those need the researcher's domain call, and there the wait is the point — the
+       Presentation case included: if a triage outcome forces a data change that breaks a locked figure,
+       re-propose and re-lock per Step 1 rather than landing. Everything else — an ACCEPT you can apply, a
+       finding one line of domain judgment shows is moot — you resolve, record, and report.
+     - **The Presentation lock is already taken** at the proposal touch (Step 1 says it happens "in this SAME
+       design-clearance pass, with no separate gate"); this step is what makes the rest of the skill honor
+       that instead of re-gating on it.
+     - What is still wrong is *rubber-stamping*: a finding you neither fixed nor can defend in one line is not
+       triaged. Landing before reporting does not lower that bar — the report is what makes it checkable
+       after the fact, and it lands in the record as `DESIGN_AUDIT*.md` either way.
+  - **Scope note:** a simple parameter-rerun of an already-audited design runs this same loop against the
+    DELTA under the **light design path** below — gates scoped to what changed plus the parent-drift check.
+    That is a smaller payload, not a lighter loop.
 
 **The light design path — a declared mode for parameter-reruns, not just prose (#464).** Restating ~80% of a
 parent design's `DESIGN.md` for a same-shape rerun (new arms/manifests, nothing else) costs researcher-attention on
@@ -350,11 +394,21 @@ every confirm wave and risks restatement-drift — a restated pin silently diver
 one (real case: csp1-orig250-attribution-2, a 6-arm rerun of csp1-orig250-attribution-1 with only slot manifests
 changed, where ~80% of DESIGN/START/CHECKLIST was pure restatement and the facts gate re-verified facts the
 parent's own gate had already cleared). Declare it explicitly:
+**This is the DEFAULT for a same-shape rerun, not an opt-in (flipped 2026-09-02, automated-researcher#817).**
+When a parent design exists and ONLY arms / manifests / parameters change, **propose the light path in the
+proposal message (Step 1) and take it unless the researcher says "full"** — you do not wait for a separate
+per-experiment authorization. The old opt-in default was measurably backwards: 13 unattended reruns since
+2026-08-01 each fell back to the full path and spent ~30k output tokens restating a parent they should have
+cited. A genuinely NEW design — anything moving purpose, metric, comparability, or the instrument stack — is
+not a parameter-rerun and still takes the full path. That judgment is yours to make honestly; the header's
+parent pin is what makes it checkable afterward.
 - **Header + authorization.** `DESIGN.md` opens with `## Rerun of <parent-exp-dir>@<parent-DESIGN.md
   commit-sha> (researcher-authorized <ISO date>)` — pin the parent's `DESIGN.md` at the exact commit it was in
   when authorization was given, not just the directory name, so there is a fixed baseline to check citations
-  against later even if the parent doc is amended afterward. The researcher's go-ahead to use this mode at all
-  is the trigger, same standing as the Presentation lock's authorization line (Step 1 above).
+  against later even if the parent doc is amended afterward. The authorization line stays and records the
+  researcher's go on the PROPOSAL (the Step 1 touch where you named this mode and they did not ask for
+  "full") — same standing as the Presentation lock's authorization line (Step 1 above). It is a record of the
+  clearance you already have, never a second gate to wait on.
 - **Inherit unchanged sections by citation, not restatement** — "purpose/comparability/metric as `<parent-exp>`,
   re-locked `<date>`," generalizing the existing Presentation inherit-by-citation precedent (Step 1) to every
   section that didn't change.
@@ -370,13 +424,29 @@ parent's own gate had already cleared). Declare it explicitly:
   `log-experiment`'s existing rule (a `DESIGN.md` + audit present, no `RESULTS.md`) — the delta-scoped audit above
   is simply what gets posted as its review record, same mechanism, smaller payload.
 
-Default to the full design + full surfacing loop for genuinely new designs; use this mode only on the researcher's
-explicit say-so, per experiment.
+Genuinely new designs still take the full design + full triage loop; this mode is the default only for the
+same-shape rerun class above.
 
 ## Step 3 — Write `START.md` (the thin executor bridge) + the self-sufficiency pass
 
 `DESIGN.md` is the science; `START.md` (in the same dir) is the **operational bridge** that lets a fresh-context
-executor run it. Start from the `START` template in this skill's `templates/`. It contains:
+executor run it.
+
+**Cite `DESIGN.md`, don't restate it — inside one experiment, not just across a parent/child pair
+(automated-researcher#817).** `START.md`, `CHECKLIST.md` and `data_audit_manifest.md` REFERENCE `DESIGN.md`
+by section heading for anything the design already states — arms, instrument pins, the canonical metric,
+fan-out, comparability, Presentation — and carry only what is operationally theirs: paths, exact commands,
+gate wording, the artifact list, the executor disposition. Write "arms + pins per `DESIGN.md` § *What's
+measured*" and stop. A restated pin is a second copy that can silently diverge from the one the design-audit
+actually cleared, and a median design spent ~24k output tokens pushing audit ACCEPTs back through four docs
+that all said the same thing. This generalizes the light path's inherit-by-citation precedent (Step 2) from
+parent→child to sibling docs inside ONE experiment, and it is what retires the #375 grep-every-sibling rule:
+with no copies, an amendment has exactly one place to land. The self-sufficiency bar is unchanged — a
+stranger must still be able to execute from the record — and it is met, because the executor has `DESIGN.md`
+open in the same directory. The self-sufficiency pass below is what tests it: a citation that doesn't resolve
+to a real heading is a record gap, exactly like a missing path.
+
+Start from the `START` template in this skill's `templates/`. It contains:
 - The **executor disposition** (verbatim — this is what makes the handoff work): *"You are an autonomous executor. Run
   this experiment to completion — do not end your turn until you hit a real blocker or you're done; stopping after
   planning is the failure mode. Mechanical/reversible gap → pick a sensible default, record it, keep going.
@@ -410,7 +480,9 @@ executor run it. Start from the `START` template in this skill's `templates/`. I
 - **The self-sufficiency pass (do this before handoff):** read `DESIGN.md` + `START.md` **as a stranger** — anything
   load-bearing that's only in your head goes INTO the docs first. Operational facts (paths, scripts) belong in
   `START.md`; the executor having them is not "context we're testing" — guessing a path is not the test, executing the
-  *science* from the doc is.
+  *science* from the doc is. **Resolve every `DESIGN.md §` citation** you wrote per the cite-don't-restate rule
+  above: a citation pointing at a heading that doesn't exist is a record gap, and it is the one failure mode
+  citation introduces that restatement didn't.
 - **Snapshot the instance profile (mechanical, before the brief commit — #469):** run
   `scripts/aar_profile_snapshot.sh snapshot <path to this experiment's START.md>`. It resolves the live
   `aar-profile` once (the SCHEMA.md discovery order), fails closed with a one-line `BLOCKED: …` if no
@@ -432,6 +504,11 @@ must resolve **with evidence**, ticked in place (it becomes both protocol and re
 - **Seed it from the `CHECKLIST` template in this skill's `templates/`** — a UNIVERSAL core (lifecycle gates) + a
   STANDING data-audit gate + a CONDITIONAL menu (sample reads, smoke, anchor-gate, delta-provenance — each phrased
   as a *declared invariant*).
+- **Instantiate a gate by CITING the design, not by copying it** (the cite-don't-restate rule, Step 3). A gate's
+  own wording — what must be true, what evidence resolves it — is operationally the CHECKLIST's; the arms, pins,
+  metric and load-bearing deltas it ranges over are `DESIGN.md`'s. "Every delta named load-bearing in `DESIGN.md`
+  § *What's measured* has its provenance class recorded" is a complete gate; re-listing those deltas here is a
+  copy that goes stale on the first ACCEPT.
 - **Seed from THIS skill's templates only — never from a sibling experiment's registry copy** (#512): a closed
   sibling's `CHECKLIST.md` / `data_audit_manifest.md` is that experiment's completed RECORD (ticks, evidence, and
   resolved counts included), not a template — copying it and string-replacing fields ships fabricated evidence
@@ -452,7 +529,9 @@ must resolve **with evidence**, ticked in place (it becomes both protocol and re
   experiment audits its data, and there are **three surfaces** — (a) training data, (b) eval input data, (c) the
   **model-generated eval rollouts** (where most confidently-wrong-number bugs hide; "read the rollouts, not the
   scalar"). The manifest states purpose, sources/counts, transformations, **known invariants**, and what would
-  *invalidate* the experiment — what the data auditor reads so it can say "this violates the experiment," not just
+  *invalidate* the experiment — citing `DESIGN.md` by heading for the purpose and the invariants the design
+  already pins (cite-don't-restate, Step 3), and carrying in its own right only what is dataset-operational:
+  paths, hashes, counts, the transformations applied — what the data auditor reads so it can say "this violates the experiment," not just
   "looks okay" (the **data** rung of the facts→logic→data→evidence ladder). The executor runs the two-layer audit
   (`verify-claims`' `audit_data.py` full-pool determinism + `--data` cross-family semantics) per the checklist gate —
   **always, all three surfaces, both layers, no N.A.** (the eval rollouts are audited every run; generated fresh, never
@@ -476,8 +555,9 @@ Why a fresh-context executor is the default:
 
 **Land the design-stage PR FIRST — MANDATORY for pre-registered experiments (the launch gate).** The design-audit
 (Step 2) is the *scientific* gate: a cross-family review of the design's DATA-TRUSTABILITY. Landing it is a *separate,
-GitHub* step — the **design leg of the two-PR flow** (design merge before execution; closeout merge after results). Once
-the researcher has cleared the design, run the **`log-experiment`** skill on the experiment dir
+GitHub* step — the **design leg of the two-PR flow** (design merge before execution; closeout merge after results).
+This step is inside the unbroken run of Step 2's loop, not after a second clearance: once the proposal was
+cleared (Step 1) and the triage is done (Step 2), run the **`log-experiment`** skill on the experiment dir
 (`log-experiment.sh <registry-dir>`): with a `DESIGN.md` + `DESIGN_AUDIT*.md` and no `RESULTS.md` it classifies as
 **design-stage**, gates on the design-audit + the Presentation lock (the `## Presentation (locked with the researcher
 <ISO date>)` header from Step 1 above) + a deterministic secret scan, posts that audit as the PR review record, gets
@@ -492,9 +572,12 @@ launch path, matching `run-experiment`'s existing close-stage `log-experiment` r
 
 **Then your last step is a QUESTION, not an action** (automated-researcher#813 — the RGBH1 2026-08-31 seam
 failure: this step used to say "dispatch it", so a session that was never going to launch still read
-launch-side instructions, and the session that actually launched had none):
+launch-side instructions, and the session that actually launched had none). This is also where Step 2's
+triage **report** lands — the survivors and your judgment on each, delivered alongside the question, in the
+one researcher touch at the end (automated-researcher#817):
 
-> **Design-stage PR merged. Launch from this session, or hand off?**
+> **Design-stage PR merged. Triage: `<n>` findings — `<one line each: ACCEPT applied / DISPUTE why / DEFER
+> why>`. Launch from this session, or hand off?**
 
 - **Launch here** → invoke **`launch-experiment`** on the merged record in this same session (the
   same-session design-and-launch flow). You then hold designer-of-record and its duties — they are that

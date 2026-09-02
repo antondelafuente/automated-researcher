@@ -28,13 +28,46 @@ zero-context instance still gives you context independence either way.
 
 1. Write the claims as a numbered list in a file — one atomic, record-checkable claim per line.
    Don't editorialize; state each claim exactly as strongly as it's being relied upon.
-2. Collect the primary records into one directory (copies/symlinks fine). The verifier sees
-   ONLY this directory — if the claim needs evidence that isn't there, that's a finding.
-3. Run: `scripts/verify_claim.sh <claims-file> <evidence-dir>`
-4. Read the verdict file it writes:
+2. Run it. **Inside an experiment dir, use `--exp` and let the packet be built by code** (below):
+   `scripts/verify_claim.sh --exp <experiment-dir> <claims-file>`.
+   Outside one, collect the primary records into one directory yourself (copies/symlinks fine) and
+   run `scripts/verify_claim.sh <claims-file> <evidence-dir>` — the verifier sees ONLY that
+   directory, so anything the claim needs and you didn't copy comes back UNKNOWN.
+3. Read the verdict file it writes:
    - **DISPUTE** → stop; resolve before proceeding (the verifier cites the contradicting line).
    - **UNKNOWN** → the records are too thin to support the claim; treat as a record gap.
    - **CONFIRM** → proceed; the citation is your receipt.
+
+### `--exp` — the evidence packet built by code (automated-researcher#817)
+
+The hand-assembled packet was the mechanical waste in the design gate: the verifier sees only the
+evidence dir, so **any path the designer forgot to copy came back UNKNOWN *by construction*** — a
+packing mistake wearing a records-finding's clothes — and the only fix was reassemble + rerun
+(~2-3 min and ~$1-2 a time; a transcript read found the retry in 3 of 3 recent designs, and no rerun
+ever turned up a new contradiction). `--exp` removes the cause rather than the symptom:
+
+- **The packet is assembled from the experiment dir.** `DESIGN.md` always, plus every path the claims
+  file cites that actually resolves (searched under the experiment dir, its parent, the repo root,
+  and the cwd — so a sibling experiment's record resolves too). Files over
+  `VERIFY_CLAIM_MAX_BYTES` (2 MiB) go in as a head+tail excerpt; directories go in as a listing.
+- **`MECHANICAL_FACTS.md` is computed and put in the packet before the model sees anything** —
+  existence, byte size, sha256, line count, git-tracked status, and for a cited `<path>@<sha>`,
+  whether the path existed at that commit and whether the commit is an ancestor of HEAD. The verifier
+  is told this file is a primary record and must not answer UNKNOWN on anything it settles. A cited
+  path that resolves to nothing is reported loudly, in the verdict and on stderr, as itself.
+- **`check:` directives settle a claim without a model at all** — opt-in, indented under the claim:
+  `check: exists <path>` · `check: sha256 <path> <hex>` · `check: rows <path> <n>` ·
+  `check: commit <path>@<sha>`. All directives pass → deterministic `CONFIRM`; any fails → `DISPUTE`
+  (a cited path that doesn't resolve fails CLOSED, on purpose — a gate that fails open is not a gate).
+  Those claims never reach the verifier, so the model's pass is spent on the **semantic** provenance
+  claims, which is what it is actually better than a script at. A directive the *environment* can't
+  evaluate (e.g. `commit` outside a git repo) settles nothing: that claim goes to the verifier with a note.
+- **Write directives only for what a script can truly settle.** A claim whose sentence asserts more
+  than its directives check (identity, lineage, "same construct as") is a semantic claim — leave the
+  directives off and let the verifier read it, with the mechanical facts now in front of it.
+- The verdict file records the packet manifest, the mechanically-resolved verdicts, the verifier's
+  verdicts, and one combined `SUMMARY:` over both halves. `VERIFY_CLAIM_KEEP_EVIDENCE=1` keeps the
+  generated packet dir for inspection. The two-argument form is unchanged for existing callers.
 
 ## Requirements / configuration
 
@@ -68,7 +101,8 @@ evidence** ladder — each rung read by a foreign model family you're too invest
   researcher explicitly decline it? A resource limit that is itself a discretionary design choice (e.g. "only
   one pod") is NOT a valid reason to serialize. Does its cost reasoning distinguish per-compute billing
   (N parallel costs the same as N serial) from per-wallclock billing (a rented pod)? (Audit once → triage as a
-  peer → surface survivors to the human; on a re-run it's a peer debate, not a fresh scan.)
+  peer → REPORT the survivors to the human — a report at the end, not a gate mid-run, except for a
+  load-bearing arbitration, automated-researcher#817; on a re-run it's a peer debate, not a fresh scan.)
 - **`audit_experiment.sh --data <exp> <manifest>`** → `DATA_AUDIT.md` — the actual **DATA's sanity**
   vs the design intent, MID-RUN before train/eval. The SEMANTIC layer: a foreign model reads a
   STRATIFIED high-risk sample and asks "would this data make the experiment invalid or misleading?"
