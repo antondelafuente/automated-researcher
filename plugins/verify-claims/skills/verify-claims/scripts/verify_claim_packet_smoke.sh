@@ -311,5 +311,110 @@ grep -q "could not be evaluated mechanically" "$TMP/prompt.txt" \
   && ok "the verifier is told which directive the environment could not evaluate" \
   || bad "the unevaluable-only claim reached the verifier without its note"
 
+# ---------------------------------- 10. extraction / packet-name collisions / verdict attribution
+# Three coupled defects, reproduced from the senior engineer's #818 round-3 fixture:
+#   (a) EXTRACTION — a backticked span was word-split, so a real `my results.jsonl` never resolved;
+#       an absolute citation was never captured at all; and a token was allowed to start MID-PATH
+#       (right after a `-`), so the fragment `abs/absfile.txt` of a hyphenated absolute path became a
+#       loud "missing record" report for a path nobody cited.
+#   (b) COLLISION — two citations that flatten to the same `cited/<basename>` overwrote each other:
+#       the packet ended up holding one file's bytes while MECHANICAL_FACTS.md described both, each
+#       with its own sha256. A packet that silently answers a claim with ANOTHER file's bytes is worse
+#       than the missing-record hole --exp exists to close.
+#   (c) ATTRIBUTION — an unresolvable `check:` path was dropped as prose before the facts were
+#       written, so the verdict quoted MECHANICAL_FACTS.md for a string absent from that file.
+rm -f "$TMP/prompt.txt"
+mkdir -p "$REPO/registry/run-a" "$REPO/registry/run-b" "$TMP/vc-abs"
+echo "AAA-run-a-bytes" > "$REPO/registry/run-a/results.jsonl"
+echo "BBB-run-b-bytes" > "$REPO/registry/run-b/results.jsonl"
+echo "absolute-file-bytes" > "$TMP/vc-abs/absfile.txt"
+echo "spacey-bytes" > "$EXPD/my results.jsonl"
+# A cited FILE `collide` and a cited `collide/inner.txt` are BOTH legitimate when they resolve under
+# different search bases; writing one made the other's makedirs raise, taking the whole gate down.
+echo "outer-file-bytes" > "$EXPD/collide"
+mkdir -p "$REPO/registry/collide"; echo "inner-bytes" > "$REPO/registry/collide/inner.txt"
+CL11="$TMP/claims11.txt"
+cat > "$CL11" <<EOF
+1. The run-a results at ../run-a/results.jsonl differ from ../run-b/results.jsonl.
+2. The raw output landed in $TMP/vc-abs/absfile.txt before postprocessing.
+3. The merged rows are in \`my results.jsonl\` in the experiment dir.
+4. The dropped-rows record exists.
+   check: exists nope.jsonl
+5. The prefix records collide and collide/inner.txt are both preserved.
+EOF
+run_vc "$CL11" "$TMP/out11.md"
+rc11=$?
+[ $rc11 = 0 ] || bad "run 11 exited $rc11; log: $(tail -3 "$TMP/run.log")"
+grep -q "Traceback" "$TMP/run.log" \
+  && bad "packet assembly raised: $(grep -A2 Traceback "$TMP/run.log" | tail -2)" \
+  || ok "packet assembly survives a file/directory name clash between two cited records"
+PKT11=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
+FACTS11="$PKT11/MECHANICAL_FACTS.md"
+
+# --- (a) extraction
+[ -f "$PKT11/abs$TMP/vc-abs/absfile.txt" ] \
+  && ok "an absolute citation is extracted and lands under abs/ in the packet" \
+  || bad "absolute citation $TMP/vc-abs/absfile.txt never reached the packet"
+[ -f "$PKT11/my results.jsonl" ] \
+  && ok "a backticked space-containing citation resolves as ONE literal name" \
+  || bad "backticked \`my results.jsonl\` was word-split; the real file never reached the packet"
+# `nope.jsonl` is the ONLY citation in this claims file that resolves to nothing, so any other loud
+# missing-record report is a token that started mid-path inside a citation that does resolve.
+missing=$(awk '/^### `/{cur=$0} /^- resolved in the working tree: \*\*NO\*\*/{print cur}' "$FACTS11")
+[ "$missing" = '### `nope.jsonl`' ] \
+  && ok "only the genuinely-missing record gets an unresolved facts entry" \
+  || bad "facts carry unresolved entries for paths nobody cited (mid-path fragments): $missing"
+bogus=$(grep -oE "WARN cited path does not resolve: .*" "$TMP/run.log" | grep -v "nope.jsonl" || true)
+[ -z "$bogus" ] && ok "no bogus loud WARN for a fragment of a resolvable path" \
+  || bad "bogus missing-record WARN(s) from mid-path fragments: $bogus"
+
+# --- (b) collisions: distinct sources never share a packet path, and the facts name each one
+facts_block(){ awk -v want="### \`$1\`" '$0==want{f=1;next} f&&/^### /{exit} f{print}' "$2"; }
+packet_copy_of(){ facts_block "$1" "$2" | sed -n 's/^- packet copy: `\([^`]*\)`.*/\1/p' | head -1; }
+facts_sha_of(){ facts_block "$1" "$2" | sed -n 's/^- sha256: `\([0-9a-f]*\)`.*/\1/p' | head -1; }
+A_REL=$(packet_copy_of '../run-a/results.jsonl' "$FACTS11")
+B_REL=$(packet_copy_of '../run-b/results.jsonl' "$FACTS11")
+if [ -n "$A_REL" ] && [ -n "$B_REL" ]; then
+  ok "MECHANICAL_FACTS.md names each included file's packet path (citation -> copy is mapped)"
+else
+  bad "the facts never name the packet copy for ../run-a ('$A_REL') / ../run-b ('$B_REL')"
+fi
+[ -n "$A_REL" ] && [ "$A_REL" = "$B_REL" ] \
+  && bad "two different cited files share packet path '$A_REL' — one overwrote the other" \
+  || ok "citations resolving to different files get different packet paths"
+for arm in run-a run-b; do
+  rel=$(packet_copy_of "../$arm/results.jsonl" "$FACTS11")
+  want=$(facts_sha_of "../$arm/results.jsonl" "$FACTS11")
+  got=""; [ -n "$rel" ] && [ -f "$PKT11/$rel" ] && got=$(sha256sum "$PKT11/$rel" | cut -d' ' -f1)
+  [ -n "$want" ] && [ "$want" = "$got" ] \
+    && ok "../$arm/results.jsonl's packet copy hashes to its OWN facts sha256" \
+    || bad "../$arm/results.jsonl: packet copy '$rel' hashes '$got' but its facts say '$want'"
+done
+C_OUTER=$(packet_copy_of 'collide' "$FACTS11")
+C_INNER=$(packet_copy_of 'collide/inner.txt' "$FACTS11")
+if [ -n "$C_OUTER" ] && [ -n "$C_INNER" ] &&
+   [ "$(cat "$PKT11/$C_OUTER" 2>/dev/null)" = "outer-file-bytes" ] &&
+   [ "$(cat "$PKT11/$C_INNER" 2>/dev/null)" = "inner-bytes" ]; then
+  ok "a cited file and a cited path UNDER that name both keep their own bytes"
+else
+  bad "file/dir name clash lost a record: 'collide'->'$C_OUTER', 'collide/inner.txt'->'$C_INNER'"
+fi
+
+# --- (c) attribution: every mechanical verdict's evidence quote exists verbatim in the facts file
+grep -q "nope.jsonl" "$FACTS11" \
+  && ok "an unresolvable check: path surfaces as a facts entry instead of being dropped as prose" \
+  || bad "check: exists nope.jsonl left no trace in MECHANICAL_FACTS.md"
+grep -qE "^CLAIM 4: DISPUTE" "$TMP/out11.md" && ok "the unresolvable check: directive still DISPUTEs" \
+  || bad "check: exists nope.jsonl did not DISPUTE"
+QUOTE=$(sed -n 's/^  evidence: MECHANICAL_FACTS\.md: "\(.*\)"$/\1/p' "$TMP/out11.md" | head -1)
+if [ -n "$QUOTE" ] && grep -Fq "$QUOTE" "$FACTS11"; then
+  ok "the mechanical verdict's evidence quote appears verbatim in MECHANICAL_FACTS.md"
+else
+  bad "verdict quotes MECHANICAL_FACTS.md for text that file does not contain: '$QUOTE'"
+fi
+n_sum11=$(grep -cE "^[[:space:]]*SUMMARY:" "$TMP/out11.md")
+[ "$n_sum11" = 1 ] && ok "still exactly one SUMMARY record with both halves present" \
+  || bad "verdict carries $n_sum11 SUMMARY records"
+
 [ "$fail" = 0 ] && echo "[verify_claim_packet_smoke] PASS" >&2 || echo "[verify_claim_packet_smoke] FAIL" >&2
 exit "$fail"

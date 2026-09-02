@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.6.0 / verify-claims 0.8.0 (2026-09-02): a formal design was ~28 min wall / 19 min
+- experiment-lifecycle 0.6.0 / verify-claims 0.8.1 (2026-09-02): a formal design was ~28 min wall / 19 min
   agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
   episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
   so "audit ONCE" is being followed). The cost was 53k output tokens of cross-doc restatement, a gate
@@ -41,10 +41,20 @@
   path's parent-drift check checkable), and it works for a path moved or deleted since; a directory listing
   cut at 500 entries says so in the facts, the manifest, and the listing file; and the verdict carries
   exactly ONE `SUMMARY:` — the combined one — so no consumer can grep semantic-only counts and miss the
-  mechanical DISPUTEs. The two-argument
+  mechanical DISPUTEs. Three coupled defects in that machinery were then fixed under senior-engineer
+  adjudication: a backticked span is now ONE literal citation taken whole with its spaces (`my
+  results.jsonl` used to fragment into words and never resolve), absolute citations are extracted at all,
+  and a token can no longer start MID-PATH — the fragment of a hyphenated absolute path was producing a
+  loud "missing record" report for a path nobody cited; every packet name is now CLAIMED, so two
+  citations that resolve to different objects can never share a path (`../run-a/results.jsonl` and
+  `../run-b/results.jsonl` both flattened to `cited/results.jsonl`, leaving the packet with one arm's
+  bytes while the facts described both) and the facts name each included file's packet path; and a
+  `check:` directive's target is always a citation, with the directive evaluations written into
+  `MECHANICAL_FACTS.md` itself, so a mechanical verdict's `evidence:` quote is verbatim in the file it
+  attributes it to. The two-argument
   hand-assembled form is unchanged for existing callers, and `verify_claim_packet_smoke.sh` covers packet
   assembly, the mechanical facts, fail-closed directives, citation shapes, pinned revisions, listing
-  truncation, the single-SUMMARY guarantee, and that legacy shape.
+  truncation, name collisions, verdict attribution, the single-SUMMARY guarantee, and that legacy shape.
 - experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
   `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
   (#813). Step 4 assumed the designing session is also the launching session; that broke in production

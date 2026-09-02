@@ -44,14 +44,20 @@
 #
 # How a citation is recognized: there is NO shape pre-filter. Every token that could be a filename is
 # resolved against the search bases, and it goes in the packet if it resolves — a bare `RESULTS.md`,
-# an extensionless `SHA256SUMS` or `Makefile`, and `artifacts/model.safetensors` alike. Shape is
+# an extensionless `SHA256SUMS` or `Makefile`, an absolute `/tmp/run/out.txt`, and
+# `artifacts/model.safetensors` alike. A BACKTICKED span is one literal citation, taken WHOLE with its
+# spaces (`my results.jsonl`), and a `check:` directive's path argument is a citation too. Shape is
 # consulted only for a token that resolves to NOTHING, since prose carries slashes ("and/or") and
 # dots ("e.g."): an unresolved token is reported loudly as a missing record when it is unambiguously
-# a path (two-plus slashes, a slash plus an extension, a `@sha` pin) or the author backticked it;
-# otherwise it is dropped as prose. The asymmetry is deliberate — an ordinary word that happens to
-# name a real file only adds a primary record to the packet, while a dropped citation re-opens the
-# exact hole --exp exists to close. Write a `check: exists <path>` when you need an unresolvable bare
-# name to fail the gate outright.
+# a path (two-plus slashes, a slash plus an extension, a `@sha` pin) or the author marked it with
+# backticks or a directive; otherwise it is dropped as prose. The asymmetry is deliberate — an
+# ordinary word that happens to name a real file only adds a primary record to the packet, while a
+# dropped citation re-opens the exact hole --exp exists to close. Write a `check: exists <path>` when
+# you need an unresolvable bare name to fail the gate outright.
+#
+# Every name written into the packet is CLAIMED, so two citations resolving to DIFFERENT filesystem
+# objects never share a packet path: on a collision the loser gets `cited/<hash-of-citation>/<basename>`.
+# MECHANICAL_FACTS.md names each included file's packet path, so the verifier can map citation -> copy.
 #
 # A `<path>@<sha>` citation pins a REVISION, and the packet carries THAT revision's bytes (as
 # `<path>@<sha>`), hashed and line-counted from the blob — not the working-tree file, which may have
@@ -205,9 +211,17 @@ for c in claims:
 # reporting loudly. The costs are asymmetric on purpose: an ordinary word that happens to name a real
 # file adds one primary record to the packet, while a dropped citation is the packing hole --exp
 # exists to close.
-PATH_RE = re.compile(r"(?<![\w/@])((?:[\w.~+-]+/)*[\w.~+-]+)(?:@([0-9a-fA-F]{7,40}))?")
+#
+# Two properties of the token pattern are load-bearing, both learned the hard way (#818 senior-engineer
+# adjudication): the optional leading `/` is what lets an ABSOLUTE citation be extracted at all, and the
+# lookbehind spans the WHOLE token class so a token can never start mid-word/mid-path — with a narrower
+# lookbehind, `/tmp/vc-test/absfile.txt` was never captured while the fragment `test/absfile.txt` (a
+# token allowed to start right after the `-`) was, producing a loud "missing record" report for a path
+# nobody cited.
+PATH_RE = re.compile(r"(?<![\w/@.~+-])(/?(?:[\w.~+-]+/)*[\w.~+-]+)(?:@([0-9a-fA-F]{7,40}))?")
 URL_RE = re.compile(r"\w+://\S+")
 TICK_RE = re.compile(r"`([^`\n]+)`")
+SHA_PIN = re.compile(r"@([0-9a-fA-F]{7,40})$")
 EXT_RE = re.compile(r"\.[A-Za-z0-9_]{1,16}$")
 TRAILING = ".,;:!?)]}\"'"
 HEAD_LINES, TAIL_LINES, MAX_LISTING = 200, 100, 500
@@ -217,8 +231,8 @@ SEARCH_BASES = [b for b in (EXP, os.path.dirname(EXP), ROOT, os.getcwd()) if b]
 def unambiguously_a_path(p):
     """Is this a path citation even when nothing resolves — i.e. worth a LOUD unresolved report?
     Prose carries slashes ("and/or", "24k/53k") and dots ("e.g.", "3.5x"), so a bare name or a
-    single bare slash doesn't qualify on shape alone; backticks (checked by the caller) or a `@sha`
-    are the author marking it as a literal."""
+    single bare slash doesn't qualify on shape alone. The author's own literal markers — backticks
+    and a `check:` directive — bypass this test entirely: both cite loudly by construction."""
     return p.count("/") >= 2 or ("/" in p and EXT_RE.search(p.rsplit("/", 1)[-1]) is not None)
 
 
@@ -239,20 +253,52 @@ def resolve(p):
 
 
 cited = {}      # cited-string -> {"abs":…, "tried":[…], "commits":set(), "loud":bool}
+
+
+def cite(p, sha=None, loud=False):
+    """Record one citation, resolving it exactly once."""
+    p = p.strip().rstrip(TRAILING).rstrip("/")
+    if not p:
+        return
+    ent = cited.setdefault(p, {"commits": set(), "loud": False})
+    ent["loud"] = ent["loud"] or loud
+    if "abs" not in ent:
+        ent["abs"], ent["tried"] = resolve(p)
+    if sha:
+        ent["commits"].add(sha)
+
+
 for text in ["\n".join(preamble)] + [c["text"] for c in claims]:
     text = URL_RE.sub(" ", text)     # a URL is not a local record; don't chase its path segments
-    ticked = {t.strip().strip(TRAILING) for m in TICK_RE.finditer(text) for t in [m.group(1)]}
-    ticked |= {t.split("@", 1)[0] for t in list(ticked) if "@" in t}
+    # A backticked span is ONE literal citation, taken WHOLE — spaces and all — because the backticks
+    # are the author marking it as literal. Word-splitting it meant a real `my results.jsonl` never
+    # resolved while its fragments became bogus reports. Ticked spans are then blanked out of the text
+    # BEFORE the token scan, so a space-containing citation cannot be re-fragmented by it.
+    for m in TICK_RE.finditer(text):
+        t = m.group(1).strip().rstrip(TRAILING)
+        pin = SHA_PIN.search(t)
+        cite(t[:pin.start()] if pin else t, pin.group(1) if pin else None, loud=True)
+    text = TICK_RE.sub(" ", text)
     for m in PATH_RE.finditer(text):
         p = m.group(1).rstrip(TRAILING)
-        if not p or p.endswith("/"):
+        cite(p, m.group(2), loud=unambiguously_a_path(p) or bool(m.group(2)))
+
+# A `check:` directive's path argument is an even stronger literal marker than a backtick — the author
+# is declaring the gate will be SETTLED on that path — so it is always a citation. Left to the prose
+# rule, an unresolvable bare `check: exists nope.jsonl` was dropped before the facts were written, and
+# the resulting DISPUTE quoted "`nope.jsonl` resolves to nothing" as though it came from
+# MECHANICAL_FACTS.md while `grep nope.jsonl` on that file was empty (#818 senior-engineer adjudication).
+for c in claims:
+    for kind, arg in c["checks"]:
+        parts = arg.split()
+        if not parts:
             continue
-        ent = cited.setdefault(p, {"commits": set(), "loud": False})
-        ent["loud"] = ent["loud"] or unambiguously_a_path(p) or p in ticked or bool(m.group(2))
-        if "abs" not in ent:
-            ent["abs"], ent["tried"] = resolve(p)
-        if m.group(2):
-            ent["commits"].add(m.group(2))
+        target, sha = parts[0].rstrip(TRAILING), None
+        if kind == "commit" and "@" in target:
+            base, tail = target.rsplit("@", 1)
+            if re.fullmatch(r"[0-9a-fA-F]{7,40}", tail):
+                target, sha = base, tail
+        cite(target, sha, loud=True)
 
 # A token that neither resolves nor is unambiguously a path is prose, not a missing record: drop it
 # rather than fill MECHANICAL_FACTS.md with "and/or does not exist".
@@ -271,6 +317,42 @@ def packet_rel(p):
     if rel.startswith(".."):
         rel = os.path.join("cited", os.path.basename(rel))
     return rel
+
+
+# Every name written into the packet is CLAIMED through this table, so two citations that resolve to
+# DIFFERENT filesystem objects can never end up sharing one packet path. `packet_rel()` flattens any
+# ../-relative citation to `cited/<basename>`, which silently collapsed `../run-a/results.jsonl` and
+# `../run-b/results.jsonl` onto one file: the packet carried run-b's bytes while MECHANICAL_FACTS.md
+# described both, each with its own sha256 (#818 senior-engineer adjudication). GENERATED names count
+# too — a `<rel>.listing.txt` collides with a real cited `foo.listing.txt`, and a pinned `<rel>@<sha>`
+# with a real file of that name — so they are claimed on the same table.
+taken = {}      # packet-relative name -> the resolved source object it names
+
+
+def claim_name(preferred, source, cited_string):
+    """Reserve a packet-relative name for `source` and return the name to actually write.
+    Re-claiming the same name for the SAME source is fine — two citations of one file share one copy.
+    A DIFFERENT source falls back to a deterministic per-citation directory that keeps the basename
+    (and so the extension) readable: `cited/<sha256(citation)[:8]>/<basename>`.
+    A candidate is also rejected when the packet cannot physically HOLD it: a cited file `foo` and a
+    cited `foo/bar.txt` resolving under different search bases are both legitimate, and writing one
+    made the other's `makedirs` raise — taking the whole gate down with a traceback."""
+    digest = hashlib.sha256(cited_string.encode("utf-8", "replace")).hexdigest()
+    cands = [preferred] + [os.path.join("cited", digest[:k], os.path.basename(preferred))
+                           for k in range(8, len(digest) + 1, 8)]
+    for rel in cands:
+        if taken.get(rel, source) != source:
+            continue
+        dest = os.path.join(PACKET, rel)
+        try:
+            os.makedirs(os.path.dirname(dest) or PACKET, exist_ok=True)
+        except OSError:
+            continue        # an ancestor of this name is already a FILE in the packet
+        if os.path.isdir(dest):
+            continue        # this name is already a DIRECTORY in the packet
+        taken[rel] = source
+        return rel
+    return cands[-1]
 
 
 def sha256_of(path):
@@ -388,18 +470,19 @@ for p in sorted(cited):
         for t in ent.get("tried", []):
             facts.append(f"  - searched: `{t}`")
     else:
-        ent["packet_rel"] = rel
-        dest = os.path.join(PACKET, rel)
-        os.makedirs(os.path.dirname(dest) or PACKET, exist_ok=True)
         facts.append(f"- resolved in the working tree: YES -> `{ap}`")
         if os.path.isdir(ap):
+            # The listing marker (`<abs>/`) is a source of its own: a cited DIRECTORY `foo` and a cited
+            # FILE literally named `foo.listing.txt` are different objects and must not share a name.
+            listing_rel = claim_name(rel + ".listing.txt", ap + os.sep, p)
+            dest = os.path.join(PACKET, listing_rel)   # claim_name() made its parent dir
             entries = sorted(
                 os.path.relpath(os.path.join(dp, f), ap)
                 for dp, _, fs in os.walk(ap) for f in fs
             )
             listing, total_n = entries[:MAX_LISTING], len(entries)
             cut = total_n - len(listing)
-            with open(dest + ".listing.txt", "w", encoding="utf-8") as fh:
+            with open(dest, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(listing) + "\n")
                 if cut:
                     fh.write(f"... [verify_claim] TRUNCATED: {total_n} file(s) total, first "
@@ -409,9 +492,12 @@ for p in sorted(cited):
             facts.append(f"- kind: directory, {total_n} file(s) total, {len(listing)} listed"
                          + (f" — **LISTING TRUNCATED**, {cut} file(s) not shown; absence from the "
                             "listing does NOT mean the file is absent from the directory" if cut else ""))
-            manifest.append(f"- `{rel}.listing.txt` (directory listing of `{p}`"
+            facts.append(f"- packet copy: `{listing_rel}` (directory listing)")
+            manifest.append(f"- `{listing_rel}` (directory listing of `{p}`"
                             + (f"; TRUNCATED to the first {MAX_LISTING} of {total_n})" if cut else ")"))
         else:
+            rel = ent["packet_rel"] = claim_name(rel, ap, p)
+            dest = os.path.join(PACKET, rel)          # claim_name() made its parent dir
             size = os.path.getsize(ap)
             ent["sha256"] = sha256_of(ap)
             facts.append(f"- bytes: {size}")
@@ -422,6 +508,11 @@ for p in sorted(cited):
                 facts.append(f"- lines: {ent['lines']}")
             if size <= MAX_BYTES:
                 shutil.copyfile(ap, dest)
+                # Name the packet path in the facts, not only in the manifest: a `cited/…`-flattened or
+                # collision-disambiguated name is otherwise unmapped, leaving the verifier with facts
+                # about a citation and no way to tell which packet copy holds its bytes (#818
+                # senior-engineer adjudication).
+                facts.append(f"- packet copy: `{rel}` (full copy)")
                 manifest.append(f"- `{rel}` (full copy of `{p}`)")
             elif text:
                 with open(ap, encoding="utf-8", errors="replace") as fh:
@@ -432,8 +523,8 @@ for p in sorted(cited):
                     fh.write("".join(head))
                     fh.write(excerpt_note(size))
                     fh.write(tail)
-                facts.append(f"- packet copy: EXCERPT ONLY (first {HEAD_LINES} + last {TAIL_LINES} "
-                             f"lines of {ent['lines']})")
+                facts.append(f"- packet copy: `{rel}` — EXCERPT ONLY (first {HEAD_LINES} + last "
+                             f"{TAIL_LINES} lines of {ent['lines']})")
                 manifest.append(f"- `{rel}` (head+tail excerpt of `{p}`; full sha256/line count in MECHANICAL_FACTS.md)")
             else:
                 facts.append(f"- packet copy: NONE (binary, {size} bytes > {MAX_BYTES}); facts above are the record")
@@ -452,9 +543,11 @@ for p in sorted(cited):
                      + f"; commit is an ancestor of HEAD = {'YES' if anc else 'NO'}")
         if not relroot:
             continue
-        pin_rel = f"{rel}@{sha}"
-        pin_dest = os.path.join(PACKET, pin_rel)
-        os.makedirs(os.path.dirname(pin_dest) or PACKET, exist_ok=True)
+        # The pinned blob is its own source object — `<sha>:<relroot>` in the repo, not the working
+        # tree — so two citations pinning the same revision share one copy and everything else gets a
+        # name of its own.
+        pin_rel = claim_name(f"{rel}@{sha}", f"git:{sha}:{relroot}", f"{p}@{sha}")
+        pin_dest = os.path.join(PACKET, pin_rel)      # claim_name() made its parent dir
         info = ingest_blob(sha, relroot, pin_dest)
         if info is None:
             facts.append(f"  - AT THAT COMMIT: `{relroot}` is a directory, not a file — no pinned copy")
@@ -507,7 +600,7 @@ def eval_check(kind, arg):
     return None, f"unrecognized directive `check: {kind} {arg}`"
 
 
-mech_lines, residual = [], []
+mech_lines, check_facts, residual = [], [], []
 for c in claims:
     if not c["checks"]:
         residual.append(c)
@@ -526,8 +619,19 @@ for c in claims:
         residual.append(c)
         continue
     ok = not failed
-    mech_lines.append(f"CLAIM {c['n']}: {'CONFIRM' if ok else 'DISPUTE'}")
-    mech_lines.append("  evidence: MECHANICAL_FACTS.md: \"" + "; ".join(r[3] for r in results).replace('"', "'") + "\"")
+    verdict = "CONFIRM" if ok else "DISPUTE"
+    # The verdict's evidence: line attributes this quote to MECHANICAL_FACTS.md, so the quote has to be
+    # IN that file — verbatim. It wasn't: the directive evaluations lived only in the verdict, and a
+    # `check: exists nope.jsonl` whose path was dropped as prose left the quote sourced to a file that
+    # never mentioned it (#818 senior-engineer adjudication). One string, written to both places.
+    evidence = "; ".join(r[3] for r in results).replace('"', "'")
+    mech_lines.append(f"CLAIM {c['n']}: {verdict}")
+    mech_lines.append(f"  evidence: MECHANICAL_FACTS.md: \"{evidence}\"")
+    check_facts.append(f"### CLAIM {c['n']}: {verdict} ({len(results)} directive(s))")
+    for k, a, _res, _expl in results:
+        check_facts.append(f"- declared: `check: {k} {a}`")
+    check_facts.append(f"- evaluated: {evidence}")
+    check_facts.append("")
     mech_lines.append("  reasoning: resolved deterministically by verify_claim.sh --exp "
                       f"({len(results)} check directive(s), "
                       f"{'all passed' if ok else f'{len(failed)} failed'})"
@@ -549,7 +653,11 @@ with open(os.path.join(PACKET, "MECHANICAL_FACTS.md"), "w", encoding="utf-8") as
              f"- experiment dir: `{EXP}`\n"
              f"- repo root: `{ROOT or '(not a git repo)'}`\n"
              f"- HEAD: `{HEAD or '-'}`\n\n"
-             "## Paths cited by the claims file\n\n" + "\n".join(facts) + "\n")
+             "## Paths cited by the claims file\n\n" + "\n".join(facts) + "\n"
+             + ("\n## `check:` directives\n\n"
+                "Every `check:` directive the claims file declared, evaluated by code at gate time.\n"
+                "These lines ARE the evidence the mechanically-settled verdicts quote.\n\n"
+                + "\n".join(check_facts) + "\n" if check_facts else ""))
 manifest.insert(0, "- `MECHANICAL_FACTS.md` (existence / sha256 / line counts / git ancestry, computed by code)")
 
 with open(os.path.join(WORK, "packet_manifest.md"), "w", encoding="utf-8") as fh:

@@ -50,12 +50,22 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
   file cites that actually resolves (searched under the experiment dir, its parent, the repo root,
   and the cwd — so a sibling experiment's record resolves too). **Inclusion is decided by resolution
   and nothing else — there is no shape pre-filter in front of it**, so an extensionless `SHA256SUMS`
-  or `Makefile` counts as much as a bare `RESULTS.md`, `registry/x/data/train.jsonl`, or
-  `artifacts/model.safetensors`. (An ordinary word that happens to name a real file just adds a
-  primary record; a dropped citation is the hole `--exp` exists to close, so the asymmetry runs
-  toward including.) Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
+  or `Makefile` counts as much as a bare `RESULTS.md`, `registry/x/data/train.jsonl`, an absolute
+  `/tmp/run/out.txt`, or `artifacts/model.safetensors`. (An ordinary word that happens to name a real
+  file just adds a primary record; a dropped citation is the hole `--exp` exists to close, so the
+  asymmetry runs toward including.) **A backticked span is ONE literal citation, taken whole with its
+  spaces** (`my results.jsonl`), and a `check:` directive's path argument is a citation too — both are
+  the author marking a name as literal, so neither is word-split into fragments.
+  Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
   go in as a head+tail excerpt; directories go in as a listing, and a listing cut at 500 entries says
   so in the facts, the manifest, and the listing file (unlisted is not the same as absent).
+- **Every packet name is claimed, so two records can never collide.** A `../`-relative citation
+  flattens to `cited/<basename>`, which put `../run-a/results.jsonl` and `../run-b/results.jsonl` on
+  one file: the packet held run-b's bytes while the facts described both, each with its own sha256.
+  Two citations of the same object still share one copy; two that resolve to DIFFERENT objects
+  (generated names — `<rel>.listing.txt`, pinned `<rel>@<sha>` — included) get different paths, the
+  loser landing at `cited/<hash-of-citation>/<basename>`. `MECHANICAL_FACTS.md` names each included
+  file's packet path, so a citation can always be mapped to the copy holding its bytes.
 - **A `<path>@<sha>` citation pins a REVISION, and the packet carries that revision's bytes** — the
   blob is materialized from git as `<path>@<sha>` and hashed/line-counted from those bytes, so the
   verifier reads what the claim pinned rather than a working-tree file that may have been amended
@@ -68,9 +78,11 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
   blob's own size/hash/lines. The verifier is told this file is a primary record and must not answer
   UNKNOWN on anything it settles. A cited path that resolves to nothing — in the working tree and at
   every commit it pins — is reported loudly, in the verdict and on stderr, as itself; a token that is
-  neither resolvable nor unambiguously a path (backticked, `@sha`-pinned, or two-plus slashes) is
-  treated as prose rather than a missing record. Use `check: exists <path>` when you need an
-  unresolvable bare name to fail the gate outright.
+  neither resolvable nor unambiguously a path (backticked, `check:`-declared, `@sha`-pinned, or
+  two-plus slashes) is treated as prose rather than a missing record. Use `check: exists <path>` when
+  you need an unresolvable bare name to fail the gate outright. The file also carries a
+  **`## check: directives`** section holding each directive's evaluation verbatim — the mechanical
+  verdicts cite `MECHANICAL_FACTS.md` as their evidence, so the quoted string has to be in it.
 - **`check:` directives settle a claim without a model at all** — opt-in, indented under the claim:
   `check: exists <path>` · `check: sha256 <path> <hex>` · `check: rows <path> <n>` ·
   `check: commit <path>@<sha>`. All directives pass → deterministic `CONFIRM`; any fails → `DISPUTE`
