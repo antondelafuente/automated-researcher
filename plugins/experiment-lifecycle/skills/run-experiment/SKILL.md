@@ -600,7 +600,7 @@ Idle compute burns money. **Teardown is the default the moment a run completes.*
 
 **Close order — science first, publish second (#819).** Aggregate → figures → `RESULTS.md` → the
 cross-family **close audit** → triage/fix → *then* the publish chain (the fresh-pull reproduction of the
-FINAL numbers, `presentation_manifest.json`, the page build) → landing via `log-experiment`. The audit
+FINAL numbers, `presentation_manifest.json`, the page build) → **one** landing via `log-experiment`. The audit
 reads the science, so nothing the audit can invalidate is built before it runs. Publishing first is what made
 a single audit finding (an aggregate estimand that should have been equal-weight) cascade through
 re-aggregate → refigure → re-`RESULTS` → **re-upload → re-reproduce → rebuild page** → a second audit: an
@@ -691,8 +691,9 @@ upstream of everything in this ordering.
   the close is manifest-only** — the manifest still stands on its own as plain-language arm documentation, and
   any later page build is consuming-instance work. **Recipe present → building and publishing the page is part
   of YOUR close**, after the close audit is triaged and the reproduction above passed (it consumes the same
-  verified artifacts and the same final numbers) and still **before `log-experiment`**, so the landed record
-  sees the committed source + the gate's evidence exactly as it did before. What changed is only that it no
+  verified artifacts and the same final numbers) and still **before `log-experiment`**, which lands the page
+  source in the SAME PR as the record (below), so the landed record sees the committed source + the gate's
+  evidence exactly as it did before. What changed is only that it no
   longer runs before the AUDIT: the old rationale was "so the audit and the landed record see the page", but
   the audit reads the science, never the page — so putting the whole publish chain ahead of it bought nothing
   and cost it a redo on every finding that touched a number (#819):
@@ -703,7 +704,10 @@ upstream of everything in this ordering.
     these is a **load-bearing brief gap**: flag it and fall back to manifest-only — don't improvise a publish path.
   - **The work:** assemble the per-cell transcripts, author the bespoke per-experiment builder against the
     cleared `DESIGN.md` Presentation spec, render the pinned figures, bundle, update the gallery, and land the
-    viewer change through the recipe's gated path. The page is deliberately **bespoke, not a generic
+    viewer change. **Landing it is the record's own landing when the viewer lives in the research repo** —
+    `log-experiment.sh <exp-dir> --page-source <viewer-dir>`, one PR for the whole close (#819); the recipe's
+    own gated landing path is what you use when the viewer is a *separate* repo, and then the close records
+    where it went with `--page-source-external <url>`. The page is deliberately **bespoke, not a generic
     manifest-to-template generator** — a template flattens the "tell this experiment's story" quality; share only
     house style (the page lib + prior pages as pattern).
   - **The gallery rebuild is a verified gate, not a named step.** The recipe's gallery-rebuild command must
@@ -743,6 +747,46 @@ upstream of everything in this ordering.
     no-verdict / mark-postdictions discipline is exactly what's easy to get wrong; produce a live first-pass
     page, never a finished story. The mechanical bar (figures per spec, source committed, page landed) is the
     checklist gate; prose quality is explicitly not.
+- **Generate the mechanical paperwork — don't author it (#819).** The close touches ~15 record artifacts, and
+  a measured half of a run's output tokens are spent in the close leg writing them by hand. **You author
+  `RESULTS.md` and the audit responses** — those are judgment. Everything derivable from state is emitted by
+  `scripts/close_record.sh paperwork`, whose **canonical invocation** is exactly this (the run's own values in
+  the variables; `--no-artifacts` replaces the root+uploaded-from pair for an API-only run that stored
+  nothing, and `--page-source` is dropped on a manifest-only close):
+  <!-- CLOSE-RECORD-PAPERWORK:BEGIN — close_record_smoke.sh extracts and RUNS this block verbatim (#821 invariant 6): a documented invocation the script would reject fails required CI -->
+  ```bash
+  scripts/close_record.sh paperwork "$RUN_ID" "$REGISTRY_DIR" \
+    --outcome completed-as-designed \
+    --artifact-root "$ARTIFACT_ROOT" \
+    --uploaded-from "$UPLOAD_DIR" \
+    --page-source "$PAGE_SOURCE" \
+    --pull-cmd "rclone copy $ARTIFACT_ROOT ./pull" \
+    --repro-diff "$REPRO_DIFF"
+  ```
+  <!-- CLOSE-RECORD-PAPERWORK:END -->
+  It emits `LANDED.md` (what landed where — record dir, artifact-store root, page path, ledger event),
+  `ARTIFACT_MANIFEST.md` (the #232 R2 pointer: path + object count + key sizes), a `REPRODUCTION.md` skeleton
+  carrying the actual pull commands and the reproduction diff from the gate above, the experiment-level
+  **terminal ledger event** (`run` = the registry dir name exactly, no suffix, #473; the terminal status is
+  the operational outcome you pass it, #376 — the script refuses to invent one), and the close self-audit
+  checklist, UNSTARTED (#512). A fact it cannot derive is emitted as a `TODO(close):` line you fill, never as
+  a plausible-looking value. Run it before the `TEMP.md` delete + staging below, so its output stages with the
+  rest of the record. Three properties are worth knowing before you read its output (#821):
+  - **The manifest is byte-verified or absent.** `--uploaded-from` names the local dir(s) this run uploaded
+    (repeatable — the completion boundary uploads per artifact-completion, #460). The manifest is written only
+    when the store listing has ≥1 object, every local file is present at a matching size (and md5 wherever the
+    store gives one), and nothing in the listing is unaccounted for. An unlistable store, an EMPTY one, a
+    size/hash mismatch or an unexplained surplus object each mean **no manifest and a non-zero exit** with one
+    line saying which — a listing on its own only ever says what is in the bucket, never that YOUR artifacts
+    are (#331/#729).
+  - **Write-or-nothing.** Every file is staged in a temp dir and moved into place only after all checks pass
+    and the ledger event is written, so a failed run leaves no partial paperwork — and an earlier run's
+    generated `ARTIFACT_MANIFEST.md` is renamed `ARTIFACT_MANIFEST.md.stale` rather than left standing as the
+    record's answer for a close that observed no verified listing. A file you took over by hand (no
+    `generated-by` marker) is never overwritten, deleted, or renamed.
+  - **A missing seam or missing `rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line, with nothing written** (#804's
+    loud-gap shape): wire it and re-run, rather than landing a record whose ledger line or manifest is missing.
+    Exit 1 is a BLOCK (bad arguments, or evidence that contradicts the paperwork).
 - **Delete the transient successor handoff (`TEMP.md`) before staging (#332).** It is working scratch (progress
   timestamps, next-action notes) — never part of the record convention (DESIGN/RESULTS/AUDIT/manifests) — and it
   silently contradicts the final `RESULTS.md` at whatever checkpoint it was last refreshed if it lands in the
@@ -776,10 +820,20 @@ upstream of everything in this ordering.
   script's original directory, a sibling's live judge-verdict file), pull the RELEVANT SLICE into a local
   durable artifact first — don't duplicate a sibling's multi-GB rollouts wholesale, just the small slice this
   aggregation actually reads — then write the aggregator against that local copy.
-- **Land the record on GitHub via `log-experiment`** (the research counterpart to `ship-change`):
-  `log-experiment.sh <exp-dir>` opens a gated PR, verifies the close-audit is present + clean (or, for a
-  no-go/eval-only run, a closed `RESULTS.md` decision), takes the cross-family bot approval, and merges — one
-  command, not the by-hand branch/approve/merge dance. This is how a finished experiment becomes a GitHub record.
+- **Land it in ONE landing via `log-experiment` (the research counterpart to `ship-change`) — not three
+  (#819).** The record, the page source, and `LANDED.md` are one close, so they are **one call and one PR**:
+  `log-experiment.sh <exp-dir> [--page-source <viewer-dir> [--page-source-only <path>]…]` opens a gated PR,
+  verifies the close-audit is present + triaged (or, for a no-go/eval-only run, a closed `RESULTS.md`
+  decision), verifies the page source is present when the `START.md` snapshot carries a `[recipes.viewer]`
+  recipe — the mechanical half of the publish leg the close audit no longer has to see — takes the
+  cross-family bot approval, and merges. Three sequential gated PRs at the end of every run (record, then
+  page source, then `LANDED.md`) cost ~10 min of the measured close leg and bought nothing: they land the
+  same close, gated the same way. `LANDED.md` lives in the record dir, so it rides the same commit
+  (`close_record.sh` writes it above). The page-source tree is **mirrored**, not overlaid — a file you
+  deleted from it lands as a deletion (#821 invariant 9) — and it gets every staged-set gate the record gets
+  plus the secret scan it had when it landed as its own note PR. A viewer that lives in a **different repo**
+  from the research repo cannot ride this PR — land it its own way and pass `--page-source-external <url>` so
+  the gate records where it went instead of blocking.
 - **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
   experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
   footgun.
@@ -789,9 +843,25 @@ upstream of everything in this ordering.
   *finalizer*. The reason: if you cleared desired-active at the top of Close and then crashed before teardown
   finished, the supervisor would (correctly) refuse to relaunch a not-desired-active run while a pod still bills
   with no brain to tear it down — an orphaned, un-closed session. So keep the run **desired-active until the close
-  path is durably in charge**, then run the finalizer: `run_supervision_record.sh stop <run-id>` for a deliberate
-  stop (a `/quit`/kill — never to be relaunched), or `close <run-id>` for a finished run (marks it inactive). After
-  this, the supervisor will not resurrect the run.
+  path is durably in charge**, then run the finalizer — whose canonical invocation is exactly this
+  (`$BASE_REF` is `origin/<the [github] base_branch of this record's START.md snapshot>`; add `--stop` for a
+  deliberate `/quit`/kill that is never to be relaunched, which maps to the record's `stop` verb instead of
+  `close`):
+  <!-- CLOSE-RECORD-FINALIZE:BEGIN — close_record_smoke.sh extracts and RUNS this block verbatim (#821 invariant 6) -->
+  ```bash
+  scripts/close_record.sh finalize "$RUN_ID" "$REGISTRY_DIR" --base-ref "$BASE_REF"
+  ```
+  <!-- CLOSE-RECORD-FINALIZE:END -->
+  **Durable means MERGED, and the proof is remote, not local (#821 invariant 4):** the finalizer FETCHES
+  `--base-ref` itself and then re-derives that the record dir and `LANDED.md` are present at that
+  remote-tracking ref *and byte-identical* to this record's, because `close_record.sh paperwork` writes
+  `LANDED.md` itself — its mere presence in your worktree would only prove that script ran, never that the
+  close landed. Closing the record un-gates worktree/scratch/session reaping and the worktree holds the only
+  local copy of the record, so this is the same never-default `--base-ref` merged-proof
+  `launch-experiment`'s `launch_record.sh preflight` runs before a launch. A local branch name is refused
+  outright: it is the evidence that proves nothing. If you re-run `paperwork` after landing, re-land the
+  record — the regenerated timestamp is deliberately part of what is compared. Only then does it delegate to
+  `run_supervision_record.sh close <run-id>` (or `stop`). After this, the supervisor will not resurrect the run.
 - **Retro — file feedback** (you are the product's user): file product/scaffold friction via feedback-loop's
   `file-feedback` when installed/configured; record deployment-only incidents or ideas through the consuming instance's
   feedback guidance. Include the design-feedback: list the gaps you hit (mechanical defaults invented +
@@ -931,6 +1001,7 @@ yours to configure mid-run.
 | `EXPERIMENT_SCRATCH_ROOT` | `reap_scratch.sh` — the one root whose direct children are reapable | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; scratch accumulates until the disk fills |
 | `EXPERIMENT_SCRATCH_ARCHIVE_DEST` | `reap_scratch.sh` — the rclone destination root archives land under | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; same accumulation |
 | `SESSION_JANITOR_LIST_CMD` / `_IDLE_CMD` / `_KILL_CMD` | `session_janitor.sh` (the crashed-close backstop, scheduled by the instance) | the backstop doesn't run; only self-reap frees sessions |
+| `EXPERIMENT_LEDGER_EVENT_CMD` | `close_record.sh paperwork` — writes the instance's terminal ledger event (`<cmd> <run> <abstract-outcome> <registry-dir>`; the abstract→concrete status mapping is the instance's ledger recipe, #376) | **exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, and NOTHING written** — nothing wrote the run's terminal event, so every consumer would still read it as open (#473), and paperwork that asserted that event existed would be false (#821 invariant 3) |
 
 `reap_scratch.sh` additionally needs `rclone` on `PATH` and a readable mount table (`/proc/self/mountinfo`)
 — both absent take the same exit-3 recorded-gap path as an unset seam. Everything else this skill depends
@@ -1153,10 +1224,20 @@ through env seams; see the "three seams" note at the top of this skill.
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +
   the routed close report; the transcript survives the kill), and the janitor is the crashed-close backstop, not an
   opt-out. A parked/blocked run keeps its session for resume; no seam configured is a no-op.
-- **The close runs science-first: `RESULTS.md` → close audit → triage → publish chain → land (#819).**
-  Audit once per surface (the design skill's rule) and re-check a fix mechanically instead of re-running the
-  cross-family pass. Nothing the audit can invalidate is built before it runs; the completion boundary (tear
-  down only after a verified upload) is upstream of all of it and does not move.
+- **The close runs science-first: `RESULTS.md` → close audit → triage → publish chain → ONE landing (#819).**
+  Audit once per surface (the design skill's rule), re-check a fix mechanically instead of re-running the
+  cross-family pass, and land the record + page source + `LANDED.md` in one `log-experiment` call. Nothing the
+  audit can invalidate is built before it runs; the completion boundary (tear down only after a verified
+  upload) is upstream of all of it and does not move.
+- **Generate the mechanical close paperwork, author only the judgment (#819).** `close_record.sh paperwork`
+  emits `LANDED.md` / `ARTIFACT_MANIFEST.md` / `REPRODUCTION.md` / the close self-audit checklist / the
+  terminal ledger event from state; `RESULTS.md` and the audit responses stay yours. It never claims what it
+  did not observe — the manifest is written only against a listing byte-verified against the local set this
+  run uploaded, an earlier run's manifest is renamed `*.stale` rather than left answering for this close, and
+  a failed check leaves no partial paperwork at all — and it never invents a terminal status (#376) or a
+  ledger key (#473); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line, never a quiet no-op. Its
+  `finalize` verb fetches `--base-ref` and proves the close MERGED there before un-gating the reaps —
+  evidence a *generator* produced is never evidence its own output landed.
 - **Wait in one call, not one API turn per poll (#819)** — a single capped wait on the driver's own terminal
   marker, never a `sleep`-per-turn loop and never a re-`Read` loop on a task-output file.
 - **Don't redesign** — the brief is locked; design questions go to the designer-of-record, who answers them (not to

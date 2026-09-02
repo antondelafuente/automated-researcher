@@ -1,3 +1,31 @@
+- experiment-lifecycle 0.7.1 (2026-09-02): the close's two SCRIPTS, re-specified as invariants (#821, split
+  from #819 after PR #820 took five CHANGES_REQUESTED rounds on exactly these two files). Each of that PR's
+  nine findings is now a named smoke case that fails on the pre-fix code, and both smokes are wired into
+  required CI. **`close_record.sh` (generated close paperwork).** The listing is read from the lister's
+  STDOUT ALONE — stderr is captured, surfaced verbatim and never parsed, and a stdout line that is not in
+  `rclone lsl` shape is a hard failure rather than an object, because `2>&1` let routine `NOTICE:` lines
+  (exit 0) count as objects: an EMPTY store listed as "1 object, 2026 bytes" with the date prefix summed as
+  a size. `ARTIFACT_MANIFEST.md` is now written only against a listing BYTE-VERIFIED against the local set
+  the run uploaded (`--uploaded-from`, repeatable per #460's per-artifact-completion uploads): ≥1 object,
+  every uploaded file present at a matching size and md5 wherever the store gives one, and nothing in the
+  listing unaccounted for — any failure means no manifest, a non-zero exit and one line saying which.
+  Emission is atomic write-or-nothing (staged in a temp dir, moved into place only after every check and
+  the terminal ledger event), a failed check renames an earlier generated manifest `*.stale` instead of
+  leaving it claiming a verified upload, and a missing seam/`rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line
+  with NOTHING written. `finalize` now FETCHES `--base-ref` and proves the record + `LANDED.md` are present
+  and byte-identical at the remote-tracking ref (a local branch name is refused outright): `paperwork`
+  writes `LANDED.md` itself, so its presence in the worktree only ever proved the generator ran, while
+  closing the supervision record un-gates reaping the worktree that holds the record's only local copy.
+  The canonical invocations live in `run-experiment/SKILL.md` and the smoke EXTRACTS AND RUNS them, so a
+  skill that documents an invocation the script rejects fails CI. **`log-experiment.sh --page-source` (one
+  landing).** Root containment is PHYSICAL and contains-all rather than lexical and disjoint-from-each-path:
+  the repo root normalizes to `.`, which prefix arithmetic read as disjoint from every path, so
+  `--page-source <repo-root>` would have staged the whole repository. The page-source tree is MIRRORED
+  (staged root cleared, then copied) so a deletion lands as a deletion — it was overlaid onto the base
+  checkout, so `git add` never saw removals — narrowed with the same delete semantics by
+  `--page-source-only`; the record root is still overlaid, so a landing without `--page-source` behaves
+  exactly as before. Every staged file's real path is required to be inside its own root, per file by name,
+  and the record root's guards (TEMP.md, the ignored-file guard, the secret scan) run over the page tree.
 - experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
   (#819, skill text only — the scripted-close and one-landing halves are re-specified in #821). Measured
   across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of those minutes in the
