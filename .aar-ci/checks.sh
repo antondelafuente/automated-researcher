@@ -311,6 +311,42 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/
   fi
 fi
 
+# 10c1b. log-experiment page-source smoke (#819; #821 invariant 12): the ONE-LANDING close — the second
+#      staging root's PHYSICAL containment (neither root an ancestor of the other or of the repo root, and a
+#      symlink cannot make an overlapping root look disjoint), its MIRROR semantics (a file deleted from the
+#      page source lands as a deletion, narrowed the same way by --page-source-only), the page-source gate
+#      (a [recipes.viewer] brief must land a page source or record an external one), and the record root's
+#      own guards applied to the page tree (TEMP.md, the ignored-file guard, the secret scan). Each of PR
+#      #820's review findings on this half is a named case that fails on the pre-fix code. Runs when the
+#      script or its smoke changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/log-experiment/scripts/(log-experiment\.sh|log_experiment_page_source_smoke\.sh)$'; then
+  PS_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/log-experiment/scripts/log_experiment_page_source_smoke.sh"
+  if [ -f "$PS_SMOKE" ]; then
+    echo "[checks] log-experiment page-source smoke" >&2
+    bash "$PS_SMOKE" >&2 && ok "log-experiment page-source smoke" || err "log-experiment page-source smoke FAILED"
+  else
+    err "log-experiment.sh changed but log_experiment_page_source_smoke.sh missing — cannot verify the one-landing close"
+  fi
+fi
+
+# 10c1c. close_record smoke (#819; #821 invariant 12): the generated close paperwork — the store listing read
+#      from STDOUT ONLY (rclone's stderr NOTICE/WARNING lines are diagnostics, never counted objects), the
+#      manifest written only against a listing BYTE-VERIFIED against the local uploaded set (an empty
+#      listing, a missing/short/corrupt object or an unexplained surplus → no manifest, non-zero exit),
+#      atomic write-or-nothing with an earlier manifest renamed *.stale, and `finalize` FETCHING --base-ref
+#      to prove the close MERGED before the run-supervision record closes. It also asserts the canonical
+#      invocations documented in run-experiment/SKILL.md are the ones that actually run (a skill documenting
+#      an invocation the script rejects was PR #820's round-1 finding), so a SKILL.md change re-runs it too.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/(scripts/close_record(_smoke)?\.sh|SKILL\.md)$'; then
+  CR_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/close_record_smoke.sh"
+  if [ -f "$CR_SMOKE" ]; then
+    echo "[checks] close_record smoke" >&2
+    bash "$CR_SMOKE" >&2 && ok "close_record smoke" || err "close_record smoke FAILED"
+  else
+    err "close_record.sh (or run-experiment/SKILL.md) changed but close_record_smoke.sh missing — cannot verify the close paperwork"
+  fi
+fi
+
 # 10c2. log-experiment design-stage snapshot-gate smoke (#469): gate_design_stage's addition — a
 #      design-stage record's START.md must carry an instance-profile snapshot that is present, parseable,
 #      and not stale (aar_profile_snapshot.sh check) — the single deterministic enforcement owner that

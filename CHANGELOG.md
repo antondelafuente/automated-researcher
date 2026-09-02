@@ -1,3 +1,85 @@
+- experiment-lifecycle 0.7.1 (2026-09-02): the close's two SCRIPTS, re-specified as invariants (#821, split
+  from #819 after PR #820 took five CHANGES_REQUESTED rounds on exactly these two files). Each of that PR's
+  nine findings is now a named smoke case that fails on the pre-fix code, and both smokes are wired into
+  required CI. **`close_record.sh` (generated close paperwork).** The listing is read from the lister's
+  STDOUT ALONE — stderr is captured, surfaced verbatim and never parsed, and a stdout line that is not in
+  `rclone lsl` shape is a hard failure rather than an object, because `2>&1` let routine `NOTICE:` lines
+  (exit 0) count as objects: an EMPTY store listed as "1 object, 2026 bytes" with the date prefix summed as
+  a size. `ARTIFACT_MANIFEST.md` is now written only against a listing BYTE-VERIFIED against the local set
+  the run uploaded (`--uploaded-from`, repeatable per #460's per-artifact-completion uploads): ≥1 object,
+  every uploaded file present at a matching size and md5 wherever the store gives one, and nothing in the
+  listing unaccounted for — any failure means no manifest, a non-zero exit and one line saying which. That
+  local set must say ONE thing about each path, so two legs carrying the same relative path fail closed when
+  they differ in SIZE **or** in BYTES — a same-size/different-byte pair collapsed into a single entry that
+  was then hashed from whichever leg was seen first, letting a corrupted second leg ride a matching first
+  leg into a "verified" manifest; byte-identical copies stay legitimate, since two legs uploading the same
+  file say one thing. That verification is only as good as the COMPLETENESS of the two sets it runs over, so
+  the sets are built total-or-fatal: no enumeration or hashing step runs behind a process substitution or a
+  pipe whose exit status is dropped (a `find` that hit an unreadable subdirectory used to hand the verifier
+  a well-formed but SHORT local set, which it then certified the store against as though complete), no
+  per-file step is silently skipped (a local copy that cannot be hashed is a hard failure), and the set
+  counted must equal the set compared — asserted at the point of comparison, which
+  is what catches a listing that repeats a path into `objects`/`total bytes` while the verification ran over
+  the distinct ones. The same construction rule is applied to REPRODUCTION.md's committed-script list, and
+  the same sweep found it in `log-experiment.sh`'s staged-content guards: `secret_scan`, `symlink_scan`,
+  `temp_handoff_scan` and `check_excluded_claim` all read `git diff --cached` through a process substitution
+  (or a `|| true` needed for grep's no-match exit), so a listing that failed partway left them scanning a
+  silently shortened set — guards that are fail-closed on their own errors were fail-OPEN on the enumeration
+  feeding them.
+  "Hash where the store gives one" has no automatic downgrade path: a `rclone hashsum md5` that FAILS is a
+  BLOCK (naming its stderr), and so is a store that reports hashes this box has no working `md5sum` to check,
+  or a hash listing whose paths map onto none of the listed objects (which used to read as the benign "the
+  store's hash listing covered none of them" and switched hash verification off wholesale). Either the close
+  hashes, or the INVOCATION says on its face that it cannot: the new `--size-only` attempts no hashsum at all
+  and records `size-only (caller-declared: store has no md5)`, so the claim lives on the invocation rather
+  than being inferred from a failure. A store that SUCCESSFULLY reports no hashes is unchanged — that is an
+  observation, and it is what A2's "where the store gives one" carve-out actually covers.
+  Emission is atomic write-or-nothing (staged in a temp dir, moved into place only after every check and
+  the terminal ledger event), and its other half — what an EARLIER close left behind — is now ONE rule on ONE
+  exit path instead of a rename bolted onto the one failure site that had been reported: **a generated
+  artifact this close did not stage a fresh copy of is renamed `*.stale` before exit, for any reason, at any
+  point after the record dir is resolved.** Per-site staling only covered a failed store listing, so any
+  failure upstream of it — a failed local enumeration, a bad `--outcome`, the exit-3 gap path — exited with
+  the earlier `ARTIFACT_MANIFEST.md` still answering "the upload was verified" for a close that observed
+  nothing. `LANDED.md` is held to the same rule (it is the certificate `finalize` byte-compares before
+  un-gating the reaps), `--no-artifacts` is now that same rule rather than a special case, and the two
+  artifacts that cannot be renamed aside — the terminal ledger event and the run-supervision close — are
+  ORDERED instead: the event is the last thing before the paperwork moves into place, and the record closes
+  only after the remote landing is proven. A missing seam/`rclone` is still exit 3 + a `CLOSE-RECORD-GAP:`
+  line with NOTHING written. `finalize` now FETCHES `--base-ref` and proves the record + `LANDED.md` are present
+  and byte-identical at the remote-tracking ref (a local branch name is refused outright): `paperwork`
+  writes `LANDED.md` itself, so its presence in the worktree only ever proved the generator ran, while
+  closing the supervision record un-gates reaping the worktree that holds the record's only local copy.
+  The canonical invocations live in `run-experiment/SKILL.md` and the smoke EXTRACTS AND RUNS them, so a
+  skill that documents an invocation the script rejects fails CI. `paperwork` also takes
+  `--page-source-external <url>`, mutually exclusive with `--page-source` exactly as in `log-experiment`, so
+  `LANDED.md` renders the three states that exist rather than two: an external viewer is recorded WHERE it
+  landed and stated NOT to have ridden this PR. Passing that URL as `--page-source` would have claimed it rode
+  the record's own PR and dropping the flag would have claimed the `START.md` snapshot carried no
+  `[recipes.viewer]` recipe at all, so the external-viewer flow this same skill documents had no truthful
+  invocation. **`log-experiment.sh --page-source` (one
+  landing).** Root containment is PHYSICAL and contains-all rather than lexical and disjoint-from-each-path:
+  the repo root normalizes to `.`, which prefix arithmetic read as disjoint from every path, so
+  `--page-source <repo-root>` would have staged the whole repository. The page-source tree is MIRRORED
+  (staged root cleared, then copied) so a deletion lands as a deletion — it was overlaid onto the base
+  checkout, so `git add` never saw removals — narrowed with the same delete semantics by
+  `--page-source-only`; the record root is still overlaid, so a landing without `--page-source` behaves
+  exactly as before. Every staged file's real path is required to be inside its own root, per file by name,
+  and the record root's guards (TEMP.md, the ignored-file guard, the secret scan) run over the page tree.
+  What the PR's approval body CLAIMS about the page source is derived from the staged set at the point the
+  claim is made and PER SELECTED PATH — never from the flag's presence, and never aggregated over the root.
+  The gate runs before staging, so an empty (or wholly ignore-excluded, `--skip-ignored`) page-source dir
+  contributed nothing while the record's own changes kept the commit non-empty, and the PR merged saying the
+  page source rode it with no page source in it; and a dashboard root is multi-tenant (which is exactly what
+  `--page-source-only` is for), so a root-level "something is tracked here" would let a CO-TENANT's file
+  answer for a selected path that lands nothing. Each selected path — the root itself, or one entry per
+  `--page-source-only` path — is now judged on its own: paths staged under it read as *"rides this same PR"*
+  with the count; none staged but the base branch already carrying that path reads as *unchanged* (the honest
+  wording for re-logging a record whose page already landed, and no deadlock for it); neither BLOCKS, naming
+  the selected paths that reach the commit nowhere. And because the page root mirrors, `--page-source-only`
+  now accepts a path that is already gone locally as long as the base branch has it — naming one deletion no
+  longer requires widening the allowlist to a surviving parent dir, while a path in neither place is still
+  refused as a typo.
 - experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
   (#819, skill text only — the scripted-close and one-landing halves are re-specified in #821). Measured
   across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of those minutes in the
