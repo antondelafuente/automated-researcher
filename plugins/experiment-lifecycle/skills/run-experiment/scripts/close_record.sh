@@ -35,14 +35,23 @@
 #      of how they are built, not of the comparison — see the "A2 IS A CLAIM ABOUT TWO COMPLETE SETS" block
 #      below for the total-or-fatal / no-silent-per-file-skip / counted-equals-compared rules the whole
 #      section implements, and why they are derived there once instead of argued per line (#823 rounds 3, 5).
-#   3. ATOMIC WRITE-OR-NOTHING. Every generated file is written to a temp dir inside the record dir and moved
-#      into place only after every check has passed and the terminal ledger event has been written. A failed
-#      run leaves no partial artifact — and a PREVIOUS generated manifest is renamed `*.stale` rather than
-#      left standing as the record's answer, claiming a verified upload this close did not observe (#820
-#      round 2: a failed re-list left the earlier manifest in place while the gap line said there was none).
-#      This is why a missing seam / absent `rclone` fails BEFORE any write (exit 3, #804's loud-gap shape)
-#      instead of emitting the rest: "the record carries no unbacked paperwork" is a property of the RECORD,
-#      not of one invocation.
+#      "Hash where the store gives one" has NO automatic downgrade path (#823 round 6): either this close
+#      hashes, or the INVOCATION says on its face that it cannot (`--size-only`) — see the
+#      "THREE HASH STATES" block in observe_store.
+#   3. ATOMIC WRITE-OR-NOTHING, AND NOTHING SURVIVES THAT CLAIMS THIS CLOSE SUCCEEDED. Every generated file is
+#      written to a temp dir inside the record dir and moved into place only after every check has passed and
+#      the terminal ledger event has been written, so a failed run leaves no partial artifact. The other half
+#      is what an EARLIER close left behind, derived once as one rule (#823 round 6) and implemented as ONE
+#      EXIT PATH (close_exit) rather than per failure site:
+#          a generated artifact this close did not stage a FRESH copy of is renamed `*.stale` before exit —
+#          for any reason, at any point after the record dir is known.
+#      #820 round 2 is the incident: a failed re-list left the earlier ARTIFACT_MANIFEST.md in place, still
+#      answering "the upload was verified", while the failure line said there was no manifest. Per-failure-site
+#      staling closed that one path and left every other one open (#823 round 6's P0: a failed local
+#      enumeration died before the stale rename ever ran). One exit path cannot be partially applied.
+#      This is also why a missing seam / absent `rclone` fails BEFORE any write (exit 3, #804's loud-gap
+#      shape) instead of emitting the rest: "the record carries no unbacked paperwork" is a property of the
+#      RECORD, not of one invocation.
 #   4. FINALIZE PROVES THE LANDING FROM THE REMOTE, NEVER FROM LOCAL FILES. `finalize` requires `--base-ref`,
 #      FETCHES it, and checks the record + `LANDED.md` at the fetched remote-tracking ref. `paperwork` writes
 #      LANDED.md itself, so its presence in the working tree only ever proved that this same script just ran
@@ -73,7 +82,7 @@
 # invocation this script would reject fails the smoke, #820 round 1):
 #   close_record.sh paperwork <run-id> <registry-dir> --outcome <abstract-outcome>
 #                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-#                   [--page-source <path> | --page-source-external <url>]
+#                   [--size-only] [--page-source <path> | --page-source-external <url>]
 #                   [--pull-cmd <cmd>]... [--repro-diff <file>]
 #   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 #
@@ -106,7 +115,7 @@ usage() {
 usage:
   close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-                  [--page-source <path> | --page-source-external <url>]
+                  [--size-only] [--page-source <path> | --page-source-external <url>]
                   [--pull-cmd <cmd>]... [--repro-diff <file>]
   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 USAGE
@@ -116,12 +125,38 @@ USAGE
 # ---------------------------------------------------------------------------------------------------------
 # Generated-file staging (invariant 3): every emission is written into $TMPDIR_GEN first and moved into
 # place by commit_generated, so a failing check leaves the record exactly as it was.
+#
+# A3 IS A PROPERTY OF THE RECORD, NOT OF ONE INVOCATION — so it is derived here once and implemented as ONE
+# EXIT PATH (close_exit), never per failure site. The rule:
+#
+#     a generated artifact this close did not stage a FRESH copy of is renamed `*.stale` before exit —
+#     for any reason, at any point after the record dir is known.
+#
+# Why the whole set and not just the manifest (#823 round 6 asked the question of each artifact in turn):
+#   - ARTIFACT_MANIFEST.md is the incident (#820 round 2): it answers "the upload was verified" for a record
+#     whose current close observed no such thing.
+#   - LANDED.md is the same claim in the same record — its artifact-root cell says "(N objects, B bytes,
+#     byte-verified)" and its ledger row asserts a terminal event exists. It is also the certificate
+#     `finalize` byte-compares against the remote before un-gating the reaps, so a close that failed must not
+#     leave one standing: `finalize` refusing until a good close is re-landed is the fail-closed direction.
+#   - REPRODUCTION.md and CLOSE_SELF_AUDIT.md are covered by the SAME rule rather than carved out. They make
+#     no success claim of their own (the checklist ships every box ☐ by #512), but they carry THIS close's
+#     derived evidence hints — object counts, the committed-script list — and a re-run already regenerates
+#     both wholesale on the success path, so "the copy in the record is the copy this close produced" costs
+#     nothing extra and leaves no artifact needing a per-file judgment call.
+#   - The terminal ledger event and the run-supervision close cannot be renamed aside, so they are ORDERED
+#     instead: the event is the last thing written before the commit (nothing before it has touched the
+#     record), and the supervision record is closed by `finalize` only after the remote landing is proven.
+#     See the notes at each of those two sites.
+# A file WITHOUT the generated-by marker is hand-authored and is never ours to move — on any path.
 # ---------------------------------------------------------------------------------------------------------
 TMPDIR_GEN=""
 declare -a GEN_NAMES=() WROTE=() KEPT=() STALED=()
-
-cleanup_gen() { [ -n "$TMPDIR_GEN" ] && rm -rf "$TMPDIR_GEN"; return 0; }
-trap cleanup_gen EXIT
+# What a `paperwork` close is SUPPOSED to produce, named statically: close_exit has to know the set even when
+# this run died before staging a single file, so it cannot be read off GEN_NAMES.
+A3_ARTIFACTS=(LANDED.md ARTIFACT_MANIFEST.md REPRODUCTION.md CLOSE_SELF_AUDIT.md)
+A3_RECORD_DIR=""            # set by cmd_paperwork the moment the record dir is resolved; arms the rule above
+declare -A A3_FRESH=()      # artifact name -> this close settled it (staged a fresh copy, or left a hand-authored one)
 
 # stage_generated <name> <<'EOF' … : stage one generated file's body. Nothing touches the record dir yet.
 stage_generated() {
@@ -141,10 +176,17 @@ commit_generated() {
     if [ -e "$dir/$name" ] && ! grep -qF "$GEN_MARKER" "$dir/$name" 2>/dev/null; then
       note "kept hand-authored $name (no generated-by marker) — not overwritten"
       KEPT+=("$name")
+      A3_FRESH["$name"]=1     # settled: the human owns this one, so close_exit must not touch it either
       continue
     fi
-    mv -f "$TMPDIR_GEN/$name" "$dir/$name" || die "could not move generated $name into $dir"
+    # A same-directory rename (the staging dir is created INSIDE the record dir precisely so this is one
+    # rename(2)), so this is close to unreachable — but it is the only step that can leave the record
+    # PARTIALLY committed, so it names exactly what landed and what did not instead of failing vaguely, and
+    # close_exit then stales every artifact not in A3_FRESH (the ones this run could not move into place).
+    mv -f "$TMPDIR_GEN/$name" "$dir/$name" \
+      || die "could not move generated $name into $dir (staged: ${GEN_NAMES[*]}; moved into place so far: ${WROTE[*]:-none}) — the terminal ledger event is already written, so fix the record dir and re-run 'paperwork' to complete the paperwork it asserts"
     WROTE+=("$name")
+    A3_FRESH["$name"]=1
   done
 }
 
@@ -153,17 +195,47 @@ commit_generated() {
 # earlier close observed) and it is not left in place (it would keep answering "the upload was verified" for
 # a record whose current close observed no such thing — #820 round 2). A file without GEN_MARKER is
 # hand-authored and is never ours to move.
+# It RETURNS non-zero rather than calling `die`: its only caller is close_exit, and a `die` from inside an
+# EXIT trap is exactly how a fail-close path loses its own error.
 stale_generated() {
-  local path="$1"
+  local path="$1" base; base="$(basename "$path")"
   [ -e "$path" ] || return 0
   if ! grep -qF "$GEN_MARKER" "$path" 2>/dev/null; then
-    note "kept hand-authored $(basename "$path") (no generated-by marker) — not renamed"
+    note "kept hand-authored $base (no generated-by marker) — not renamed"
     return 0
   fi
-  mv -f "$path" "$path.stale" || die "could not rename $(basename "$path") aside"
-  STALED+=("$(basename "$path")")
-  note "renamed $(basename "$path") -> $(basename "$path").stale — this close observed no verified listing to back it"
+  if ! mv -f "$path" "$path.stale"; then
+    echo "BLOCK: could not rename $base aside in $(dirname "$path") — it is still standing as this record's answer for a close that did not produce it; move it aside by hand before landing this record" >&2
+    return 1
+  fi
+  STALED+=("$base")
+  note "renamed $base -> $base.stale — this close staged no fresh copy, so it no longer answers for this record"
+  return 0
 }
+
+# close_exit — THE one exit path (invariant 3). It runs on EVERY way out of a `paperwork` run: a `die`, the
+# `return 3` gap path, an unexpected `set -e` failure, a signal-free crash, or a clean success. That is the
+# whole point: there is no failure site to remember to handle, because no failure site handles it.
+# `finalize` never arms it (A3_RECORD_DIR stays empty) — it certifies a record that ALREADY landed, so moving
+# that record's artifacts aside would corrupt the very thing it is proving.
+close_exit() {
+  local rc=$?
+  trap - EXIT                     # never re-enter, whatever happens below
+  local name
+  if [ -n "$A3_RECORD_DIR" ]; then
+    for name in "${A3_ARTIFACTS[@]}"; do
+      if [ -z "${A3_FRESH["$name"]:-}" ]; then
+        stale_generated "$A3_RECORD_DIR/$name" || rc=1
+      fi
+    done
+    if [ "${#STALED[@]}" -ne 0 ]; then
+      note "renamed aside (this close staged no fresh copy of them): ${STALED[*]}"
+    fi
+  fi
+  [ -z "$TMPDIR_GEN" ] || rm -rf "$TMPDIR_GEN"
+  exit "$rc"
+}
+trap close_exit EXIT
 
 # ---------------------------------------------------------------------------------------------------------
 # Store observation + byte verification (invariants 1 + 2)
@@ -184,7 +256,8 @@ stale_generated() {
 #       enumerated local rows, the distinct local paths, the counted listing lines and the distinct listed
 #       paths all have to reduce to one number before a manifest may publish it.
 # Globals the verifier fills: LISTING (raw stdout, verbatim), OBJECTS, BYTES, HASH_MODE.
-LISTING=""; OBJECTS=0; BYTES=0; HASH_MODE="size-only (the store reported no hashes)"
+LISTING=""; OBJECTS=0; BYTES=0; HASH_MODE=""
+SIZE_ONLY=0         # --size-only: the caller declares on the invocation's face that this store has no md5
 LOCAL_ROWS=0        # rows `find` actually emitted across every --uploaded-from leg (counted, never assumed)
 LOCAL_DEDUPED=0     # rows collapsed onto an already-seen rel path (byte-identical multi-leg copies, #460)
 declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
@@ -322,10 +395,22 @@ observe_store() {
     return 1
   fi
 
-  # Hashes WHERE THE STORE GIVES ONE. A store that reports none is not a failure — sizes already matched —
-  # but rule (b) says the manifest must distinguish that from a hash pass that could not RUN. Three different
-  # size-only reasons, each named, because "size-only (the store reported no hashes)" standing in for "the
-  # hash command exited non-zero" is a false statement about the store in the permanent record.
+  # THREE HASH STATES, AND NOTHING ELSE (#823 round 6). A2 verifies hashes WHERE THE STORE GIVES ONE, so the
+  # manifest may end up reporting exactly one of:
+  #   md5-verified (N of M …)                        the store gave hashes and every one of them was checked;
+  #   size-only (the store reported no hashes)       OBSERVED: `rclone hashsum md5` SUCCEEDED and reported
+  #                                                  nothing, which is the store saying it has none;
+  #   size-only (caller-declared: store has no md5)  DECLARED: --size-only, so no hashsum was attempted at all.
+  # Every other outcome — a hashsum that FAILED, a store that reports hashes this box cannot check, a hash
+  # listing whose paths do not map onto the listed objects — is a `die`, not a downgrade. There is no
+  # automatic path from "this close could not hash" to "the manifest reports a size-only check": either the
+  # close hashes, or the INVOCATION says on its face that it cannot. Naming the reason in the manifest (what
+  # round 5 did) is still a downgrade nobody authorized — a close that silently stops hashing is a weaker
+  # check than the one #821's A2 specifies, and the record cannot re-derive that it was ever asked for.
+  if [ "$SIZE_ONLY" = 1 ]; then
+    HASH_MODE="size-only (caller-declared: store has no md5 — \`--size-only\` was passed, so NO hashsum was attempted against this root)"
+    return 0
+  fi
   local hs_out hs_err hs_rc=0 want got
   hs_out="$TMPDIR_GEN/.hashsum.out"; hs_err="$TMPDIR_GEN/.hashsum.err"
   rclone hashsum md5 "$root" > "$hs_out" 2> "$hs_err" || hs_rc=$?
@@ -334,50 +419,65 @@ observe_store() {
     note "rclone hashsum stderr (diagnostics, not hash content):"
     sed 's/^/  | /' "$hs_err" >&2
   fi
-  # Probed by RUNNING it, not by `command -v`: a name on PATH is not a working hasher, and that difference
-  # decides whether a per-file failure below is a capability gap (explicit size-only) or an unreadable local
-  # copy (hard failure). Either way it is recorded — never a silent skip.
-  local md5_ok=1
-  printf '' | md5sum >/dev/null 2>&1 || md5_ok=0
   if [ "$hs_rc" -ne 0 ]; then
-    HASH_MODE="size-only (the store's md5 listing FAILED: \`rclone hashsum md5\` exit $hs_rc, its stderr surfaced in this close's log — NO hash was checked, and this close cannot say whether the store carries hashes at all)"
-  elif [ ! -s "$hs_out" ]; then
-    HASH_MODE="size-only (the store reported no hashes)"
-  elif [ "$md5_ok" -eq 0 ]; then
-    HASH_MODE="size-only (the store DID report hashes, but no working md5sum is available here, so the local side could not be hashed — NO hash was checked)"
-  else
-    local hs_unparsed=0
-    while IFS= read -r line || [ -n "$line" ]; do
-      if [[ "$line" =~ ^([0-9a-fA-F]{32})[[:space:]]+(.+)$ ]]; then
-        STORE_HASH["${BASH_REMATCH[2]}"]="${BASH_REMATCH[1],,}"
-      elif [ -n "${line//[[:space:]]/}" ]; then
-        # rclone prints a blank hash field for an object it has no md5 for. Counted, not dropped: the count
-        # is what stops "md5-verified (N of M)" from quietly meaning "M-N were never looked at".
-        hs_unparsed=$((hs_unparsed + 1))
-      fi
-    done < "$hs_out"
-    local checked=0
-    for p in "${!LOCAL_SIZE[@]}"; do
-      want="${STORE_HASH["$p"]:-}"; [ -n "$want" ] || continue
-      got="$(local_md5 "$p")" || {
-        echo "BLOCK: the store reports an md5 for '$p' but its local copy (${LOCAL_SRC["$p"]}) could NOT be hashed — no ARTIFACT_MANIFEST.md was written: md5sum works on this box, so this is an unreadable or vanished local file, and an uploaded file this close cannot re-hash is one it cannot verify (skipping it silently is how a partial check reads as a complete one)" >&2
-        return 1
-      }
-      checked=$((checked + 1))
-      [ "$got" = "$want" ] || hashbad+=("$p (local $got vs store $want)")
-    done
-    if [ "${#hashbad[@]}" -gt 0 ]; then
-      echo "BLOCK: ${#hashbad[@]} uploaded file(s) are in the listing of '$root' at a matching size but a DIFFERENT md5 than the local copy — no ARTIFACT_MANIFEST.md was written (same size, different bytes is a corrupted upload, not a verified one): $(printf '%s; ' "${hashbad[@]:0:5}")" >&2
-      return 1
-    fi
-    if [ "$checked" -gt 0 ]; then
-      HASH_MODE="md5-verified ($checked of $OBJECTS object(s) carried a store md5, and every one matched)"
-    else
-      HASH_MODE="size-only (the store's hash listing covered none of the $OBJECTS listed object(s))"
-    fi
-    [ "$hs_unparsed" -eq 0 ] \
-      || HASH_MODE="$HASH_MODE; $hs_unparsed store hash line(s) carried no usable md5 and were NOT hash-checked"
+    echo "BLOCK: hashing the artifact store '$root' FAILED (rclone hashsum md5 exit $hs_rc; its stderr is above) — no ARTIFACT_MANIFEST.md was written: a FAILED hash listing is not the store saying it has no hashes, so this close cannot honour A2's 'hash where the store gives one' and will not record a size-only check nobody asked for. Fix the hash listing and re-run — or, if this backend genuinely cannot report md5 at all, re-run with --size-only, which attempts no hashsum and says so on the manifest's face" >&2
+    return 1
   fi
+  if [ ! -s "$hs_out" ]; then
+    HASH_MODE="size-only (the store reported no hashes)"
+    return 0
+  fi
+  # The store DID report hashes, so from here on A2 requires them CHECKED. The local hasher is probed by
+  # RUNNING it, not by `command -v` (a name on PATH is not a working hasher) — and a box that cannot hash is
+  # a hard failure, not a size-only fallback: --size-only is not the escape hatch for it either, because that
+  # flag declares something about the STORE which this very listing just disproved.
+  if ! printf '' | md5sum >/dev/null 2>&1; then
+    echo "BLOCK: '$root' DOES report md5 hashes, but no working md5sum is available here, so the local side of the comparison could not be hashed — no ARTIFACT_MANIFEST.md was written: A2 requires the hash to be checked wherever the store gives one. Re-run the close on a box with a working md5sum (NOT with --size-only: it declares that the store has no md5, which this hash listing contradicts)" >&2
+    return 1
+  fi
+  local hs_unparsed=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^([0-9a-fA-F]{32})[[:space:]]+(.+)$ ]]; then
+      STORE_HASH["${BASH_REMATCH[2]}"]="${BASH_REMATCH[1],,}"
+    elif [ -n "${line//[[:space:]]/}" ]; then
+      # rclone prints a blank hash field for an object it has no md5 for. Counted, not dropped: the count
+      # is what stops "md5-verified (N of M)" from quietly meaning "M-N were never looked at".
+      hs_unparsed=$((hs_unparsed + 1))
+    fi
+  done < "$hs_out"
+  local checked=0
+  for p in "${!LOCAL_SIZE[@]}"; do
+    want="${STORE_HASH["$p"]:-}"; [ -n "$want" ] || continue
+    got="$(local_md5 "$p")" || {
+      echo "BLOCK: the store reports an md5 for '$p' but its local copy (${LOCAL_SRC["$p"]}) could NOT be hashed — no ARTIFACT_MANIFEST.md was written: md5sum works on this box, so this is an unreadable or vanished local file, and an uploaded file this close cannot re-hash is one it cannot verify (skipping it silently is how a partial check reads as a complete one)" >&2
+      return 1
+    }
+    checked=$((checked + 1))
+    [ "$got" = "$want" ] || hashbad+=("$p (local $got vs store $want)")
+  done
+  if [ "${#hashbad[@]}" -gt 0 ]; then
+    echo "BLOCK: ${#hashbad[@]} uploaded file(s) are in the listing of '$root' at a matching size but a DIFFERENT md5 than the local copy — no ARTIFACT_MANIFEST.md was written (same size, different bytes is a corrupted upload, not a verified one): $(printf '%s; ' "${hashbad[@]:0:5}")" >&2
+    return 1
+  fi
+  # Rule (c) on the HASH side: the hashes given are the hashes checked. Every usable md5 the store reported
+  # has to belong to an object this close verified — otherwise the hash listing and the object listing
+  # describe different sets, and "md5-verified (N of M)" is a count over a set nobody reconciled. The
+  # degenerate form of this is what makes it worth asserting: a hash listing whose paths are all formatted
+  # differently from the listing's (an `./` prefix, say) matches NOTHING, which used to read as the benign
+  # "the store's hash listing covered none of the listed objects" and turned hash verification off wholesale.
+  if [ "${#STORE_HASH[@]}" -ne "$checked" ]; then
+    local -a unmatched=()
+    for p in "${!STORE_HASH[@]}"; do [ -n "${LOCAL_SIZE["$p"]:-}" ] || unmatched+=("$p"); done
+    echo "BLOCK: the store reported ${#STORE_HASH[@]} usable md5(s) for '$root' but only $checked of them belong to an object this close verified — no ARTIFACT_MANIFEST.md was written: the hash listing and the object listing describe different sets, so no hash count over them can be trusted (unmatched hash path(s): $(printf '%s ' "${unmatched[@]:0:5}"))" >&2
+    return 1
+  fi
+  if [ "$checked" -gt 0 ]; then
+    HASH_MODE="md5-verified ($checked of $OBJECTS object(s) carried a store md5, and every one matched)"
+  else
+    HASH_MODE="size-only (the store's hash listing covered none of the $OBJECTS listed object(s))"
+  fi
+  [ "$hs_unparsed" -eq 0 ] \
+    || HASH_MODE="$HASH_MODE; $hs_unparsed store hash line(s) carried no usable md5 and were NOT hash-checked"
   return 0
 }
 
@@ -408,6 +508,7 @@ cmd_paperwork() {
       --artifact-root) [ "$#" -ge 2 ] || die "--artifact-root requires a value"; artifact_root="$2"; shift 2 ;;
       --uploaded-from) [ "$#" -ge 2 ] || die "--uploaded-from requires a value"; UPLOADED_FROM+=("$2"); shift 2 ;;
       --no-artifacts)  no_artifacts=1; shift ;;
+      --size-only)     SIZE_ONLY=1; shift ;;
       --page-source)   [ "$#" -ge 2 ] || die "--page-source requires a value";   page_source="$2"; shift 2 ;;
       --page-source-external)
                        [ "$#" -ge 2 ] || die "--page-source-external requires a value"; page_source_external="$2"; shift 2 ;;
@@ -423,6 +524,9 @@ cmd_paperwork() {
 
   [ -d "$dir" ] || die "not a directory: $dir"
   dir="$(cd "$dir" && pwd)"
+  # The record dir is now KNOWN, which is the moment invariant 3's one exit path arms: from here on, however
+  # this run ends, close_exit renames aside every generated artifact it did not stage a fresh copy of.
+  A3_RECORD_DIR="$dir"
   local exp; exp="$(basename "$dir")"
 
   # #376: the abstract outcome is the caller's to state and the script's to validate — never to guess.
@@ -434,6 +538,7 @@ cmd_paperwork() {
   if [ "$no_artifacts" = 1 ]; then
     [ -z "$artifact_root" ] || die "--artifact-root and --no-artifacts are mutually exclusive"
     [ "${#UPLOADED_FROM[@]}" -eq 0 ] || die "--uploaded-from has nothing to verify against under --no-artifacts (which asserts this run stored nothing) — drop one of them"
+    [ "$SIZE_ONLY" = 0 ] || die "--size-only has no store to hash under --no-artifacts (which asserts this run stored nothing) — drop one of them"
   else
     [ -n "$artifact_root" ] || die "one of --artifact-root <rclone-dest> or --no-artifacts is required — a record with heavy artifacts needs the ARTIFACT_MANIFEST.md that pins where they are (#232); an API-only run with nothing in the store says so explicitly"
     [ "${#UPLOADED_FROM[@]}" -gt 0 ] || die "--artifact-root needs at least one --uploaded-from <local-dir>: the manifest is written only when the store listing is BYTE-VERIFIED against the local set this run uploaded (#821 invariant 2), and without that local set there is nothing to verify against — a listing on its own only says what is in the bucket, never that YOUR artifacts are"
@@ -474,12 +579,10 @@ cmd_paperwork() {
   if [ "$no_artifacts" = 0 ]; then
     local_artifact_set "${UPLOADED_FROM[@]}"
     [ "${#LOCAL_SIZE[@]}" -gt 0 ] || die "--uploaded-from named no files (${UPLOADED_FROM[*]}) — an empty local set would make every listing 'verified' against nothing; pass the dir(s) whose contents were uploaded, or --no-artifacts if this run stored nothing"
-    if ! observe_store "$artifact_root"; then
-      # Invariant 2 + 3: no manifest, nothing else written either, and any earlier generated manifest is
-      # moved aside so the record stops claiming a verified upload this close could not confirm.
-      stale_generated "$dir/ARTIFACT_MANIFEST.md"
-      exit 1
-    fi
+    # Invariant 2: no manifest, and nothing else written either. The earlier manifest (and LANDED.md) being
+    # moved aside is NOT handled here — that is close_exit's job for every failure site alike, this one
+    # included; handling it here is what left the sites below it uncovered (#823 round 6's P0).
+    observe_store "$artifact_root" || exit 1
     # Derived BEFORE the heredoc, with the status checked: a command substitution that fails inside a heredoc
     # does not fail the `cat` around it, so `$(sort … | head …)` there would embed a silently truncated
     # "largest objects" block into a manifest that reports itself as verified.
@@ -642,21 +745,25 @@ Re-CHECK by inspection. "I ran the step" ≠ "the state is right". Every box sta
 EOF
 
   # ---- terminal ledger event, through the instance seam (#473/#376/#338) ----
-  # Written BEFORE the generated files are moved into place: LANDED.md states that this event exists, so a
-  # seam that fails must leave no paperwork asserting it (invariant 3 + 5).
+  # The one A3 artifact that CANNOT be renamed aside — the seam is write-only — so ordering is the whole
+  # guarantee, and it is deliberately the LAST thing that happens before the commit: every check has passed,
+  # and nothing before this line has touched the record. A seam that fails is a `die`, so the paperwork
+  # asserting the event never lands and close_exit takes any earlier close's copies out of the record with
+  # it (invariant 3 + 5). The residual exposure is the reverse order — an event written and then a commit
+  # that could not complete — which is why commit_generated names exactly what did and did not land.
   $EXPERIMENT_LEDGER_EVENT_CMD "$exp" "$outcome" "$dir" \
     || die "EXPERIMENT_LEDGER_EVENT_CMD failed for $ledger_line — NOTHING was written: the run has no terminal ledger event, so every consumer still reads it as open (#473); fix the seam or write the event per your ledger recipe, then re-run"
   note "terminal ledger event written via EXPERIMENT_LEDGER_EVENT_CMD ($ledger_line)"
 
   # ---- every check passed: move the paperwork into place (invariant 3) ----
   commit_generated "$dir"
-  # --no-artifacts asserts this run stored nothing, so an earlier close's manifest pinning a store is
-  # exactly as false as an unbacked one — it does not survive as the record's answer either.
-  [ "$no_artifacts" = 1 ] && stale_generated "$dir/ARTIFACT_MANIFEST.md"
 
-  [ "${#WROTE[@]}"  -eq 0 ] || note "wrote: ${WROTE[*]}"
-  [ "${#KEPT[@]}"   -eq 0 ] || note "kept (hand-authored): ${KEPT[*]}"
-  [ "${#STALED[@]}" -eq 0 ] || note "renamed aside (unbacked by this close): ${STALED[*]}"
+  [ "${#WROTE[@]}" -eq 0 ] || note "wrote: ${WROTE[*]}"
+  [ "${#KEPT[@]}"  -eq 0 ] || note "kept (hand-authored): ${KEPT[*]}"
+  # Nothing stales an earlier ARTIFACT_MANIFEST.md here on the --no-artifacts path any more, and nothing
+  # needs to: --no-artifacts stages no manifest, so close_exit's one rule already renames the earlier one
+  # aside — an assertion that this run stored nothing is exactly as incompatible with a manifest pinning a
+  # store as a failed listing is. The special case existed only because the rule did not.
   return 0
 }
 
@@ -721,6 +828,13 @@ cmd_finalize() {
     || die "${prefix}LANDED.md at $base_ref differs from this working tree's — the landed paperwork is not the paperwork this close produced (a re-run of 'paperwork' after landing, or an earlier close of the same dir still standing in for this one); re-land the record so what is merged is what this close certifies, then re-run"
   note "close landed: ${prefix}LANDED.md matches $base_ref (fetched from $remote)"
 
+  # The supervision close is the other A3 artifact that cannot be renamed aside, and it is the most dangerous
+  # one to leave in a success-shaped state: closing the record un-gates reaping the worktree that holds the
+  # record's only local copy. Same answer as the ledger event — ORDER. It runs only after every proof above
+  # passed, and a helper that fails is loud and exit 1, so the record stays desired-active and reaping stays
+  # gated. `finalize` writes no generated artifact at all and deliberately does not arm close_exit
+  # (A3_RECORD_DIR stays empty): the record it certifies has ALREADY landed, so renaming its paperwork aside
+  # on a failed finalize would corrupt the very landing it just proved.
   local rsr="$SELF_DIR/run_supervision_record.sh"
   [ -x "$rsr" ] || die "missing/non-executable $rsr — it ships alongside close_record.sh; this install is incomplete"
   "$rsr" "$verb" "$run_id" || die "run_supervision_record.sh $verb $run_id failed — the record is still desired-active; do NOT reap the worktree/scratch/session until it closes cleanly"

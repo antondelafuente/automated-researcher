@@ -16,14 +16,23 @@
 #               set, and the store was then certified against it as though it were complete (#823 round 5, P0).
 #   regression: A2-2 — a listing that repeated a path counted it twice into `objects`/`total bytes` while the
 #               verification ran over the distinct paths, so the manifest published a count it never compared.
-#   regression: A2-3 — a FAILED `rclone hashsum md5` was recorded as "size-only (the store reported no
-#               hashes)": a false statement about the store, indistinguishable from a store that has none.
+#   regression: A2-3 — a FAILED `rclone hashsum md5` was DOWNGRADED to a size-only manifest instead of
+#               failing the close. There is no automatic downgrade: either the close hashes, or the
+#               invocation declares with `--size-only` that this backend cannot report md5 at all.
 #   regression: A2-4 — a local copy the box could not hash was silently skipped (`md5sum | cut` dropped the
 #               status, the empty result was `continue`d), so a partial hash check read as a complete one.
-#   regression: A2-5 — no working md5sum was folded into the same "the store reported no hashes" wording,
-#               hiding that the LOCAL side, not the store, is why nothing was hash-checked.
+#   regression: A2-5 — no working md5sum, against a store that DID report hashes, was downgraded the same
+#               way (round 5 named the local gap in the manifest, which is still a weaker check than A2 asks
+#               for); it is now a hard failure, while a store that reports no hashes is unaffected.
 #   regression: A2-6 — REPRODUCTION.md's committed-script list came from a `find … | sort` behind `|| true`,
 #               so a half-failed traversal published a reproduction recipe silently missing steps (#447).
+#   regression: A2-7 — a hash listing whose paths mapped onto NO listed object read as the benign "the
+#               store's hash listing covered none of the listed objects", switching hash verification off
+#               wholesale while the manifest still reported a pass.
+#   regression: A3-1 — the `*.stale` rename lived inside the `observe_store` failure branch, so any failure
+#               upstream of the listing (here: the local enumeration) exited with the earlier
+#               ARTIFACT_MANIFEST.md still standing as the record's answer. A3 is now ONE exit path over the
+#               whole generated set, LANDED.md included.
 #   regression: R5 — the primary skill documented an INVALID close_record invocation (SKILL.md said
 #               `close_record.sh <run-id> <registry-dir> …`, which the script rejects as an unknown verb).
 #               Closed structurally: the canonical invocations are extracted FROM SKILL.md and run here.
@@ -38,7 +47,9 @@
 #     built under (the A2-* cases above): total-or-fatal enumeration, no silent per-file skip, and the set
 #     counted equalling the set compared.
 #   - A3: atomic write-or-nothing — a failing check (or a failing ledger seam) leaves NO paperwork at all,
-#     and an earlier generated manifest is renamed `*.stale` rather than left claiming verified.
+#     and every generated artifact this close did not stage a fresh copy of (the manifest, LANDED.md, the
+#     two derived-evidence files) is renamed `*.stale` rather than left claiming verified. One exit path, so
+#     the `--no-artifacts` and exit-3 gap paths obey it with no code of their own.
 #   - A4: `finalize` FETCHES `--base-ref` and proves the landing at the remote-tracking ref; a local branch
 #     name is refused outright.
 #   - A5: the ledger event goes through the seam keyed on the REGISTRY DIR NAME (#473), never the run-id, and
@@ -98,10 +109,14 @@ REAL_FIND="$(command -v find)";     export REAL_FIND
 #   RCLONE_DUP=1           the listing repeats its first object line (one path, counted twice)
 #   RCLONE_NOHASH=1        `hashsum` FAILS (what a backend with no md5 support does) — distinct from:
 #   RCLONE_EMPTYHASH=1     `hashsum` succeeds and reports nothing (a store that genuinely has no hashes)
+#   RCLONE_HASH_PREFIX=1   `hashsum` succeeds and reports hashes for `./<path>`, so no hash line maps onto a
+#                          listed object — the hash listing describes a different set than the object listing
+# Every invocation is appended to $RCLONE_CALLS, so a case can assert that a subcommand was NOT run at all.
 mkdir -p "$T/stub"
 cat > "$T/stub/rclone" <<'STUB'
 #!/usr/bin/env bash
 verb="${1:-}"
+echo "$*" >> "${RCLONE_CALLS:-/dev/null}"
 case "$verb" in
   lsl)
     [ "${RCLONE_NOISY:-0}" = 1 ] && echo "2026/09/02 NOTICE: Config file not found - using defaults" >&2
@@ -120,8 +135,9 @@ case "$verb" in
     [ "${RCLONE_NOHASH:-0}" = 1 ] && { echo "ERROR: hash type md5 not supported" >&2; exit 1; }
     [ "${RCLONE_EMPTYHASH:-0}" = 1 ] && exit 0
     [ -d "${STORE_DIR:-/nonexistent}" ] || exit 0
+    pfx=""; [ "${RCLONE_HASH_PREFIX:-0}" = 1 ] && pfx="./"
     while IFS= read -r -d '' p; do
-      printf '%s  %s\n' "$("$REAL_MD5SUM" "$STORE_DIR/$p" | cut -d' ' -f1)" "$p"
+      printf '%s  %s%s\n' "$("$REAL_MD5SUM" "$STORE_DIR/$p" | cut -d' ' -f1)" "$pfx" "$p"
     done < <(cd "$STORE_DIR" && "$REAL_FIND" . -type f -printf '%P\0')
     exit 0 ;;
 esac
@@ -176,6 +192,7 @@ STUB
 chmod +x "$T/stub/ledger.sh"
 export LEDGER_CALLS="$T/ledger-calls"; : > "$LEDGER_CALLS"
 export EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh"
+export RCLONE_CALLS="$T/rclone-calls"; : > "$RCLONE_CALLS"
 
 new_record() {   # new_record <name> -> prints the dir
   local d="$T/registry/$1"
@@ -467,28 +484,54 @@ RCLONE_DUP=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact
 [ -e "$D/ARTIFACT_MANIFEST.md" ] && fail "regression A2-2: a manifest published a count it never compared" \
   || pass "regression A2-2: no manifest when counted != compared"
 
-# regression A2-3: a FAILED hash listing is not "the store reported no hashes". Sizes matched, so this is
-# still a pass — but the manifest has to say WHY nothing was hashed, or the record asserts something about
-# the store that this close never observed.
+# regression A2-3: a FAILED hash listing FAILS THE CLOSE unless the invocation opted out. A2 verifies hashes
+# where the store gives one; a hashsum that exited non-zero does not say the store gives none, so recording a
+# size-only check (even one naming the failure, which is what round 5 did) is a downgrade nobody authorized.
 D="$(new_record exp-a)"; sync_store "$U"
 RCLONE_NOHASH=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
-[ "$RC" = 0 ] && pass "A2: a store whose hash listing fails still verifies on sizes (not a failure)" \
-  || fail "A2: a failing hash listing was treated as a verification failure (rc=$RC: $ERR)"
-grep -qF 'size-only' "$D/ARTIFACT_MANIFEST.md" \
-  && pass "A2: the manifest records that only sizes were checked (never overstates the verification)" \
-  || fail "A2: a size-only verification is recorded as if hashes matched"
-grep -qF 'hashsum md5` exit 1' "$D/ARTIFACT_MANIFEST.md" \
-  && pass "regression A2-3: the manifest names the FAILED hash listing as the reason nothing was hashed" \
-  || fail "regression A2-3: a failed hash listing is not named ($(grep -F 'verification' "$D/ARTIFACT_MANIFEST.md" || true))"
+{ [ "$RC" = 1 ] && case "$ERR" in *"hashing the artifact store"*"FAILED (rclone hashsum md5 exit 1"*) true;; *) false;; esac; } \
+  && pass "regression A2-3: a FAILED hash listing BLOCKs — there is no automatic downgrade to a size-only check" \
+  || fail "regression A2-3: a failed hash listing was accepted and downgraded to size-only (rc=$RC: $ERR)"
+case "$ERR" in *"hash type md5 not supported"*) pass "regression A2-3: the BLOCK names the hashsum stderr verbatim";;
+  *) fail "regression A2-3: the hashsum stderr was swallowed: $ERR";; esac
+no_paperwork "$D" && pass "regression A2-3: nothing was written (#821 A3)" || fail "regression A2-3: paperwork survived a failed hash listing"
+# ...unless the INVOCATION says on its face that this backend cannot report md5. Then no hashsum is attempted
+# at all and the manifest carries the caller's declaration, not a claim this close pretended to observe.
+D="$(new_record exp-a)"; sync_store "$U"; : > "$RCLONE_CALLS"
+RCLONE_NOHASH=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" --size-only
+[ "$RC" = 0 ] && pass "regression A2-3: --size-only closes a store whose backend cannot report md5" \
+  || fail "regression A2-3: --size-only did not provide the declared opt-out (rc=$RC: $ERR)"
+grep -qF 'size-only (caller-declared: store has no md5' "$D/ARTIFACT_MANIFEST.md" \
+  && pass "regression A2-3: the manifest records the verification as CALLER-DECLARED" \
+  || fail "regression A2-3: --size-only did not record the caller's declaration ($(grep -F '| verification' "$D/ARTIFACT_MANIFEST.md" || true))"
 grep -qF 'the store reported no hashes' "$D/ARTIFACT_MANIFEST.md" \
-  && fail "regression A2-3: a FAILED hash listing is recorded as 'the store reported no hashes' — a claim about the store this close never observed" \
-  || pass "regression A2-3: a failed hash listing is not laundered into a claim about the store"
-# The genuine no-hashes store (hashsum succeeds, reports nothing) keeps its own, different wording.
+  && fail "regression A2-3: --size-only laundered the caller's declaration into a claim about the store" \
+  || pass "regression A2-3: --size-only never states what the store reported"
+grep -q 'hashsum' "$RCLONE_CALLS" \
+  && fail "regression A2-3: --size-only still attempted a hashsum (the flag means no hash pass runs at all)" \
+  || pass "regression A2-3: --size-only attempts NO hashsum — the store is never asked"
+run paperwork run-1 "$D" --outcome completed-as-designed --no-artifacts --size-only
+{ [ "$RC" = 1 ] && case "$ERR" in *"--size-only has no store to hash"*) true;; *) false;; esac; } \
+  && pass "--size-only + --no-artifacts refused (nothing to hash either way)" \
+  || fail "--size-only accepted with --no-artifacts (rc=$RC: $ERR)"
+# The genuine no-hashes store (hashsum succeeds, reports nothing) is an OBSERVATION, keeps its own wording,
+# and still needs no flag — that is the "where the store gives one" carve-out A2 actually states.
 D="$(new_record exp-a)"; sync_store "$U"
 RCLONE_EMPTYHASH=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
 { [ "$RC" = 0 ] && grep -qF 'the store reported no hashes' "$D/ARTIFACT_MANIFEST.md"; } \
-  && pass "regression A2-3: a store that genuinely reports no hashes still says exactly that" \
+  && pass "regression A2-3: a store that genuinely reports no hashes still says exactly that, with no flag" \
   || fail "regression A2-3: a hashless-but-working store lost its own wording (rc=$RC: $ERR)"
+
+# regression A2-7: the hashes GIVEN are the hashes CHECKED. A hash listing whose paths do not map onto the
+# listed objects (an `./` prefix here) matched nothing and read as the benign "covered none of the listed
+# objects" — hash verification silently switched off wholesale while the manifest still reported a pass.
+D="$(new_record exp-a)"; sync_store "$U"
+RCLONE_HASH_PREFIX=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+{ [ "$RC" = 1 ] && case "$ERR" in *"usable md5"*"belong to an object this close verified"*) true;; *) false;; esac; } \
+  && pass "regression A2-7: store hashes that map onto no listed object BLOCK (the two listings describe different sets)" \
+  || fail "regression A2-7: an unmappable hash listing silently disabled hash verification (rc=$RC: $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] && fail "regression A2-7: a manifest was written from an unreconciled hash listing" \
+  || pass "regression A2-7: no manifest when the hash listing and the object listing disagree"
 
 # regression A2-4: an unhashable LOCAL copy is a hard failure. The store gave an md5 for it, so this is a
 # file the close claims to have uploaded and cannot re-hash — pre-fix, `md5sum | cut` dropped the status and
@@ -503,16 +546,25 @@ MD5SUM_FAIL_NAME='rollouts.jsonl' \
   && fail "regression A2-4: a manifest claimed md5 verification while a local copy went unhashed" \
   || pass "regression A2-4: no manifest when an uploaded file could not be re-hashed"
 
-# regression A2-5: no working md5sum is a LOCAL-side gap, and the manifest must say so rather than reuse the
-# store's wording. Sizes matched, so it is still a pass.
+# regression A2-5: no working md5sum, against a store that DID report hashes, is a hard failure — the same
+# no-automatic-downgrade rule as A2-3 on the local side of the comparison. Naming the local gap in the
+# manifest (round 5's fix) still records a weaker check than A2 asks for, and --size-only is not the escape
+# hatch: it declares that the STORE has no md5, which this hash listing contradicts.
 D="$(new_record exp-a)"; sync_store "$U"
 MD5SUM_ABSENT=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
-[ "$RC" = 0 ] && pass "A2: a box with no working md5sum still verifies on sizes" \
-  || fail "A2: a missing local hasher was treated as a verification failure (rc=$RC: $ERR)"
-{ grep -qF 'no working md5sum' "$D/ARTIFACT_MANIFEST.md" \
-    && ! grep -qF 'the store reported no hashes' "$D/ARTIFACT_MANIFEST.md"; } \
-  && pass "regression A2-5: the manifest names the LOCAL hasher, not the store, as why nothing was hashed" \
-  || fail "regression A2-5: a local-side hash gap is recorded as a statement about the store"
+{ [ "$RC" = 1 ] && case "$ERR" in *"DOES report md5 hashes, but no working md5sum is available here"*) true;; *) false;; esac; } \
+  && pass "regression A2-5: a box that cannot hash BLOCKs against a store that DOES report hashes" \
+  || fail "regression A2-5: a missing local hasher silently downgraded the close to a size-only check (rc=$RC: $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "regression A2-5: a manifest was written while nothing on either side could be hash-checked" \
+  || pass "regression A2-5: no manifest when the store gives hashes this box cannot check"
+# The same box against a store that reports NO hashes is unaffected: there is nothing to check, so the
+# carve-out A2 states still applies and the close passes on sizes.
+D="$(new_record exp-a)"; sync_store "$U"
+MD5SUM_ABSENT=1 RCLONE_EMPTYHASH=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+{ [ "$RC" = 0 ] && grep -qF 'the store reported no hashes' "$D/ARTIFACT_MANIFEST.md"; } \
+  && pass "regression A2-5: no local hasher + a hashless store is still a pass (nothing was given to check)" \
+  || fail "regression A2-5: the local-hasher check over-blocks a store that gives no hashes (rc=$RC: $ERR)"
 
 # regression A2-6: the committed-script list is a set too. A half-failed traversal must not publish a
 # reproduction recipe that silently omits steps (#447).
@@ -523,6 +575,56 @@ FIND_SCRIPTS_FAIL="$D" \
   && pass "regression A2-6: a non-zero find exit while listing the committed scripts is FATAL" \
   || fail "regression A2-6: a partial committed-script enumeration was published as the reproduction recipe (rc=$RC: $ERR)"
 no_paperwork "$D" && pass "regression A2-6: nothing was written (#821 A3)" || fail "regression A2-6: paperwork survived a partial script enumeration"
+
+# ---- 7c. A3 as ONE rule over the whole record, not one rule per failure site --------------------------
+# The rule: a generated artifact this close did not stage a FRESH copy of is renamed `*.stale` before exit,
+# for any reason, at any point after the record dir is known. R3 above covers the one failure site that was
+# handled by hand (a failed re-list); these cases cover the sites that were not.
+
+# regression A3-1: a record that ALREADY carries generated paperwork, then a close that fails BEFORE the
+# listing is ever reached — the local enumeration. Pre-fix the stale rename lived inside the `observe_store`
+# failure branch, so a `die` upstream of it exited with the earlier ARTIFACT_MANIFEST.md still standing as the
+# record's answer ("objects | 3 … byte-verified") for a close that could not even build the set to compare.
+D="$(new_record exp-a)"; U="$(new_upload)"; sync_store "$U"
+run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+{ [ "$RC" = 0 ] && [ -f "$D/ARTIFACT_MANIFEST.md" ] && [ -f "$D/LANDED.md" ]; } \
+  && pass "regression A3-1: the record starts out carrying generated paperwork (the precondition)" \
+  || fail "regression A3-1: precondition close failed (rc=$RC: $ERR)"
+FIND_PARTIAL_ROOT="$U" FIND_PARTIAL_SKIP='adapter.safetensors' \
+  run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+{ [ "$RC" != 0 ] && case "$ERR" in *"enumerating --uploaded-from"*"FAILED"*) true;; *) false;; esac; } \
+  && pass "regression A3-1: the local enumeration fails the close (the trigger)" \
+  || fail "regression A3-1: the enumeration failure did not fail the close (rc=$RC: $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "regression A3-1: a failure BEFORE the listing left the earlier manifest standing as this record's answer" \
+  || pass "regression A3-1: the earlier manifest no longer answers for this record"
+[ -f "$D/ARTIFACT_MANIFEST.md.stale" ] \
+  && pass "regression A3-1: the earlier manifest is renamed *.stale (kept as evidence, not answering as current)" \
+  || fail "regression A3-1: the earlier manifest was neither renamed aside nor removed"
+[ -f "$D/LANDED.md.stale" ] && [ ! -e "$D/LANDED.md" ] \
+  && pass "A3: LANDED.md is held to the same rule — a failed close leaves no certificate for finalize to compare" \
+  || fail "A3: a failed close left LANDED.md standing as this close's certificate"
+no_paperwork "$D" && pass "regression A3-1: no generated artifact survived the failed close at all" \
+  || fail "regression A3-1: some generated paperwork still answers for a close that did not happen"
+no_residue "$D" && pass "regression A3-1: the staging dir is cleaned up on this path too" || fail "regression A3-1: staging residue left behind"
+# One exit path means the GAP path is covered by the same rule, with no code of its own: a close that could
+# not observe anything (no rclone) leaves nothing behind claiming it did.
+D="$(new_record exp-a)"; sync_store "$U"
+run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+[ -f "$D/ARTIFACT_MANIFEST.md" ] || fail "A3: precondition close for the gap-path case failed ($ERR)"
+(PATH="/usr/bin:/bin"; export PATH; bash "$CR" paperwork run-1 "$D" --outcome completed-as-designed \
+   --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" >"$T/out" 2>"$T/err"); RC=$?
+{ [ "$RC" = 3 ] && no_paperwork "$D" && [ -f "$D/ARTIFACT_MANIFEST.md.stale" ]; } \
+  && pass "A3: the exit-3 GAP path stales the earlier paperwork too — the same rule, no second implementation" \
+  || fail "A3: the gap path left an earlier close's paperwork answering for a close that observed nothing (rc=$RC)"
+# ...and so is a hand-authored file, on every one of those paths: the generated-by marker is the only rule.
+D="$(new_record exp-a)"; sync_store "$U"
+printf '# my own landing notes\n' > "$D/LANDED.md"
+FIND_PARTIAL_ROOT="$U" FIND_PARTIAL_SKIP='adapter.safetensors' \
+  run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U"
+grep -qxF '# my own landing notes' "$D/LANDED.md" \
+  && pass "A3: the one exit path never moves a hand-authored file aside" \
+  || fail "A3: the fail-close path moved/renamed a hand-authored LANDED.md"
 
 # ---- 8. A3: a failing ledger seam leaves NO paperwork (write-or-nothing) ----
 D="$(new_record exp-a)"; sync_store "$U"
@@ -637,8 +739,20 @@ if [ -f "$SKILL_MD" ]; then
     pass "A6/R5: SKILL.md's canonical paperwork invocation runs as documented"
     [ -f "$G2/LANDED.md" ] && [ -f "$G2/ARTIFACT_MANIFEST.md" ] \
       && pass "A6: it produces the paperwork the skill says it does" || fail "A6: the canonical invocation wrote no paperwork"
+    grep -qF 'md5-verified' "$G2/ARTIFACT_MANIFEST.md" \
+      && pass "A6: the documented invocation HASHES by default — --size-only is shown as the opt-out, not the norm" \
+      || fail "A6: the canonical invocation did not hash ($(grep -F '| verification' "$G2/ARTIFACT_MANIFEST.md" || true))"
   else
     fail "A6/R5: SKILL.md's canonical paperwork invocation FAILED: $(cat "$T/err")"
+  fi
+  # The block documents --size-only as OPTIONAL, so the documented way of switching it on has to work too —
+  # against exactly the backend it exists for (one whose hashsum fails), which without it BLOCKs.
+  if SIZE_ONLY=1 RCLONE_NOHASH=1 bash -c "${PW_BLOCK//scripts\/close_record.sh/$CR}" >"$T/out" 2>"$T/err"; then
+    grep -qF 'size-only (caller-declared: store has no md5' "$G2/ARTIFACT_MANIFEST.md" \
+      && pass "A6: the documented optional --size-only closes a no-md5 backend and records the declaration" \
+      || fail "A6: the documented --size-only did not record the caller's declaration"
+  else
+    fail "A6: SKILL.md documents --size-only as optional but the block rejects it: $(cat "$T/err")"
   fi
   # The finalize block, before and after the landing: refused, then accepted.
   : > "$RSR_CALLS"

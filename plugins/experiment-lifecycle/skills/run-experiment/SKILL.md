@@ -755,13 +755,17 @@ upstream of everything in this ordering.
   nothing, and `--page-source` is dropped on a manifest-only close):
   <!-- CLOSE-RECORD-PAPERWORK:BEGIN — close_record_smoke.sh extracts and RUNS this block verbatim (#821 invariant 6): a documented invocation the script would reject fails required CI -->
   ```bash
+  # --size-only is OPTIONAL and legitimate in exactly one case: a backend that cannot report md5 at all
+  # (set SIZE_ONLY=1 to add it). Without it a failed `rclone hashsum md5` BLOCKs, so the close either
+  # hashes or says on its own face that it cannot — it never silently downgrades to a size-only check.
   scripts/close_record.sh paperwork "$RUN_ID" "$REGISTRY_DIR" \
     --outcome completed-as-designed \
     --artifact-root "$ARTIFACT_ROOT" \
     --uploaded-from "$UPLOAD_DIR" \
     --page-source "$PAGE_SOURCE" \
     --pull-cmd "rclone copy $ARTIFACT_ROOT ./pull" \
-    --repro-diff "$REPRO_DIFF"
+    --repro-diff "$REPRO_DIFF" \
+    ${SIZE_ONLY:+--size-only}
   ```
   <!-- CLOSE-RECORD-PAPERWORK:END -->
   It emits `LANDED.md` (what landed where — record dir, artifact-store root, page path, ledger event),
@@ -783,12 +787,21 @@ upstream of everything in this ordering.
     store gives one), and nothing in the listing is unaccounted for. An unlistable store, an EMPTY one, a
     size/hash mismatch or an unexplained surplus object each mean **no manifest and a non-zero exit** with one
     line saying which — a listing on its own only ever says what is in the bucket, never that YOUR artifacts
-    are (#331/#729).
-  - **Write-or-nothing.** Every file is staged in a temp dir and moved into place only after all checks pass
-    and the ledger event is written, so a failed run leaves no partial paperwork — and an earlier run's
-    generated `ARTIFACT_MANIFEST.md` is renamed `ARTIFACT_MANIFEST.md.stale` rather than left standing as the
-    record's answer for a close that observed no verified listing. A file you took over by hand (no
-    `generated-by` marker) is never overwritten, deleted, or renamed.
+    are (#331/#729). **Hashing has no automatic downgrade:** a `rclone hashsum md5` that FAILS is a BLOCK, not
+    a size-only manifest, and so is a store that reports hashes this box has no working `md5sum` to check.
+    `--size-only` is the only way to close without hashing, it attempts no hashsum at all, and it records
+    `size-only (caller-declared: store has no md5)` — the invocation, not the artifact, carries the claim.
+  - **Write-or-nothing, and nothing survives that claims this close succeeded.** Every file is staged in a temp
+    dir and moved into place only after all checks pass and the ledger event is written, so a failed run leaves
+    no partial paperwork. The other half is what an *earlier* close left behind: **a generated artifact this
+    close did not stage a fresh copy of is renamed `*.stale` before exit** — for any reason, at any point after
+    the record dir is resolved. That covers `ARTIFACT_MANIFEST.md` (it would keep answering "the upload was
+    verified"), `LANDED.md` (it is the certificate `finalize` byte-compares, so a failed close must not leave
+    one standing), and the two derived-evidence files. `--no-artifacts` is the same rule, not a special case: it
+    stages no manifest, so an earlier one is renamed aside. A file you took over by hand (no `generated-by`
+    marker) is never overwritten, deleted, or renamed. The terminal ledger event and the run-supervision close
+    cannot be renamed aside, so they are *ordered* instead — the event is the last thing before the paperwork
+    moves into place, and the supervision record closes only after `finalize` proves the remote landing.
   - **A missing seam or missing `rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line, with nothing written** (#804's
     loud-gap shape): wire it and re-run, rather than landing a record whose ledger line or manifest is missing.
     Exit 1 is a BLOCK (bad arguments, or evidence that contradicts the paperwork).

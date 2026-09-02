@@ -17,9 +17,8 @@
   the sets are built total-or-fatal: no enumeration or hashing step runs behind a process substitution or a
   pipe whose exit status is dropped (a `find` that hit an unreadable subdirectory used to hand the verifier
   a well-formed but SHORT local set, which it then certified the store against as though complete), no
-  per-file step is silently skipped (a local copy that cannot be hashed is a hard failure; a hash pass that
-  could not RUN is recorded as an explicit size-only naming WHY, never as the lookalike "the store reported
-  no hashes"), and the set counted must equal the set compared — asserted at the point of comparison, which
+  per-file step is silently skipped (a local copy that cannot be hashed is a hard failure), and the set
+  counted must equal the set compared — asserted at the point of comparison, which
   is what catches a listing that repeats a path into `objects`/`total bytes` while the verification ran over
   the distinct ones. The same construction rule is applied to REPRODUCTION.md's committed-script list, and
   the same sweep found it in `log-experiment.sh`'s staged-content guards: `secret_scan`, `symlink_scan`,
@@ -27,10 +26,27 @@
   (or a `|| true` needed for grep's no-match exit), so a listing that failed partway left them scanning a
   silently shortened set — guards that are fail-closed on their own errors were fail-OPEN on the enumeration
   feeding them.
+  "Hash where the store gives one" has no automatic downgrade path: a `rclone hashsum md5` that FAILS is a
+  BLOCK (naming its stderr), and so is a store that reports hashes this box has no working `md5sum` to check,
+  or a hash listing whose paths map onto none of the listed objects (which used to read as the benign "the
+  store's hash listing covered none of them" and switched hash verification off wholesale). Either the close
+  hashes, or the INVOCATION says on its face that it cannot: the new `--size-only` attempts no hashsum at all
+  and records `size-only (caller-declared: store has no md5)`, so the claim lives on the invocation rather
+  than being inferred from a failure. A store that SUCCESSFULLY reports no hashes is unchanged — that is an
+  observation, and it is what A2's "where the store gives one" carve-out actually covers.
   Emission is atomic write-or-nothing (staged in a temp dir, moved into place only after every check and
-  the terminal ledger event), a failed check renames an earlier generated manifest `*.stale` instead of
-  leaving it claiming a verified upload, and a missing seam/`rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line
-  with NOTHING written. `finalize` now FETCHES `--base-ref` and proves the record + `LANDED.md` are present
+  the terminal ledger event), and its other half — what an EARLIER close left behind — is now ONE rule on ONE
+  exit path instead of a rename bolted onto the one failure site that had been reported: **a generated
+  artifact this close did not stage a fresh copy of is renamed `*.stale` before exit, for any reason, at any
+  point after the record dir is resolved.** Per-site staling only covered a failed store listing, so any
+  failure upstream of it — a failed local enumeration, a bad `--outcome`, the exit-3 gap path — exited with
+  the earlier `ARTIFACT_MANIFEST.md` still answering "the upload was verified" for a close that observed
+  nothing. `LANDED.md` is held to the same rule (it is the certificate `finalize` byte-compares before
+  un-gating the reaps), `--no-artifacts` is now that same rule rather than a special case, and the two
+  artifacts that cannot be renamed aside — the terminal ledger event and the run-supervision close — are
+  ORDERED instead: the event is the last thing before the paperwork moves into place, and the record closes
+  only after the remote landing is proven. A missing seam/`rclone` is still exit 3 + a `CLOSE-RECORD-GAP:`
+  line with NOTHING written. `finalize` now FETCHES `--base-ref` and proves the record + `LANDED.md` are present
   and byte-identical at the remote-tracking ref (a local branch name is refused outright): `paperwork`
   writes `LANDED.md` itself, so its presence in the worktree only ever proved the generator ran, while
   closing the supervision record un-gates reaping the worktree that holds the record's only local copy.
