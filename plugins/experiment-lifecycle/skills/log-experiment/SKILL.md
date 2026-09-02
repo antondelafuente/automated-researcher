@@ -70,7 +70,10 @@ co-tenant's untracked files must not sweep in (#374).
 
 The page-source tree is **mirrored, not overlaid**: its staged root (or the `--page-source-only` subtree) is
 cleared in the staging worktree before the current tree is copied in, so a file you DELETED from the page
-source lands as a deletion in the same commit. The record root is deliberately overlaid, exactly as before —
+source lands as a deletion in the same commit. Because deletions are expressible here, `--page-source-only`
+may name a path that is already **gone locally** as long as the base branch still has it — that is how you
+mirror a single deletion without widening the allowlist to a surviving parent dir; a path present in neither
+place is still refused as a typo. The record root is deliberately overlaid, exactly as before —
 without `--page-source` this script behaves as it always did. Both roots get every staged-set gate (the
 symlink check, `TEMP.md`, the ignored-file guard, and — for the page-source tree specifically — the
 deterministic secret scan it got when it landed as its own note PR). `--page-source-external <url>` is the
@@ -136,6 +139,14 @@ A `KIND` file in the dir (containing `experiment`, `design-stage`, or `note`) is
   handed. No `START.md`, or no viewer recipe in it, is a legitimate manifest-only close and requires nothing —
   and neither does the eval-only/no-go path above: a run stopped at an instrument/data/validity gate has no
   headline page to build, so the page-source check applies only to a normal, audited close.
+  **What the approval body claims about the page source is read off the STAGED SET, not off the flag.** The
+  gate above runs before anything is staged, so all it can see is that `--page-source` was *passed*; a dir
+  that is empty (or wholly excluded by an ignore rule and waved through with `--skip-ignored`) contributes
+  nothing while the record's own changes keep the commit non-empty, and the PR would merge saying the page
+  landed with no page in it. After staging, the landing is therefore re-derived: page-source paths staged →
+  *"rides this same PR"* with the count; none staged but the base branch already carries that tree →
+  recorded as **unchanged**, which is the honest wording for re-logging a record whose page already landed;
+  neither → **BLOCK**, because after the merge there would be no page source there at all.
 - **Design-stage.** The **pre-launch leg** of the two-PR flow (`DESIGN.md` present, no `RESULTS.md` yet). The
   design-audit ran during `design-experiment`; this **verifies it ran** — BLOCK unless at least one
   `DESIGN_AUDIT*.md` is present (the numbered `DESIGN_AUDIT.md`, `DESIGN_AUDIT2.md`, … chain is the validity

@@ -20,6 +20,16 @@
 #               overlaid onto a fresh base worktree without clearing the staged root first, so `git add`
 #               never saw a removal and the landed page kept serving a file its source no longer had.
 #
+# PR #823's own review round 1 added two more, same convention (`regression: 823-P0`, and case 27 for its P1):
+#   regression: 823-P0 — the page-source half of the approval body was written by the pre-staging gate, from
+#               the FLAG's presence alone. A page-source dir that reached the commit nowhere (empty, or
+#               wholly ignore-excluded and waved through with --skip-ignored) therefore merged a PR whose
+#               paperwork said the page source rode it, because the RECORD's changes kept the overall
+#               staged diff non-empty and "nothing to commit" never fired.
+#   823-P1    — the allowlist refused a --page-source-only path that was already deleted, so the one thing
+#               the mirror exists to express could not be named directly: you had to widen the allowlist to
+#               a surviving parent dir.
+#
 # Plus the invariants #821 states, beyond the regressions: two roots landing in one commit (7), behaviour
 # unchanged without `--page-source` (7), PHYSICAL root containment (8), mirror-with-delete and its
 # `--page-source-only` narrowing (9), the record root's guards applied to the page tree (10), and
@@ -311,6 +321,63 @@ mkdir -p "$T/reg/notes"; printf 'a note\n' > "$T/reg/notes/note.md"
 if run_dry "$T/reg/notes" --page-source "$T/dashboard/exp"; then fail "--page-source accepted on a note landing"; else
   case "$LAST_ERR" in *"only supported for KIND=experiment"*) pass "--page-source refused for a non-experiment kind";;
     *) fail "blocked, but not on the kind check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 24: regression 823-P0 — a --page-source dir that stages NOTHING and is absent from base -> BLOCK (the approval must be read off the staged set, not off the flag)"
+# PR #823 round 1 P0: gate_page_source runs BEFORE staging, so it could only ever see that the flag was
+# PASSED. An EMPTY page-source dir contributed nothing while the record's own changes kept the overall
+# staged diff non-empty, so stage_worktree's "nothing to commit" never fired either — the PR merged with
+# paperwork saying the page source rode it and no page source in it.
+T=$(mktemp_d); make_experiment_repo "$T"
+rm -f "$T/dashboard/exp/page.py"          # the page was never built into the dir; base has nothing there
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp"; then
+  fail "regression 823-P0: a page source that reaches the commit nowhere was approved as having landed"; else
+  case "$LAST_ERR" in *"contributes NOTHING to this commit"*) pass "regression 823-P0: an empty page-source landing is refused";;
+    *) fail "regression 823-P0: blocked, but not on the staged-landing check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 25: regression 823-P0 — the same dir, wholly gitignored and waved through with --skip-ignored -> still BLOCK (the ignore guard's escape hatch must not buy a false landing claim)"
+T=$(mktemp_d); make_experiment_repo "$T"
+printf '*\n' > "$T/dashboard/exp/.gitignore"   # every page file excluded; .gitignore itself is copied as a rule file, and is ignored by its own '*'
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --skip-ignored; then
+  fail "regression 823-P0: --skip-ignored waved through a PR claiming a page source none of which is staged"; else
+  case "$LAST_ERR" in *"contributes NOTHING to this commit"*) pass "regression 823-P0: an all-ignored page source cannot be acknowledged into a landing claim";;
+    *) fail "regression 823-P0: blocked, but not on the staged-landing check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 26: invariant 7 — a page source UNCHANGED from base is recorded as unchanged, not claimed as a landing (and does not deadlock the re-log)"
+# The counterpart to case 24: nothing staged, but the tree this PR lands on already carries the page source.
+# Nothing is missing, so blocking would deadlock a legitimate re-log (the gate REQUIRES --page-source on a
+# viewer-recipe close, and --page-source-external means a DIFFERENT repo) — only the wording was ever wrong.
+T=$(mktemp_d); make_landed_repo "$T"
+printf 'a late audit response\n' > "$T/reg/exp/AUDIT_RESPONSE.md"   # the record changed; the page source did not
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp"; then
+  case "$LAST_ERR" in *"already carries it"*) pass "an unchanged page source is stated as unchanged, and the re-log proceeds";;
+    *) fail "passed, but the unchanged page source was not stated as such: $LAST_ERR";; esac
+  # The --dry-run summary previews the real landing, so it must not report "staged" either (case 2 asserts
+  # the positive form of this same line, so the two together pin both verdicts to the staged set).
+  case "$LAST_ERR" in *"staged (mirrored) in the same commit"*) fail "the dry-run summary still claimed the unchanged page source was staged";;
+    *) pass "the dry-run summary reports it as unchanged rather than staged";; esac
+else fail "a re-log whose page source was already landed was BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 27: invariant 9 — --page-source-only can NAME a deleted file directly (a mirror that cannot express one deletion is not a mirror)"
+# PR #823 round 1 P1: the allowlist's existence check refused the deleted path outright, so the only way to
+# mirror one deletion was to widen the allowlist to a surviving parent dir.
+T=$(mktemp_d); make_landed_repo "$T"
+rm -f "$T/dashboard/exp/stale.py"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only stale.py; then
+  case "$LAST_ERR" in *"mirroring it as a DELETION"*) pass "a deleted page file can be named directly and lands as a deletion";;
+    *) fail "passed, but the deletion was not recognized as one: $LAST_ERR";; esac
+else fail "naming the deleted file directly was refused: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 28: invariant 9 — a --page-source-only path in NEITHER the working tree nor base is still a typo -> BLOCK (the deletion allowance must not become a silent no-op)"
+T=$(mktemp_d); make_landed_repo "$T"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only nosuchfile.py; then
+  fail "a page-source allowlist path that exists nowhere was accepted"; else
+  case "$LAST_ERR" in *"nothing at dashboard/exp/nosuchfile.py to mirror as a deletion"*) pass "a nonexistent, never-committed allowlist path still fails closed";;
+    *) fail "blocked, but not on the allowlist existence check: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment page-source: ALL PASS"; exit 0; else

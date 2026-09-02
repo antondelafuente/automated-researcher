@@ -26,6 +26,16 @@
   `--page-source-only`; the record root is still overlaid, so a landing without `--page-source` behaves
   exactly as before. Every staged file's real path is required to be inside its own root, per file by name,
   and the record root's guards (TEMP.md, the ignored-file guard, the secret scan) run over the page tree.
+  What the PR's approval body CLAIMS about the page source is derived from the staged set at the point the
+  claim is made, never from the flag's presence: the gate runs before staging, so an empty (or wholly
+  ignore-excluded, `--skip-ignored`) page-source dir contributed nothing while the record's own changes kept
+  the commit non-empty, and the PR merged saying the page source rode it with no page source in it. Staged
+  page paths now read as *"rides this same PR"* with the count; none staged but the base branch already
+  carrying that tree reads as *unchanged* (the honest wording for re-logging a record whose page already
+  landed, and no deadlock for it); neither BLOCKS. And because the page root mirrors, `--page-source-only`
+  now accepts a path that is already gone locally as long as the base branch has it — naming one deletion no
+  longer requires widening the allowlist to a surviving parent dir, while a path in neither place is still
+  refused as a typo.
 - experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
   (#819, skill text only — the scripted-close and one-landing halves are re-specified in #821). Measured
   across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of those minutes in the

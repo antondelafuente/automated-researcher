@@ -12,8 +12,16 @@
 #   sweep in (#374).
 #   The page-source tree is MIRRORED, not overlaid (#821 invariant 9): its staged root is cleared before the
 #   current tree is copied in, so a file deleted from the page source lands as a deletion in the same commit.
-#   The record root is deliberately overlaid, exactly as before — without --page-source this script's
-#   behavior is unchanged.
+#   Because of that, --page-source-only may NAME a path that is already gone locally as long as the base
+#   branch still has it — that is how you mirror a single deletion without widening the allowlist to a
+#   surviving parent dir (#823 review); a path present in neither place is still refused as a typo. The
+#   record root is deliberately overlaid, exactly as before — without --page-source this script's behavior
+#   is unchanged.
+#   The page-source half of the PR's approval body is written from the STAGED SET, never from the flag's
+#   presence (#823 review): a --page-source dir that reaches the commit nowhere AND is absent from the base
+#   branch BLOCKS, because the alternative is a merged PR whose paperwork says the page landed when nothing
+#   of it did. A page source that is simply unchanged from base is recorded as unchanged, not claimed as a
+#   landing.
 #   --page-source-external <url> is for a viewer that lives in a DIFFERENT repo, which no single PR can
 #   reach: it records where the page source landed instead of staging it, so the gate below has an answer
 #   rather than blocking a close it cannot help.
@@ -290,6 +298,9 @@ fi
 # nothing is mirrored, and the behavior is bit-for-bit what it was.
 declare -a ROOT_RELS=("$REL") MIRROR_PATHS=()
 PS_REL=""
+# The page-source clause of the --dry-run summary, written by verify_page_source_landing from the STAGED SET
+# (#823 review P0) — empty whenever no page-source root is in play.
+PS_LANDING_NOTE=""
 
 # ---- --page-source (#819): a SECOND staging root landing in the SAME commit/PR as the record ----
 if [ -n "$PS_DIR" ]; then
@@ -321,13 +332,25 @@ if [ -n "$PS_DIR" ]; then
     case "$_op" in
       /*) die "--page-source-only path must be relative to the page-source dir, not absolute: $_op" ;;
     esac
-    [ -e "$PS_DIR/$_op" ] || die "--page-source-only path does not exist under $PS_DIR: $_op"
     # `-s` (no symlink resolution) for exactly the #586 reason --only uses it: the allowlist must stage the
     # path you named, never a co-tenant's file it happens to point at (symlink_scan then BLOCKs it). That
     # holds for the FINAL component only — an INTERMEDIATE symlinked component is kernel-resolved at staging
     # time and lands as an ordinary file symlink_scan never sees, which is what assert_physical_parent closes.
     _rel="$(cd "$PS_DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--page-source-only path could not be resolved under $PS_DIR: $_op"
     [ "${_rel#..}" = "$_rel" ] || die "--page-source-only path escapes the page-source dir: $_op"
+    # Present LOCALLY, or present in the base tree this landing is built on (#823 review P1). --only's
+    # `-e` check is a typo guard — a named path that is nowhere stages nothing, and silently staging
+    # nothing is exactly what it fails closed on. Under MIRROR semantics (#821 invariant 9) that same guard
+    # also refused the one thing the mirror exists to express: naming the file you DELETED. A path that is
+    # gone locally but present at origin/$BASE_BRANCH IS a deletion, so it is accepted as one and mirrored
+    # into the commit as such; a path in neither place is still a typo and still dies, with a message that
+    # says both halves were checked. The RECORD root keeps the strict check above — it overlays rather than
+    # mirrors, so it cannot express a deletion at all and a missing path there is unambiguously a mistake.
+    if [ ! -e "$PS_DIR/$_op" ] && [ ! -L "$PS_DIR/$_op" ]; then
+      git -C "$REPO_ROOT" rev-parse --verify --quiet "origin/$BASE_BRANCH:$PS_REL/$_rel" >/dev/null 2>&1 \
+        || die "--page-source-only path does not exist under $PS_DIR, and origin/$BASE_BRANCH has nothing at $PS_REL/$_rel to mirror as a deletion either: $_op"
+      note "--page-source-only: $_rel is gone locally but present at origin/$BASE_BRANCH — mirroring it as a DELETION (#821 invariant 9)"
+    fi
     assert_physical_parent "$PS_DIR" "$_rel" "--page-source-only"
     PS_ONLY_REL+=("$_rel")
   done
@@ -429,8 +452,11 @@ gate_page_source() {
     return 0
   fi
   if [ -n "$PS_DIR" ]; then
-    APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) rides this same PR — one landing, not three (#819)."
-    note "page-source gate ok: brief carries a [recipes.viewer] recipe and the page source is staged here ($PS_REL)"
+    # Deliberately NO approval sentence here. This gate runs BEFORE stage_worktree, so at this point the only
+    # thing it knows is that the FLAG was passed — and "the flag was passed" is not evidence that anything of
+    # the page source reaches the commit. verify_page_source_landing (post-staging) is what states the
+    # landing, from the staged set (#823 review P0).
+    note "page-source gate ok: brief carries a [recipes.viewer] recipe and a page-source root is named ($PS_REL) — the landing itself is verified against the staged set after staging"
   elif [ -n "$PS_EXTERNAL" ]; then
     APPROVAL_BODY="$APPROVAL_BODY Page source landed separately (viewer repo is not this repo): $PS_EXTERNAL (#819)."
     note "page-source gate ok: page source recorded as external ($PS_EXTERNAL)"
@@ -519,6 +545,55 @@ temp_handoff_scan() {
     hit="${hit}$(git -C "$WT" diff --cached --name-only -z -- "$root" | tr '\0' '\n' | grep -xF "$root/TEMP.md" || true)"
   done
   [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
+}
+verify_page_source_landing() {
+  # The page-source half of the approval, DERIVED FROM THE STAGED SET at the point the claim is made (#823
+  # review P0). gate_page_source above runs before a single byte is staged, so it can only ever observe that
+  # --page-source was PASSED; it used to write "Page source (<dir>) rides this same PR" on that basis alone.
+  # An empty page-source dir — or one whose every file the ignore rules exclude, waved through with
+  # --skip-ignored — then contributed nothing at all, while the RECORD's own changes kept the overall staged
+  # diff non-empty so stage_worktree's "nothing to commit" check never fired. The PR merged with paperwork
+  # saying the page source landed and no page source in it: the silent miss #347/#819 exist to prevent,
+  # restated one level in (the record no longer just loses its page — it acquires a document saying it has
+  # one). Same invariant the rest of this close now runs on: a gate asserts only what the artifact proves.
+  #
+  # Three outcomes, kept distinct rather than collapsed into pass/fail:
+  #   * this PR stages page-source paths -> "rides this same PR", with the count, the one-landing close;
+  #   * it stages none, but the tree this PR lands on ALREADY carries the page source at $PS_REL
+  #     byte-identically -> say exactly that. Blocking instead would deadlock the legitimate re-log (a record
+  #     re-logged after its page already landed — e.g. an AUDIT_RESPONSE.md appended afterwards): the gate
+  #     above REQUIRES --page-source whenever the brief carries a [recipes.viewer] recipe, and there is no
+  #     honest flag for "already in this repo" (--page-source-external means a DIFFERENT repo). Nothing is
+  #     missing in this case; only the wording would have been false.
+  #   * neither -> BLOCK. After this PR merges there is no page source at $PS_REL at all.
+  # A staged DELETION counts as a page-source change, so the mirror's own reason for existing (#821
+  # invariant 9) still reads as a landing.
+  #
+  # The RECORD root is held to the same "carried by this PR, or already in the tree it lands on" rule and
+  # needs no code of its own to satisfy it: it OVERLAYS rather than mirrors, so every non-ignored file under
+  # $DIR is in the resulting tree; its gate already requires its evidence files to be present under $DIR;
+  # and the two ways it could still reach the commit empty are both already loud — nothing staged anywhere
+  # (stage_worktree's "nothing to commit") or everything ignored (check_ignored_files).
+  [ -n "$PS_REL" ] || return 0
+  [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: verify_page_source_landing called before stage_worktree (no staged worktree)"
+  # PS_LANDING_NOTE is the --dry-run summary's page-source clause, set from the same verdict for the same
+  # reason the approval body is: --dry-run exists to preview the real landing, so it must not report the
+  # page source as "staged" in the one case where nothing of it was.
+  local staged landed
+  # NUL-counted rather than line-counted: a page file with a newline in its name must not inflate either
+  # number (the same path-safety reason secret_scan reads its paths raw).
+  staged="$(git -C "$WT" diff --cached --name-only -z -- "$PS_REL" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+  if [ "$staged" -gt 0 ]; then
+    APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) rides this same PR — $staged staged path(s); one landing, not three (#819)."
+    PS_LANDING_NOTE="page source $PS_REL staged (mirrored) in the same commit, $staged path(s)"
+    note "page-source landing verified: $staged path(s) staged under $PS_REL"
+    return 0
+  fi
+  landed="$(git -C "$WT" ls-files -z -- "$PS_REL" | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+  [ "$landed" -gt 0 ] || die "the page source ($PS_REL) contributes NOTHING to this commit and origin/$BASE_BRANCH carries nothing at $PS_REL either — so after this PR merged there would be no page source there at all, while the PR body claimed one landed (#347's silent miss). Check that the page was actually built into that dir (an empty dir stages nothing), that a .gitignore is not excluding all of it (any exclusion is listed above), and that --page-source-only names the paths you meant; or pass --page-source-external <url> instead if the page source really lives in another repo"
+  APPROVAL_BODY="$APPROVAL_BODY Page source ($PS_REL) is unchanged from origin/$BASE_BRANCH ($landed file(s) already there) — this PR carries no page-source change (#819)."
+  PS_LANDING_NOTE="page source $PS_REL unchanged from origin/$BASE_BRANCH (nothing of it is staged; the $landed file(s) already there stay as they are)"
+  note "page-source: nothing staged under $PS_REL, but the tree this PR lands on already carries it ($landed file(s), byte-identical) — recorded as-is rather than claimed as a landing"
 }
 # Which kinds get a secret scan (note + design-stage; the experiment gate never scanned — preserved), plus
 # the --page-source tree riding an experiment PR (#819), which carries the scan it had when it landed as its
@@ -751,8 +826,17 @@ copy_stage_paths() {
   local cand ign copy rules resolved rc=0 p d
   cand="$WT_PARENT/stage-candidates"; ign="$WT_PARENT/stage-ignored"
   copy="$WT_PARENT/stage-copy"; rules="$WT_PARENT/stage-rules"; resolved="$WT_PARENT/stage-resolved"
+  # A staged path that no longer exists LOCALLY is not an error here (#823 review P1): under mirror
+  # semantics a --page-source-only path naming a file deleted from the page source is precisely a deletion,
+  # and the clear-then-copy below plus the index's memory of the base tree are what turn it into one. It
+  # contributes no candidate files, so it is simply never handed to `find` — which would otherwise exit
+  # non-zero on the missing path and, under `pipefail`, abort the whole staging run. The allowlist loops
+  # above already proved every such path is one the base tree actually has, so this can only ever skip a
+  # deletion, never a typo.
   local -a roots=()
-  for p in "${STAGE_PATHS[@]}"; do roots+=("$REPO_ROOT/$p"); done
+  for p in "${STAGE_PATHS[@]}"; do
+    if [ -e "$REPO_ROOT/$p" ] || [ -L "$REPO_ROOT/$p" ]; then roots+=("$REPO_ROOT/$p"); fi
+  done
   # ---- phase 0: MIRROR the page-source staged path(s) — clear before copy (#821 invariant 9) -----------
   # `rsync --delete` semantics for the page-source tree: the staged root is emptied in the worktree BEFORE
   # the current tree is copied over it, so a file DELETED from the page source lands as a deletion in the
@@ -778,9 +862,15 @@ copy_stage_paths() {
   # Only regular files and symlinks are listed — git can stage nothing else, and an empty directory is not
   # representable in a commit. NUL-delimited throughout for the same path-safety reason secret_scan reads
   # paths raw; `LC_ALL=C sort -z` makes both the copy and the guard's printed list deterministic byte order.
-  find "${roots[@]}" \( -type f -o -type l \) -print0 \
-    | while IFS= read -r -d '' p; do printf '%s\0' "${p#"$REPO_ROOT/"}"; done \
-    | LC_ALL=C sort -z > "$cand" || die "could not enumerate the files under $REL to stage"
+  # `if`, not a bare call: with every staged path gone locally (an all-deletions mirror) `roots` is empty and
+  # a bare `find` would fall back to walking the CURRENT DIRECTORY — enumerating the whole repo as candidates.
+  if [ "${#roots[@]}" -gt 0 ]; then
+    find "${roots[@]}" \( -type f -o -type l \) -print0 \
+      | while IFS= read -r -d '' p; do printf '%s\0' "${p#"$REPO_ROOT/"}"; done \
+      | LC_ALL=C sort -z > "$cand" || die "could not enumerate the files under $REL to stage"
+  else
+    : > "$cand"
+  fi
   # ---- phase 0b: every staged file's REAL path must be inside its own root (#821 invariant 8) -----------
   # The invariant enforced on the ENUMERATED set, per file, by name: each candidate's PARENT is resolved
   # physically (`realpath -m` — symlinks resolved, missing/dangling components tolerated) and must be inside
@@ -964,7 +1054,8 @@ if [ "$DRY_RUN" = 1 ]; then
   symlink_scan
   temp_handoff_scan
   scan_if_needed
-  note "--dry-run: classified=$KIND${PS_REL:+, page source $PS_REL staged (mirrored) in the same commit}, gate PASSED (staged secret/symlink/TEMP.md scan clean); stopping before any push."
+  verify_page_source_landing
+  note "--dry-run: classified=$KIND${PS_LANDING_NOTE:+, $PS_LANDING_NOTE}, gate PASSED (staged secret/symlink/TEMP.md scan clean); stopping before any push."
   exit 0
 fi
 
@@ -1027,6 +1118,9 @@ stage_worktree
 symlink_scan
 temp_handoff_scan
 scan_if_needed
+# The page-source half of the approval body is written HERE, from the staged set, and BLOCKs a landing whose
+# page source reaches the commit nowhere — before the commit is made, so no push/PR is created for it (#823).
+verify_page_source_landing
 # Force the bot identity via env (overrides any ambient GIT_AUTHOR_*/GIT_COMMITTER_* + config) for author AND committer.
 GIT_AUTHOR_NAME="$GA_NAME" GIT_AUTHOR_EMAIL="$GA_EMAIL" \
 GIT_COMMITTER_NAME="$GA_NAME" GIT_COMMITTER_EMAIL="$GA_EMAIL" \
