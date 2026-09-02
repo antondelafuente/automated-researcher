@@ -26,7 +26,15 @@
   inferred); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record (#804's shape),
   never a quiet no-op. A store that lists clean and comes back EMPTY takes that same gap path rather than
   recording a zero-object "verified upload" (#331: an empty listing is evidence against the upload, not for
-  it), and `finalize` proves the close actually MERGED — `LANDED.md` present at a required `--base-ref` and
+  it) — and because paperwork is re-runnable the gap is a property of the RECORD, not of one call: the
+  record carries a generated `ARTIFACT_MANIFEST.md` only where THIS close observed a non-empty listing, so
+  an earlier run's manifest is REMOVED rather than left standing (a skipped write alone let a re-run against
+  an emptied or wrong root exit 3 while the record still read "objects | 1 … the upload was verified", with
+  the gap line asserting the opposite; a hand-authored manifest is never removed, the same generated-by rule
+  that keeps it from being overwritten). Disjointness of the two staging roots is likewise decided by a
+  containment predicate rather than string-prefix arithmetic, which read the repo-root sentinel `.` as
+  disjoint from every path instead of containing all of them — so `--page-source <repo-root>` would have
+  staged the entire repository as page source. `finalize` proves the close actually MERGED — `LANDED.md` present at a required `--base-ref` and
   byte-identical to this record's — before un-gating worktree/scratch/session reaping, since the generator's
   own output is never evidence that its output landed (same never-default merged-proof as
   `launch_record.sh preflight`). Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal

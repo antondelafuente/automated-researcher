@@ -753,8 +753,11 @@ upstream of everything in this ordering.
   (--artifact-root <rclone-dest> | --no-artifacts) [--page-source <path>] [--pull-cmd <cmd>]… [--repro-diff <file>]`:
   `LANDED.md` (what landed where — record dir, artifact-store
   root, page path, ledger event), `ARTIFACT_MANIFEST.md` (R2 path + object count + key sizes, from the verified
-  upload listing — a store that cannot be listed, or that lists clean and comes back EMPTY, produces **no**
-  manifest and a `CLOSE-RECORD-GAP:` line instead of a zero-object one, #331), a `REPRODUCTION.md` skeleton carrying the actual pull commands and the reproduction diff
+  upload listing — the record carries a generated manifest **only** where THIS close observed a non-empty
+  listing, so a store that cannot be listed, that lists clean and comes back EMPTY, or that the run disclaims
+  with `--no-artifacts` leaves no manifest at all and a `CLOSE-RECORD-GAP:` line instead of a zero-object
+  one; paperwork is re-runnable, so an earlier run's manifest is *removed* rather than left standing as the
+  record's answer, #331), a `REPRODUCTION.md` skeleton carrying the actual pull commands and the reproduction diff
   output from the gate above, the experiment-level **terminal ledger event** (`run` = the registry dir name
   exactly, no suffix, #473; the terminal status is the operational outcome you pass it, #376 — the script
   refuses to invent one), and the close self-audit checklist. It reads the run-supervision record for the
@@ -1195,7 +1198,8 @@ through env seams; see the "three seams" note at the top of this skill.
 - **Generate the mechanical close paperwork, author only the judgment (#819).** `close_record.sh paperwork`
   emits `LANDED.md` / `ARTIFACT_MANIFEST.md` / `REPRODUCTION.md` / the close self-audit checklist / the
   terminal ledger event from state; `RESULTS.md` and the audit responses stay yours. It never claims what it
-  did not observe (no listing — or an empty one — → no manifest) and never invents a terminal status (#376)
+  did not observe (no listing — or an empty one — → no manifest, and a stale one from an earlier run is
+  removed, since the rule is what the RECORD carries, not what this call wrote) and never invents a terminal status (#376)
   or a ledger key (#473); an unwired seam is exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, never
   a quiet no-op. Its `finalize` verb proves the close MERGED at `--base-ref` before un-gating the reaps —
   evidence a *generator* produced is never evidence its own output landed.

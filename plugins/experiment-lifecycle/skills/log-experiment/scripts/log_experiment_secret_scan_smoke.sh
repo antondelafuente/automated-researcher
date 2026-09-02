@@ -674,6 +674,28 @@ if run_dry "$T/reg/exp" --page-source "$T/reg/exp/page"; then fail "an overlappi
     *) fail "blocked, but not on the overlap check: $LAST_ERR";; esac; fi
 rm -rf "$T"
 
+echo "[smoke] case 53b: --page-source = the REPOSITORY ROOT -> BLOCK (#820 review round 2: the root normalizes to '.', which prefix arithmetic reads as disjoint from every path instead of containing all of them, so the whole repo would have staged as page source)"
+T=$(mktemp_d); make_experiment_repo "$T"
+if run_dry "$T/reg/exp" --page-source "$T"; then fail "the repository root was accepted as a page-source root — the entire repo would stage as page source"; else
+  case "$LAST_ERR" in *"overlaps the record dir"*) pass "repo-root page-source root refused";;
+    *) fail "blocked, but not on the overlap check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 53c: the record dir IS the repository root -> BLOCK (the same sentinel with the roots swapped: patching only the direction that was found would leave this one open)"
+T=$(mktemp_d); make_experiment_repo "$T"
+printf '# design\n' > "$T/DESIGN.md"; printf '# results\n' > "$T/RESULTS.md"
+if run_dry "$T" --page-source "$T/dashboard/exp"; then fail "a repo-root record dir accepted a page-source root inside it"; else
+  case "$LAST_ERR" in *"overlaps the record dir"*) pass "repo-root record dir refuses a contained page-source root";;
+    *) fail "blocked, but not on the overlap check: $LAST_ERR";; esac; fi
+rm -rf "$T"
+
+echo "[smoke] case 53d: a page-source root merely sharing a name PREFIX with the record dir -> PASS (the guard tests containment, not string prefix: reg/exp and reg/exp-page are disjoint trees)"
+T=$(mktemp_d); make_experiment_repo "$T"
+mkdir -p "$T/reg/exp-page"; printf 'x\n' > "$T/reg/exp-page/p.py"
+if run_dry "$T/reg/exp" --page-source "$T/reg/exp-page"; then pass "a sibling sharing a name prefix is not treated as overlapping"; else
+  fail "a disjoint sibling page-source root was refused: $LAST_ERR"; fi
+rm -rf "$T"
+
 echo "[smoke] case 54: --page-source on a KIND=note landing -> BLOCK (the publish leg belongs to an experiment close)"
 T=$(mktemp_d); make_experiment_repo "$T"
 mkdir -p "$T/reg/notes"; printf 'a note\n' > "$T/reg/notes/note.md"

@@ -88,6 +88,28 @@ write_generated() {
   WROTE+=("$(basename "$path")")
 }
 
+# discard_generated <path> : the symmetric counterpart of write_generated, for a fail-closed GAP path.
+# A gap is a statement about the RECORD's end state — "nothing here describes an upload nobody observed" —
+# not merely a decision to skip one write (#820 review round 2: round 1 made the empty-listing case skip the
+# write, but a manifest left over from an earlier successful listing stayed in the record, so a re-run
+# against an emptied/wrong root exited 3 while the record still read "objects | 1 … the upload was
+# verified"; the gap line asserting "no ARTIFACT_MANIFEST.md was written" was then itself false). Stale
+# generated output is the same #331 divergence as a hollow one, so the gap path must leave the record with
+# NO generated manifest at all. Hand-authored files are untouched here for exactly the reason
+# write_generated won't clobber them: a file without GEN_MARKER is not ours to delete.
+discard_generated() {
+  local path="$1"
+  [ -e "$path" ] || return 0
+  if ! grep -qF "$GEN_MARKER" "$path" 2>/dev/null; then
+    note "kept hand-authored $(basename "$path") (no generated-by marker) — not removed by the gap path"
+    KEPT+=("$(basename "$path")")
+    return 0
+  fi
+  rm -f "$path"
+  REMOVED+=("$(basename "$path")")
+  note "removed stale generated $(basename "$path") — this close observed no listing to back it"
+}
+
 cmd_paperwork() {
   local run_id="$1" dir="$2"; shift 2
   local outcome="" artifact_root="" no_artifacts=0 page_source="" repro_diff=""
@@ -127,16 +149,20 @@ cmd_paperwork() {
     esac
   fi
 
-  local -a WROTE=() KEPT=(); local ledger_gap="" artifact_gap=""
+  local -a WROTE=() KEPT=() REMOVED=(); local ledger_gap="" artifact_gap=""
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   # ---- ARTIFACT_MANIFEST.md — from an ACTUAL listing, or not at all (#232/#331) ----
+  # The rule is a property of the RECORD, not of this invocation: the record carries a generated
+  # ARTIFACT_MANIFEST.md if and only if THIS close observed a non-empty listing. Both halves are enforced
+  # below — the write on the observed path, and discard_generated on every other path — because paperwork is
+  # re-runnable, so "skip the write" alone leaves an earlier run's manifest standing as the record's answer.
   local objects="" bytes="" listing=""
   if [ "$no_artifacts" = 0 ]; then
     if ! command -v rclone >/dev/null 2>&1; then
-      artifact_gap="rclone is not on PATH — no ARTIFACT_MANIFEST.md was written for '$artifact_root' (a manifest must pin an observed listing, never a claim); list the store and write it by hand, or install rclone and re-run"
+      artifact_gap="rclone is not on PATH — this record carries no ARTIFACT_MANIFEST.md for '$artifact_root' (a manifest must pin an observed listing, never a claim); list the store and write it by hand, or install rclone and re-run"
     elif ! listing="$(rclone lsl "$artifact_root" 2>&1)"; then
-      artifact_gap="could not list the artifact store '$artifact_root' (rclone lsl failed: $(printf '%s' "$listing" | head -n1)) — no ARTIFACT_MANIFEST.md was written; a manifest that claims an upload nobody observed is the #331 divergence, so this fails closed"
+      artifact_gap="could not list the artifact store '$artifact_root' (rclone lsl failed: $(printf '%s' "$listing" | head -n1)) — this record carries no ARTIFACT_MANIFEST.md; a manifest that claims an upload nobody observed is the #331 divergence, so this fails closed"
     elif [ "$(printf '%s\n' "$listing" | grep -c . || true)" = 0 ]; then
       # A listing that SUCCEEDS and comes back empty is not evidence of an upload — it is evidence of the
       # opposite. `--artifact-root` is the caller asserting this run put heavy artifacts in the store, so
@@ -144,7 +170,7 @@ cmd_paperwork() {
       # the manifest anyway would put "objects | 0 … the upload was verified" into the permanent record: the
       # same #331 divergence as an unlistable store, reached through a successful exit code, so it takes the
       # same fail-closed path. A run that genuinely has nothing in the store says so with --no-artifacts.
-      artifact_gap="the artifact store '$artifact_root' listed successfully but is EMPTY (0 objects) — no ARTIFACT_MANIFEST.md was written; --artifact-root asserts this run HAS heavy artifacts there, so an empty listing means the upload went somewhere else (the #729 wrong-root shape) or never ran, and a zero-object manifest would record a verified upload nobody observed (#331). Verify the upload against this root and re-run, or pass --no-artifacts if this run genuinely stored nothing"
+      artifact_gap="the artifact store '$artifact_root' listed successfully but is EMPTY (0 objects) — this record carries no ARTIFACT_MANIFEST.md; --artifact-root asserts this run HAS heavy artifacts there, so an empty listing means the upload went somewhere else (the #729 wrong-root shape) or never ran, and a zero-object manifest would record a verified upload nobody observed (#331). Verify the upload against this root and re-run, or pass --no-artifacts if this run genuinely stored nothing"
     else
       objects="$(printf '%s\n' "$listing" | grep -c . || true)"
       bytes="$(printf '%s\n' "$listing" | awk '{s+=$1} END {printf "%d", s+0}')"
@@ -180,6 +206,12 @@ $listing
 \`\`\`
 EOF
     fi
+  fi
+  # The "only if observed" half. Both non-observed paths land here: a gap (unlistable/empty store, or no
+  # rclone), and --no-artifacts — which asserts this run stored nothing, so an earlier run's manifest
+  # pinning a store is exactly as false as a hollow one. A hand-authored manifest is never removed.
+  if [ -n "$artifact_gap" ] || [ "$no_artifacts" = 1 ]; then
+    discard_generated "$dir/ARTIFACT_MANIFEST.md"
   fi
 
   # ---- REPRODUCTION.md — the #447 fresh-pull reproduction record ----
@@ -284,6 +316,7 @@ EOF
 
   [ "${#WROTE[@]}" -eq 0 ] || note "wrote: ${WROTE[*]}"
   [ "${#KEPT[@]}"  -eq 0 ] || note "kept (hand-authored): ${KEPT[*]}"
+  [ "${#REMOVED[@]}" -eq 0 ] || note "removed (stale generated, unbacked by this close): ${REMOVED[*]}"
 
   # #804: a missing seam / an unlistable store is LOUD and distinct from a failure — exit 3 means nothing was
   # lost and nothing was faked, the wiring or the evidence is missing. Copy the line onto the close report.

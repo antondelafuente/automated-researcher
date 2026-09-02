@@ -146,6 +146,42 @@ case "$OUT" in *"CLOSE-RECORD-GAP: the artifact store"*"is EMPTY"*) pass "empty 
   *) fail "empty store not reported as a gap: $OUT";; esac
 grep -qF 'CLOSE-RECORD-GAP' "$D/LANDED.md" && pass "LANDED.md carries the empty-store gap" || fail "LANDED.md hides the empty-store gap"
 
+# ---- 4c. the gap path is a statement about the RECORD, not about one invocation (#820 review round 2) ----
+# Cases 4/4b each start from a fresh record, so "no manifest was written" and "the record carries no
+# manifest" are indistinguishable there — which is exactly how the residue escaped the first round. paperwork
+# is re-runnable, so the real sequence is: a successful listing writes the manifest, then a later close finds
+# the store emptied/wrong-rooted and must leave NO manifest behind. A skipped write alone left the earlier
+# run's "objects | 1 … the upload was verified" standing as the record's answer while the gap line claimed
+# otherwise.
+D="$(new_record exp-a)"
+EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+[ -f "$D/ARTIFACT_MANIFEST.md" ] && pass "a listed store writes the manifest (the precondition for 4c)" || fail "no manifest from a good listing: $ERR"
+# The ledger seam stays wired here so exit 3 can only be the ARTIFACT gap, not a second gap masking it.
+RCLONE_EMPTY=1 EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+[ "$RC" = 3 ] && pass "the re-run against an emptied store still exits 3" || fail "re-run exit was $RC, expected 3 ($OUT / $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "a STALE generated manifest survived the gap path, still claiming a verified upload (#331)" \
+  || pass "the gap path removes a stale generated manifest — no unobserved upload survives in the record"
+case "$ERR" in *"removed stale generated ARTIFACT_MANIFEST.md"*) pass "the removal is reported, not silent";;
+  *) fail "stale-manifest removal was silent: $ERR";; esac
+
+# --no-artifacts asserts this run stored nothing, so an earlier run's manifest pinning a store is equally false.
+D="$(new_record exp-a)"
+EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --no-artifacts
+[ "$RC" = 0 ] && pass "--no-artifacts re-run exits 0" || fail "--no-artifacts re-run exit was $RC ($ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "--no-artifacts left a manifest pinning an artifact store the run says it never used" \
+  || pass "--no-artifacts clears a stale generated manifest"
+
+# A manifest a human took ownership of is never deleted — the same GEN_MARKER rule write_generated enforces.
+D="$(new_record exp-a)"
+printf '# hand-written manifest\n' > "$D/ARTIFACT_MANIFEST.md"
+RCLONE_EMPTY=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+grep -qxF '# hand-written manifest' "$D/ARTIFACT_MANIFEST.md" \
+  && pass "the gap path never deletes a hand-authored manifest" \
+  || fail "the gap path deleted a hand-authored ARTIFACT_MANIFEST.md"
+
 # ---- 5. ledger seam wired: invoked with the REGISTRY DIR NAME, not the run-id (#473) ----
 : > "$LEDGER_CALLS"
 D="$(new_record exp-a)"

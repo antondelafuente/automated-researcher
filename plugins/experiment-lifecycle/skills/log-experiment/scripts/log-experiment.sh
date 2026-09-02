@@ -246,6 +246,21 @@ fi
 declare -a STAGE_ROOTS=() ROOT_RELS=("$REL")
 for _r in "${STAGE_PATHS[@]}"; do STAGE_ROOTS+=("$REL"); done
 
+# path_contains <ancestor> <descendant> — true when <ancestor> IS <descendant> or an ancestor directory of
+# it, over repo-relative paths in the shape `realpath --relative-to` emits. The repo root normalizes to the
+# sentinel `.`, and plain prefix arithmetic reads that sentinel exactly backwards: `.` is an ancestor of
+# EVERY path in the repo, yet "$anc/" is "./" and no other relative path starts with "./", so the containment
+# test says "disjoint" for the one root that contains everything (#820 review round 2: `--page-source
+# <repo-root>` against a `registry/<exp>` record therefore passed the guard below and would have routed the
+# whole repository through page-source staging). The sentinel is handled here, in the predicate itself,
+# rather than at one call site: both directions and the equality case are the same question, and patching
+# only the direction that was found would leave the other reachable the moment the roots swap.
+path_contains() {
+  local anc="$1" desc="$2"
+  if [ "$anc" = "." ] || [ "$anc" = "$desc" ]; then return 0; fi
+  [ "${desc#"$anc"/}" != "$desc" ]
+}
+
 # ---- --page-source (#819): a SECOND staging root landing in the SAME commit/PR as the record ----
 PS_REL=""
 if [ -n "$PS_DIR" ]; then
@@ -259,8 +274,9 @@ if [ -n "$PS_DIR" ]; then
   # Disjoint from the record dir in BOTH directions: a page-source root at/inside/containing $REL would put
   # the same paths under two roots (double-staged, and the record's own gate silently governing page files,
   # or worse the page root's rules governing the record).
-  { [ "$PS_REL" = "$REL" ] || [ "${PS_REL#"$REL"/}" != "$PS_REL" ] || [ "${REL#"$PS_REL"/}" != "$REL" ]; } \
-    && die "--page-source dir ($PS_REL) overlaps the record dir ($REL) — the page source is a separate tree riding the same PR, not part of the record dir (which is staged whole already)"
+  if path_contains "$REL" "$PS_REL" || path_contains "$PS_REL" "$REL"; then
+    die "--page-source dir ($PS_REL) overlaps the record dir ($REL) — the page source is a separate tree riding the same PR, not part of the record dir (which is staged whole already)"
+  fi
   # Note-shaped only: this tree rides the RECORD's gate, so it must carry no evidence of its own to verify.
   # A dir with its own DESIGN.md/RESULTS.md is a record and gets its own gated landing (same reasoning that
   # restricts --only to KIND=note: a gate must never approve evidence it did not read).
