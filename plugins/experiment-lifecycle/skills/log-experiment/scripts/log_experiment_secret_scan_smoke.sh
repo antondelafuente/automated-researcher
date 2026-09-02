@@ -65,6 +65,13 @@
 # leg the close audit no longer has to see), that the page-source tree is still secret-scanned on an
 # experiment PR (it used to get that scan as its own note PR), and that every per-root gate (the TEMP.md
 # scan, the ancestor-.gitignore walk behind the #340 guard) covers the second root too.
+#
+# #820 round 3: also covers assert_physical_parent on BOTH allowlist roots — a named path whose INTERMEDIATE
+# component is a symlink pointing outside the repo BLOCKs before anything is staged (the lexical `realpath -s`
+# checks cannot see it: the kernel resolves it in find's starting path and `cp -P --parents` materializes the
+# outside bytes as an ordinary file under real directories, so symlink_scan never fires), for
+# --page-source-only and for the pre-existing --only hole alike, plus the control that a legitimate nested
+# path under a REAL subdirectory still passes.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -750,6 +757,42 @@ T=$(mktemp_d); make_experiment_repo "$T"
 rm -f "$T/reg/exp/AUDIT.md"
 printf '# results\n\nDecision: ANCHOR_FAILED\n' > "$T/reg/exp/RESULTS.md"
 if run_dry "$T/reg/exp"; then pass "a no-go close is not held to the page-source gate"; else fail "no-go close BLOCKED: $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 60: --page-source-only reaching through a parent symlinked OUTSIDE the repo -> BLOCK (#820 round 3: the lexical guards cannot see an intermediate symlink; the kernel resolves it and cp --parents materializes the outside bytes as an ordinary staged file symlink_scan never sees)"
+T=$(mktemp_d); OUTSIDE=$(mktemp_d); make_experiment_repo "$T"
+printf 'key = %s\n' "$REAL_GHP" > "$OUTSIDE/secret.txt"
+ln -s "$OUTSIDE" "$T/dashboard/exp/link"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only link/secret.txt; then
+  fail "an out-of-tree file reached through a symlinked parent was accepted into the page-source allowlist"; else
+  case "$LAST_ERR" in
+    *"reaches through a symlinked parent"*)
+      # The BLOCK must land BEFORE staging, not after: if the bytes had been copied in, secret_scan would have
+      # been the thing that fired. Either message is a "BLOCK", only one of them means nothing was staged.
+      case "$LAST_ERR" in *"secret-value pattern"*|*"$REAL_GHP"*) fail "blocked, but the outside file's content was staged/read first";;
+        *) pass "the out-of-tree file is refused before staging, so its bytes never enter the worktree";; esac;;
+    *) fail "blocked, but not on the physical-parent guard: $LAST_ERR";; esac; fi
+rm -rf "$T" "$OUTSIDE"
+
+echo "[smoke] case 61: --only reaching through a parent symlinked OUTSIDE the repo on a KIND=note dir -> BLOCK (the identical hole pre-existed on --only; one shared guard covers both roots)"
+T=$(mktemp_d); OUTSIDE=$(mktemp_d); make_repo "$T"
+printf 'key = %s\n' "$REAL_GHP" > "$OUTSIDE/secret.txt"
+ln -s "$OUTSIDE" "$T/reg/note/link"
+if run_dry "$T/reg/note" --only link/secret.txt; then
+  fail "an out-of-tree file reached through a symlinked parent was accepted into the --only allowlist"; else
+  case "$LAST_ERR" in
+    *"reaches through a symlinked parent"*)
+      case "$LAST_ERR" in *"secret-value pattern"*|*"$REAL_GHP"*) fail "blocked, but the outside file's content was staged/read first";;
+        *) pass "--only refuses the same shape at the record root";; esac;;
+    *) fail "blocked, but not on the physical-parent guard: $LAST_ERR";; esac; fi
+rm -rf "$T" "$OUTSIDE"
+
+echo "[smoke] case 62: control — --page-source-only naming a file inside a REAL subdirectory still passes (the guard rejects symlinked parents, not nested paths)"
+T=$(mktemp_d); make_experiment_repo "$T"
+mkdir -p "$T/dashboard/exp/sub"; printf 'def s():\n    return 62\n' > "$T/dashboard/exp/sub/p62.py"
+if run_dry "$T/reg/exp" --page-source "$T/dashboard/exp" --page-source-only sub/p62.py; then
+  pass "a nested page-source path under a real directory is unaffected"; else
+  fail "the physical-parent guard rejected a legitimate nested path: $LAST_ERR"; fi
 rm -rf "$T"
 
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else

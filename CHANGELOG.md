@@ -39,7 +39,12 @@
   own output is never evidence that its output landed (same never-default merged-proof as
   `launch_record.sh preflight`). Plus a fifth, cheaper one: waiting on a detached driver is now ONE capped call on its terminal
   marker — 3,886 poll calls across 61 runs, 180 min of them polling drivers that had already exited, and
-  one run that re-`Read` the same task-output file 852 times. `RESULTS.md` and the audit responses stay
+  one run that re-`Read` the same task-output file 852 times. Both allowlist flags now require the named
+  path's PARENT to resolve physically inside its staging root, closing a disclosure hole in
+  `--page-source-only` and the identical pre-existing one in `--only`: the lexical `realpath -s` containment
+  check cannot see a symlinked INTERMEDIATE component, which the kernel resolves so `cp -P --parents`
+  materializes out-of-tree bytes as an ordinary file under real directories — leaving `symlink_scan`, which
+  only ever sees a symlink you name DIRECTLY, nothing to fire on. `RESULTS.md` and the audit responses stay
   model-authored; every fail-closed gate (cross-family audit scope, fresh-pull reproduction, verified
   upload) keeps full scope.
 - experiment-lifecycle 0.6.0 / verify-claims 0.8.2 (2026-09-02): a formal design was ~28 min wall / 19 min

@@ -207,6 +207,22 @@ REL="$(cd "$REPO_ROOT" && realpath --relative-to="$REPO_ROOT" "$DIR")"
 [ "${REL#..}" = "$REL" ] || die "dir is outside the repo root"
 SLUG="$(basename "$REL" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
 
+# assert_physical_parent <abs-root> <rel> <flag> (#820 round 3): the lexical checks cannot see a symlinked
+# INTERMEDIATE component — the kernel resolves it in find's starting path and cp --parents materializes the
+# result as a REGULAR file under REAL directories, so symlink_scan sees nothing and out-of-tree bytes land
+# as ordinary staged content. Resolve the named path's PARENT physically and require it inside the
+# physically-resolved root. The FINAL component is deliberately never resolved (#586): a symlink you name
+# still stages verbatim and symlink_scan wholesale-BLOCKs it. Resolving the root too keeps a symlinked
+# prefix ABOVE the root (e.g. a symlinked /home) working. Call as a plain statement, never via $( ).
+assert_physical_parent() {
+  local root="$1" rel="$2" flag="$3" phys_root phys_parent
+  phys_root="$(realpath -e -- "$root" 2>/dev/null)" || die "internal: cannot physically resolve $root"
+  phys_parent="$(realpath -e -- "$root/$(dirname -- "$rel")" 2>/dev/null)" \
+    || die "$flag path's parent directory could not be resolved: $rel"
+  [ "$phys_parent" = "$phys_root" ] || [ "${phys_parent#"$phys_root"/}" != "$phys_parent" ] \
+    || die "$flag path reaches through a symlinked parent that leaves the tree ($rel resolves under $phys_parent) — name the real path instead"
+}
+
 # ---- --only allowlist (#374): resolve + validate each named path against $DIR, then build STAGE_PATHS —
 # the exact set later staged (stage_worktree) and gitignore-checked (check_ignored_files) against. Doing
 # this once, up front, means both of those (and, transitively, symlink_scan/secret_scan, which scan
@@ -226,11 +242,15 @@ for _op in "${ONLY_PATHS[@]}"; do
   # where `mine.py` is a symlink to a co-tenant's `cotenant.py` would silently rewrite the allowlist entry to
   # `cotenant.py` — staging and scanning the co-tenant's file under a name the caller never asked for, exactly
   # the sweep-in this flag exists to prevent. `-s` still lexically normalizes `.`/`..`/repeated `/` (so the
-  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone; if `_op` (or a
-  # path component) is a symlink, it stages as a symlink verbatim, and symlink_scan (which runs on every KIND
-  # right after stage_worktree) then wholesale-BLOCKs it same as any other staged symlink.
+  # containment check below is unaffected) but leaves the named path's OWN symlink-ness alone. Only the FINAL
+  # component stages verbatim that way (#820 round 3 corrects the original claim that a path component does
+  # too): if `_op` itself is a symlink it stages as a symlink and symlink_scan (which runs on every KIND right
+  # after stage_worktree) wholesale-BLOCKs it — but an INTERMEDIATE component is kernel-resolved during
+  # staging and materialized as an ordinary file, which symlink_scan cannot see. assert_physical_parent below
+  # is what closes that half.
   _rel="$(cd "$DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--only path could not be resolved under $DIR: $_op"
   [ "${_rel#..}" = "$_rel" ] || die "--only path escapes the registry dir: $_op"
+  assert_physical_parent "$DIR" "$_rel" "--only"
   ONLY_REL+=("$_rel")
 done
 if [ "${#ONLY_REL[@]}" -gt 0 ]; then
@@ -289,9 +309,12 @@ if [ -n "$PS_DIR" ]; then
     esac
     [ -e "$PS_DIR/$_op" ] || die "--page-source-only path does not exist under $PS_DIR: $_op"
     # `-s` (no symlink resolution) for exactly the #586 reason --only uses it: the allowlist must stage the
-    # path you named, never a co-tenant's file it happens to point at (symlink_scan then BLOCKs it).
+    # path you named, never a co-tenant's file it happens to point at (symlink_scan then BLOCKs it). That
+    # holds for the FINAL component only (#820 round 3): an INTERMEDIATE symlinked component is kernel-resolved
+    # at staging time and lands as an ordinary file symlink_scan never sees — assert_physical_parent closes it.
     _rel="$(cd "$PS_DIR" && realpath -s --relative-to=. "$_op" 2>/dev/null)" || die "--page-source-only path could not be resolved under $PS_DIR: $_op"
     [ "${_rel#..}" = "$_rel" ] || die "--page-source-only path escapes the page-source dir: $_op"
+    assert_physical_parent "$PS_DIR" "$_rel" "--page-source-only"
     PS_ONLY_REL+=("$_rel")
   done
   if [ "${#PS_ONLY_REL[@]}" -gt 0 ]; then
