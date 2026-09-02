@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.6.0 (2026-09-02): the executor's close leg stops paying for its own ordering
+- experiment-lifecycle 0.7.0 (2026-09-02): the executor's close leg stops paying for its own ordering
   (#819). Measured across 61 `run-experiment` sessions since 2026-08-01: a 136-min median run with 51 of
   those minutes in the close leg, 30% of wall spent generating executor tokens, and half a run's output
   tokens authored in the close. Four causes, four fixes. (1) **Ordering — science first, publish second.**
@@ -34,6 +34,70 @@
   one run that re-`Read` the same task-output file 852 times. `RESULTS.md` and the audit responses stay
   model-authored; every fail-closed gate (cross-family audit scope, fresh-pull reproduction, verified
   upload) keeps full scope.
+- experiment-lifecycle 0.6.0 / verify-claims 0.8.2 (2026-09-02): a formal design was ~28 min wall / 19 min
+  agent-active at the median, and the transcripts said the cost was NOT audit passes (#817: 49 design
+  episodes since 2026-08-01; the registry census is 180/13/2/1 experiments with 1/2/3/4 `DESIGN_AUDIT*.md`,
+  so "audit ONCE" is being followed). The cost was 53k output tokens of cross-doc restatement, a gate
+  launched after work that didn't gate on it, and a second researcher touch that was pure wait. Five changes,
+  none of which touch the single full-scope cross-family design audit, the proposal touch, or
+  `log-experiment`'s design-stage gates. (1) **Fire both gates the moment `DESIGN.md` is written**, in the
+  background and concurrently, and draft `START.md`/`CHECKLIST.md`/manifest/snapshot WHILE they run — neither
+  gate reads those docs (in one metered design the audit launched 3.7 min late purely because the siblings
+  were drafted first), so the ~5-7 min gate window comes off the critical path instead of adding to it.
+  (2) **Cite `DESIGN.md`, don't restate it — inside one experiment**, generalizing the light path's
+  inherit-by-citation precedent to sibling docs: `START.md`/`CHECKLIST.md`/`data_audit_manifest.md` reference
+  the design by heading for arms/pins/metric/fan-out/comparability/Presentation and carry only what is
+  operationally theirs. That RETIRES the standing grep-every-sibling-doc-after-an-ACCEPT rule (#375) rather
+  than enforcing it — the rule existed because the siblings held copies; with no copies an ACCEPT amends one
+  file, so the CHECKLIST template's matching gate is removed and templates now cite. (3) **After the
+  researcher's "looks good" on the proposal, one unbroken run to landed:** draft → gates → triage → apply
+  unanimous ACCEPTs → design-stage PR → *then* report the survivors, as a report rather than a second gate
+  (researcher instruction, 2026-09-02: "waiting on them is fine only at the very end, as a report, not a
+  gate"; the measured second touch was 3-12 min of pure wait). The run still STOPS for a `verify_claim`
+  DISPUTE or any finding whose resolution moves what is measured, the cleared budget, or the locked
+  Presentation. (4) **The light design path becomes the DEFAULT for a same-shape rerun** — the designer
+  proposes it in the proposal message and takes it unless the researcher says "full"; the old per-experiment
+  opt-in meant 13 unattended reruns each fell back to the full path at ~30k tokens of restating a parent they
+  should have cited. The authorization line stays as the record of the clearance already given.
+  (5) **`verify_claim.sh --exp` builds the evidence packet BY CODE:** `DESIGN.md` plus every path the claims
+  file actually cites, plus a computed `MECHANICAL_FACTS.md` (existence / sha256 / line counts / git
+  ancestry) that the verifier is told is a primary record. This kills the UNKNOWN→reassemble→rerun loop at
+  its cause — the verifier saw only a hand-packed dir, so a forgotten path was UNKNOWN *by construction*
+  (found in 3/3 recent designs, ~2-3 min and ~$1-2 each, never once surfacing a new contradiction). Opt-in
+  `check:` directives (`exists`/`sha256`/`rows`/`commit`) settle a claim deterministically and skip the
+  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed — and precedence is
+  FAILURE-FIRST, so a directive the environment can't evaluate (`commit` outside a git repo) never rescues
+  a sibling that already failed into being an open question for the model. Packet inclusion is decided by
+  RESOLUTION and nothing else, with no shape pre-filter in front of it — every shape guess dropped a real
+  record in silence (a bare `RESULTS.md` and a long-extension `artifacts/model.safetensors`; then an
+  extensionless `SHA256SUMS`/`Makefile`), which is the very hole `--exp` exists to close, so the asymmetry
+  now runs toward including: a word that happens to name a file only adds a primary record;
+  a `<path>@<sha>` citation is materialized from git AT THAT COMMIT, so the verifier reads the bytes the
+  claim pinned rather than a working tree that may have been amended since (this is what makes the light
+  path's parent-drift check checkable), and it works for a path moved or deleted since; a directory listing
+  cut at 500 entries says so in the facts, the manifest, and the listing file; and the verdict carries
+  exactly ONE `SUMMARY:` — the combined one — so no consumer can grep semantic-only counts and miss the
+  mechanical DISPUTEs. Three coupled defects in that machinery were then fixed under senior-engineer
+  adjudication: a backticked span is now ONE literal citation taken whole with its spaces (`my
+  results.jsonl` used to fragment into words and never resolve), absolute citations are extracted at all,
+  and a token can no longer start MID-PATH — the fragment of a hyphenated absolute path was producing a
+  loud "missing record" report for a path nobody cited; every packet name is now CLAIMED, so two
+  citations that resolve to different objects can never share a path (`../run-a/results.jsonl` and
+  `../run-b/results.jsonl` both flattened to `cited/results.jsonl`, leaving the packet with one arm's
+  bytes while the facts described both) and the facts name each included file's packet path; and a
+  `check:` directive's target is always a citation, with the directive evaluations written into
+  `MECHANICAL_FACTS.md` itself, so a mechanical verdict's `evidence:` quote is verbatim in the file it
+  attributes it to. The generated `MECHANICAL_FACTS.md` then RESERVES its packet-root name on that same
+  claim table before any citation is copied: a prior gate's own `MECHANICAL_FACTS.md` is an ordinary
+  primary record to cite, and it was being claimed at packet root, copied there, and then silently
+  overwritten by the generated write — leaving the facts and manifest describing bytes the packet no longer
+  held, which is exactly the self-contradictory packet this gate exists to prevent. Reserving rather than
+  claiming at write time is the point: the generated file must KEEP the fixed name the manifest, the
+  verifier preamble and SKILL.md all reference, so the cited record is the one disambiguated into
+  `cited/<hash>/`. The two-argument
+  hand-assembled form is unchanged for existing callers, and `verify_claim_packet_smoke.sh` covers packet
+  assembly, the mechanical facts, fail-closed directives, citation shapes, pinned revisions, listing
+  truncation, name collisions, verdict attribution, the single-SUMMARY guarantee, and that legacy shape.
 - experiment-lifecycle 0.5.0 (2026-08-31): the design→launch seam becomes a first-class step — new
   `launch-experiment` skill, and `design-experiment`'s last step becomes a QUESTION instead of a dispatch
   (#813). Step 4 assumed the designing session is also the launching session; that broke in production
