@@ -157,12 +157,17 @@ cmd_paperwork() {
   # ARTIFACT_MANIFEST.md if and only if THIS close observed a non-empty listing. Both halves are enforced
   # below — the write on the observed path, and discard_generated on every other path — because paperwork is
   # re-runnable, so "skip the write" alone leaves an earlier run's manifest standing as the record's answer.
+  # rclone's own diagnostics (NOTICE/WARNING lines) go to stderr and are NOT listing content — merging them
+  # (`2>&1`) let "empty stdout + one routine stderr NOTICE + exit 0" count as one object, laundering an empty
+  # store into a verified non-empty manifest and inflating real counts the same way (#820 round 4); stdout
+  # alone is the observed listing, and stderr is quoted only in the failure gap.
   local objects="" bytes="" listing=""
   if [ "$no_artifacts" = 0 ]; then
+    local lsl_err; lsl_err="$(mktemp)"
     if ! command -v rclone >/dev/null 2>&1; then
       artifact_gap="rclone is not on PATH — this record carries no ARTIFACT_MANIFEST.md for '$artifact_root' (a manifest must pin an observed listing, never a claim); list the store and write it by hand, or install rclone and re-run"
-    elif ! listing="$(rclone lsl "$artifact_root" 2>&1)"; then
-      artifact_gap="could not list the artifact store '$artifact_root' (rclone lsl failed: $(printf '%s' "$listing" | head -n1)) — this record carries no ARTIFACT_MANIFEST.md; a manifest that claims an upload nobody observed is the #331 divergence, so this fails closed"
+    elif ! listing="$(rclone lsl "$artifact_root" 2>"$lsl_err")"; then
+      artifact_gap="could not list the artifact store '$artifact_root' (rclone lsl failed: $(head -n1 "$lsl_err")) — this record carries no ARTIFACT_MANIFEST.md; a manifest that claims an upload nobody observed is the #331 divergence, so this fails closed"
     elif [ "$(printf '%s\n' "$listing" | grep -c . || true)" = 0 ]; then
       # A listing that SUCCEEDS and comes back empty is not evidence of an upload — it is evidence of the
       # opposite. `--artifact-root` is the caller asserting this run put heavy artifacts in the store, so
@@ -206,6 +211,7 @@ $listing
 \`\`\`
 EOF
     fi
+    rm -f "$lsl_err"
   fi
   # The "only if observed" half. Both non-observed paths land here: a gap (unlistable/empty store, or no
   # rclone), and --no-artifacts — which asserts this run stored nothing, so an earlier run's manifest

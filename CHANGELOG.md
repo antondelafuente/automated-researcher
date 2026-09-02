@@ -31,7 +31,11 @@
   an earlier run's manifest is REMOVED rather than left standing (a skipped write alone let a re-run against
   an emptied or wrong root exit 3 while the record still read "objects | 1 … the upload was verified", with
   the gap line asserting the opposite; a hand-authored manifest is never removed, the same generated-by rule
-  that keeps it from being overwritten). Disjointness of the two staging roots is likewise decided by a
+  that keeps it from being overwritten). The observed listing is `rclone lsl`'s STDOUT alone — its routine
+  stderr diagnostics (`NOTICE:`/`WARNING:` lines) are never counted as listing content, since merging the two
+  streams let "empty stdout + one NOTICE + exit 0" read as one object, laundering an empty store past that
+  same gap and inflating real object/byte counts; stderr is quoted only in the could-not-list gap message.
+  Disjointness of the two staging roots is likewise decided by a
   containment predicate rather than string-prefix arithmetic, which read the repo-root sentinel `.` as
   disjoint from every path instead of containing all of them — so `--page-source <repo-root>` would have
   staged the entire repository as page source. `finalize` proves the close actually MERGED — `LANDED.md` present at a required `--base-ref` and

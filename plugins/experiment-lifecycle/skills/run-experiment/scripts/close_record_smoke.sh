@@ -8,7 +8,9 @@
 #     experiment `failed` on a downstream dashboard).
 #   - #729: an artifact root carrying a SIBLING's identifier is refused before anything is written.
 #   - #331/#232: a store that cannot be listed — or that lists clean and comes back EMPTY — produces NO
-#     ARTIFACT_MANIFEST.md at all (never a hollow one, and never a zero-object "verified upload").
+#     ARTIFACT_MANIFEST.md at all (never a hollow one, and never a zero-object "verified upload"); and
+#     rclone's routine stderr NOTICE/WARNING lines are not listing content, so they neither launder an
+#     empty store past that gap nor inflate a real listing's object/byte counts (#820 review round 4).
 #   - #804: a missing seam is exit 3 + a CLOSE-RECORD-GAP: line on stdout, distinct from exit 1 (a real
 #     failure), with everything else still emitted.
 #   - #512: the emitted close self-audit checklist is UNSTARTED (no ☑/☒ gate lines).
@@ -52,9 +54,12 @@ export RSR_CALLS="$T/rsr-calls"; : > "$RSR_CALLS"
 
 # Stub rclone: `lsl <dest>` prints a fixed listing, fails (exit 1) when RCLONE_FAIL=1, or succeeds with an
 # EMPTY listing when RCLONE_EMPTY=1 — the "clean exit, nothing there" case a manifest must never launder.
+# RCLONE_NOISY=1 adds the routine stderr diagnostic real rclone emits (the "config file not found" NOTICE):
+# it is not listing content, and merging it into the capture laundered an empty store (#820 round 4).
 mkdir -p "$T/stub"
 cat > "$T/stub/rclone" <<'STUB'
 #!/usr/bin/env bash
+[ "${RCLONE_NOISY:-0}" = 1 ] && echo "2026/09/02 NOTICE: using default config" >&2
 [ "${RCLONE_FAIL:-0}" = 1 ] && { echo "Listing error: directory not found" >&2; exit 1; }
 [ "${RCLONE_EMPTY:-0}" = 1 ] && exit 0
 if [ "$1" = "lsl" ]; then
@@ -181,6 +186,28 @@ RCLONE_EMPTY=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifa
 grep -qxF '# hand-written manifest' "$D/ARTIFACT_MANIFEST.md" \
   && pass "the gap path never deletes a hand-authored manifest" \
   || fail "the gap path deleted a hand-authored ARTIFACT_MANIFEST.md"
+
+# ---- 4d/4e. rclone's own stderr diagnostics are NOT listing content (#820 review round 4) ----
+# Real rclone routinely emits NOTICE/WARNING lines on stderr while exiting 0. Merging them into the capture
+# made "empty stdout + one NOTICE + exit 0" read as one object: the empty-store gap bypassed and a manifest
+# written claiming a verified upload (4d), and real listings inflated by the diagnostic lines (4e).
+D="$(new_record exp-a)"
+RCLONE_NOISY=1 RCLONE_EMPTY=1 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+[ "$RC" = 3 ] && pass "a NOISY empty store still exits 3 — stderr is not a listing" || fail "noisy empty listing exit was $RC, expected 3 ($OUT / $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] \
+  && fail "a stderr NOTICE laundered an EMPTY store into a verified-upload manifest (#331/#820 round 4)" \
+  || pass "no manifest from a noisy empty store (#331)"
+case "$OUT" in *"CLOSE-RECORD-GAP: the artifact store"*"is EMPTY (0 objects)"*) pass "the noisy empty store takes the EMPTY gap, not the observed path";;
+  *) fail "noisy empty store not reported as EMPTY: $OUT";; esac
+
+D="$(new_record exp-a)"
+RCLONE_NOISY=1 EXPERIMENT_LEDGER_EVENT_CMD="$T/stub/ledger.sh" run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a"
+grep -qE '^\| objects \| 2 \|' "$D/ARTIFACT_MANIFEST.md" \
+  && pass "a stderr NOTICE does not inflate the observed object count" \
+  || fail "the object count counted a stderr diagnostic line ($(grep -E '^\| objects' "$D/ARTIFACT_MANIFEST.md" || true))"
+grep -q 'NOTICE' "$D/ARTIFACT_MANIFEST.md" \
+  && fail "a stderr diagnostic line was embedded in the manifest's listing" \
+  || pass "no stderr diagnostic text anywhere in the manifest"
 
 # ---- 5. ledger seam wired: invoked with the REGISTRY DIR NAME, not the run-id (#473) ----
 : > "$LEDGER_CALLS"
