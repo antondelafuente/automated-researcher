@@ -29,9 +29,13 @@
   its cause — the verifier saw only a hand-packed dir, so a forgotten path was UNKNOWN *by construction*
   (found in 3/3 recent designs, ~2-3 min and ~$1-2 each, never once surfacing a new contradiction). Opt-in
   `check:` directives (`exists`/`sha256`/`rows`/`commit`) settle a claim deterministically and skip the
-  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed. Packet inclusion is
-  decided by RESOLUTION, not by how path-shaped a token looks (a shape guess dropped a bare `RESULTS.md`
-  and a long-extension `artifacts/model.safetensors` in silence — the very hole `--exp` exists to close);
+  verifier entirely; a failing directive DISPUTEs, so the gate still fails closed — and precedence is
+  FAILURE-FIRST, so a directive the environment can't evaluate (`commit` outside a git repo) never rescues
+  a sibling that already failed into being an open question for the model. Packet inclusion is decided by
+  RESOLUTION and nothing else, with no shape pre-filter in front of it — every shape guess dropped a real
+  record in silence (a bare `RESULTS.md` and a long-extension `artifacts/model.safetensors`; then an
+  extensionless `SHA256SUMS`/`Makefile`), which is the very hole `--exp` exists to close, so the asymmetry
+  now runs toward including: a word that happens to name a file only adds a primary record;
   a `<path>@<sha>` citation is materialized from git AT THAT COMMIT, so the verifier reads the bytes the
   claim pinned rather than a working tree that may have been amended since (this is what makes the light
   path's parent-drift check checkable), and it works for a path moved or deleted since; a directory listing

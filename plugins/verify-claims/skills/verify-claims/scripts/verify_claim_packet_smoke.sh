@@ -187,17 +187,22 @@ grep -q "MECHANICAL_FACTS" "$TMP/prompt.txt" \
   || ok "legacy prompt is unchanged — no --exp preamble"
 
 # ---------------------------------------------------------------- 6. citation shapes reach the packet
-# Inclusion must be decided by RESOLUTION, not by how path-shaped a token looks: a shape guess is
-# what silently dropped a bare `RESULTS.md` and a long-extension `artifacts/model.safetensors`
-# (#818 review, P0) — the exact packing hole --exp exists to close.
+# Inclusion must be decided by RESOLUTION, with no shape pre-filter in front of it. Every such guess
+# has dropped a real record: first a bare `RESULTS.md` and a long-extension
+# `artifacts/model.safetensors`, then an EXTENSIONLESS `SHA256SUMS`/`Makefile` that a surviving
+# "slash or extension" pre-filter still rejected before resolve() ran (#818 review rounds 1-2, P0) —
+# the exact packing hole --exp exists to close.
 rm -f "$TMP/prompt.txt"
 mkdir -p "$EXPD/artifacts"
 echo "# results" > "$EXPD/RESULTS.md"
 printf 'weights\n' > "$EXPD/artifacts/model.safetensors"
+printf 'deadbeef  RESULTS.md\n' > "$EXPD/SHA256SUMS"
+printf 'all:\n\t@true\n' > "$EXPD/Makefile"
 CL7="$TMP/claims7.txt"
 cat > "$CL7" <<'EOF'
 1. The headline number lives in RESULTS.md and the checkpoint is artifacts/model.safetensors.
-2. Every arm was scored and/or re-scored at 24k/53k tokens, per no file in particular.
+2. The digests are recorded in `SHA256SUMS`, and the entry point is Makefile.
+3. Every arm was scored and/or re-scored at 24k/53k tokens, per no file in particular.
 EOF
 run_vc "$CL7" "$TMP/out7.md"
 PKT7=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
@@ -206,6 +211,10 @@ PKT7=$(grep -oE '/[^ ]*/packet$' "$TMP/run.log" | tail -1)
 [ -f "$PKT7/artifacts/model.safetensors" ] \
   && ok "a one-level path with a long extension reaches the packet" \
   || bad "cited path artifacts/model.safetensors not copied into the packet"
+[ -f "$PKT7/SHA256SUMS" ] && ok "an extensionless backticked record reaches the packet" \
+  || bad "cited path SHA256SUMS not copied into the packet — a shape pre-filter is still deciding inclusion"
+[ -f "$PKT7/Makefile" ] && ok "an extensionless UNbackticked record reaches the packet (resolution decides)" \
+  || bad "cited path Makefile not copied into the packet — a shape pre-filter is still deciding inclusion"
 grep -qE "WARN cited path does not resolve: (and/or|24k/53k)" "$TMP/run.log" \
   && bad "prose with a slash was reported as a missing record" \
   || ok "prose that merely contains a slash is not reported as a missing record"
@@ -270,6 +279,37 @@ grep -q "TRUNCATED" "$PKT9/registry/exp-1/rollouts.listing.txt" \
 grep -q "TRUNCATED to the first 500 of 505" "$TMP/out9.md" \
   && ok "the verdict's packet manifest marks the cut" \
   || bad "the verdict manifest does not mark the truncated listing"
+
+# ------------------------------------------------- 9. an unevaluable directive can't rescue a failed one
+# `check: commit` is unevaluable outside a git repo. Paired with an already-FAILED `check: exists`,
+# testing unevaluable-before-failed sent the whole claim to the model as an open question instead of
+# DISPUTING it — the gate failing OPEN (#818 review round 2, P0). Failure-first is the precedence.
+rm -f "$TMP/prompt.txt"
+NOGIT="$TMP/nogit-exp"; mkdir -p "$NOGIT"
+echo "# DESIGN — an experiment dir outside any git repo" > "$NOGIT/DESIGN.md"
+CL10="$TMP/claims10.txt"
+cat > "$CL10" <<'EOF'
+1. The manifest is present and was committed.
+   check: exists nope-not-here.jsonl
+   check: commit DESIGN.md@0123456789abcdef0123456789abcdef01234567
+2. The design landed on this branch.
+   check: commit DESIGN.md@0123456789abcdef0123456789abcdef01234567
+EOF
+STUB_PROMPT="$TMP/prompt.txt" STUB_EVIDENCE_SEEN="$TMP/evidence.txt" \
+VERIFIER_CMD="OUT_TMP=\"\$OUT_TMP\" STUB_EVIDENCE=\"\$EVIDENCE\" bash $STUB" \
+  bash "$VC" --exp "$NOGIT" "$CL10" "$TMP/out10.md" >"$TMP/run10.log" 2>&1
+grep -qE "^CLAIM 1: DISPUTE" "$TMP/out10.md" \
+  && ok "a failed directive DISPUTEs even when a sibling directive is unevaluable" \
+  || bad "a failed check: escaped DISPUTE because a sibling was unevaluable — the gate failed OPEN"
+grep -qE "^\s*1\." "$TMP/prompt.txt" \
+  && bad "the already-failed claim was handed to the verifier as an open question" \
+  || ok "the already-failed claim never reached the verifier"
+grep -qE "^\s*2\." "$TMP/prompt.txt" \
+  && ok "a claim whose ONLY directive is unevaluable still goes to the verifier" \
+  || bad "an unevaluable-only claim was settled by code instead of sent to the verifier"
+grep -q "could not be evaluated mechanically" "$TMP/prompt.txt" \
+  && ok "the verifier is told which directive the environment could not evaluate" \
+  || bad "the unevaluable-only claim reached the verifier without its note"
 
 [ "$fail" = 0 ] && echo "[verify_claim_packet_smoke] PASS" >&2 || echo "[verify_claim_packet_smoke] FAIL" >&2
 exit "$fail"

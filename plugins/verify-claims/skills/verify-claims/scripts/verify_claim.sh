@@ -34,19 +34,24 @@
 #   check: rows   <path> <n>        # line count (alias: lines)
 #   check: commit <path>@<sha>      # path present at <sha> AND <sha> is an ancestor of HEAD
 # A failing directive is a DISPUTE (a cited path that does not resolve fails loudly, on purpose — a
-# gate must fail closed). A directive the ENVIRONMENT cannot evaluate (e.g. `commit` outside a git
-# repo) resolves nothing: that claim goes to the verifier with a note. Paths cited WITHOUT a
-# directive are still resolved, copied into the packet, and reported in MECHANICAL_FACTS.md — they
-# just don't auto-settle their claim, because only the author knows whether the sentence asserts more
-# than the mechanical fact does.
+# gate must fail closed). Precedence is FAILURE-FIRST: a directive the ENVIRONMENT cannot evaluate
+# (e.g. `commit` outside a git repo) settles nothing by itself, but it never rescues a SIBLING
+# directive that failed — a claim with any failed directive is DISPUTED however many of its others
+# were unevaluable, and only a claim with no failure and something unevaluable goes to the verifier
+# with a note. Paths cited WITHOUT a directive are still resolved, copied into the packet, and
+# reported in MECHANICAL_FACTS.md — they just don't auto-settle their claim, because only the author
+# knows whether the sentence asserts more than the mechanical fact does.
 #
-# How a citation is recognized: any token that could name a file — a bare `RESULTS.md` as much as
-# `registry/x/data/train.jsonl` or `artifacts/model.safetensors` — is resolved, and it goes in the
-# packet if it resolves anywhere under the search bases. Only the UNRESOLVED case needs a shape
-# judgment, since prose carries slashes ("and/or") and dots ("e.g."): an unresolved token is reported
-# loudly as a missing record when it is unambiguously a path (two-plus slashes, a slash plus an
-# extension, a `@sha` pin) or the author backticked it; otherwise it is treated as prose and dropped.
-# Write a `check: exists <path>` when you need an unresolvable bare name to fail the gate outright.
+# How a citation is recognized: there is NO shape pre-filter. Every token that could be a filename is
+# resolved against the search bases, and it goes in the packet if it resolves — a bare `RESULTS.md`,
+# an extensionless `SHA256SUMS` or `Makefile`, and `artifacts/model.safetensors` alike. Shape is
+# consulted only for a token that resolves to NOTHING, since prose carries slashes ("and/or") and
+# dots ("e.g."): an unresolved token is reported loudly as a missing record when it is unambiguously
+# a path (two-plus slashes, a slash plus an extension, a `@sha` pin) or the author backticked it;
+# otherwise it is dropped as prose. The asymmetry is deliberate — an ordinary word that happens to
+# name a real file only adds a primary record to the packet, while a dropped citation re-opens the
+# exact hole --exp exists to close. Write a `check: exists <path>` when you need an unresolvable bare
+# name to fail the gate outright.
 #
 # A `<path>@<sha>` citation pins a REVISION, and the packet carries THAT revision's bytes (as
 # `<path>@<sha>`), hashed and line-counted from the blob — not the working-tree file, which may have
@@ -190,11 +195,16 @@ for c in claims:
     c["text"] = "\n".join(c["lines"])
 
 # ---- extract + resolve every cited path -------------------------------------------------------
-# Whether a token lands in the packet is decided by RESOLUTION, not by a shape guess: any token that
-# COULD name a file is resolved, and it is included if it resolves. The shape guess is only used to
-# decide whether an UNRESOLVED token is worth reporting loudly. Getting that backwards is what let a
-# bare `RESULTS.md` (no slash) and `artifacts/model.safetensors` (one slash, 11-char extension) fall
-# out of the packet in silence — the exact packing hole --exp exists to close (#818 review, P0).
+# Whether a token lands in the packet is decided by RESOLUTION, and by nothing else: every token is
+# resolved, and it is included if it resolves. There is deliberately NO shape pre-filter in front of
+# that — any test cheap enough to run before resolving is a guess about what a filename looks like,
+# and each such guess has silently dropped a real record: first a bare `RESULTS.md` and a
+# long-extension `artifacts/model.safetensors`, then an extensionless `SHA256SUMS` / `LICENSE` /
+# `Makefile` that a "slash or extension" pre-filter still rejected before resolve() ever ran
+# (#818 review rounds 1-2, P0). Shape survives ONLY to decide whether an UNRESOLVED token is worth
+# reporting loudly. The costs are asymmetric on purpose: an ordinary word that happens to name a real
+# file adds one primary record to the packet, while a dropped citation is the packing hole --exp
+# exists to close.
 PATH_RE = re.compile(r"(?<![\w/@])((?:[\w.~+-]+/)*[\w.~+-]+)(?:@([0-9a-fA-F]{7,40}))?")
 URL_RE = re.compile(r"\w+://\S+")
 TICK_RE = re.compile(r"`([^`\n]+)`")
@@ -202,11 +212,6 @@ EXT_RE = re.compile(r"\.[A-Za-z0-9_]{1,16}$")
 TRAILING = ".,;:!?)]}\"'"
 HEAD_LINES, TAIL_LINES, MAX_LISTING = 200, 100, 500
 SEARCH_BASES = [b for b in (EXP, os.path.dirname(EXP), ROOT, os.getcwd()) if b]
-
-
-def could_name_a_file(p):
-    """Cheap pre-filter: is this token worth a resolve() call at all?"""
-    return "/" in p or EXT_RE.search(p) is not None
 
 
 def unambiguously_a_path(p):
@@ -240,7 +245,7 @@ for text in ["\n".join(preamble)] + [c["text"] for c in claims]:
     ticked |= {t.split("@", 1)[0] for t in list(ticked) if "@" in t}
     for m in PATH_RE.finditer(text):
         p = m.group(1).rstrip(TRAILING)
-        if not p or p.endswith("/") or not could_name_a_file(p):
+        if not p or p.endswith("/"):
             continue
         ent = cited.setdefault(p, {"commits": set(), "loud": False})
         ent["loud"] = ent["loud"] or unambiguously_a_path(p) or p in ticked or bool(m.group(2))
@@ -508,17 +513,27 @@ for c in claims:
         residual.append(c)
         continue
     results = [(k, a, *eval_check(k, a)) for k, a in c["checks"]]
-    if any(r[2] is None for r in results):
+    failed = [r for r in results if r[2] is False]
+    unevaluable = [r for r in results if r[2] is None]
+    # FAILURE-FIRST precedence. An unevaluable directive settles nothing on its own, but it must not
+    # rescue a SIBLING that failed: testing "any unevaluable?" before "any failed?" handed a claim
+    # whose `check: exists` had already come back MISSING to the model as an open question, just
+    # because a second `check: commit` couldn't run outside a git repo — a gate that fails OPEN,
+    # which is the one outcome these directives exist to make impossible (#818 review round 2, P0).
+    if unevaluable and not failed:
         c["note"] = ("    [verify_claim] a `check:` directive could not be evaluated mechanically: "
-                     + "; ".join(r[3] for r in results if r[2] is None))
+                     + "; ".join(r[3] for r in unevaluable))
         residual.append(c)
         continue
-    ok = all(r[2] for r in results)
+    ok = not failed
     mech_lines.append(f"CLAIM {c['n']}: {'CONFIRM' if ok else 'DISPUTE'}")
     mech_lines.append("  evidence: MECHANICAL_FACTS.md: \"" + "; ".join(r[3] for r in results).replace('"', "'") + "\"")
     mech_lines.append("  reasoning: resolved deterministically by verify_claim.sh --exp "
-                      f"({len(results)} check directive(s), {'all passed' if ok else 'at least one failed'}); "
-                      "no model judgment involved.")
+                      f"({len(results)} check directive(s), "
+                      f"{'all passed' if ok else f'{len(failed)} failed'})"
+                      + (f"; {len(unevaluable)} could not be evaluated in this environment, but a failed "
+                         "directive is decisive on its own" if unevaluable else "")
+                      + "; no model judgment involved.")
 
 # ---- write the packet's derived files + this script's own hand-off files ----------------------
 with open(os.path.join(PACKET, "MECHANICAL_FACTS.md"), "w", encoding="utf-8") as fh:

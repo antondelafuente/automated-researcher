@@ -48,9 +48,12 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
 
 - **The packet is assembled from the experiment dir.** `DESIGN.md` always, plus every path the claims
   file cites that actually resolves (searched under the experiment dir, its parent, the repo root,
-  and the cwd — so a sibling experiment's record resolves too). A bare `RESULTS.md` counts as much as
-  `registry/x/data/train.jsonl` or `artifacts/model.safetensors`: **inclusion is decided by
-  resolution, not by how path-shaped the token looks.** Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
+  and the cwd — so a sibling experiment's record resolves too). **Inclusion is decided by resolution
+  and nothing else — there is no shape pre-filter in front of it**, so an extensionless `SHA256SUMS`
+  or `Makefile` counts as much as a bare `RESULTS.md`, `registry/x/data/train.jsonl`, or
+  `artifacts/model.safetensors`. (An ordinary word that happens to name a real file just adds a
+  primary record; a dropped citation is the hole `--exp` exists to close, so the asymmetry runs
+  toward including.) Files over `VERIFY_CLAIM_MAX_BYTES` (2 MiB)
   go in as a head+tail excerpt; directories go in as a listing, and a listing cut at 500 entries says
   so in the facts, the manifest, and the listing file (unlisted is not the same as absent).
 - **A `<path>@<sha>` citation pins a REVISION, and the packet carries that revision's bytes** — the
@@ -74,7 +77,11 @@ ever turned up a new contradiction). `--exp` removes the cause rather than the s
   (a cited path that doesn't resolve fails CLOSED, on purpose — a gate that fails open is not a gate).
   Those claims never reach the verifier, so the model's pass is spent on the **semantic** provenance
   claims, which is what it is actually better than a script at. A directive the *environment* can't
-  evaluate (e.g. `commit` outside a git repo) settles nothing: that claim goes to the verifier with a note.
+  evaluate (e.g. `commit` outside a git repo) settles nothing **by itself**, and precedence is
+  failure-first: a claim with any failed directive is DISPUTED however many of its others were
+  unevaluable, and only a claim with no failure and something unevaluable goes to the verifier with a
+  note. (Reading it the other way round lets an already-MISSING `check: exists` reach the model as an
+  open question because a sibling `check: commit` couldn't run — the gate failing open.)
 - **Write directives only for what a script can truly settle.** A claim whose sentence asserts more
   than its directives check (identity, lineage, "same construct as") is a semantic claim — leave the
   directives off and let the verifier read it, with the mechanical facts now in front of it.
