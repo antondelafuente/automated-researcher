@@ -8,7 +8,12 @@
   a size. `ARTIFACT_MANIFEST.md` is now written only against a listing BYTE-VERIFIED against the local set
   the run uploaded (`--uploaded-from`, repeatable per #460's per-artifact-completion uploads): ≥1 object,
   every uploaded file present at a matching size and md5 wherever the store gives one, and nothing in the
-  listing unaccounted for — any failure means no manifest, a non-zero exit and one line saying which.
+  listing unaccounted for — any failure means no manifest, a non-zero exit and one line saying which. That
+  local set must say ONE thing about each path, so two legs carrying the same relative path fail closed when
+  they differ in SIZE **or** in BYTES — a same-size/different-byte pair collapsed into a single entry that
+  was then hashed from whichever leg was seen first, letting a corrupted second leg ride a matching first
+  leg into a "verified" manifest; byte-identical copies stay legitimate, since two legs uploading the same
+  file say one thing.
   Emission is atomic write-or-nothing (staged in a temp dir, moved into place only after every check and
   the terminal ledger event), a failed check renames an earlier generated manifest `*.stale` instead of
   leaving it claiming a verified upload, and a missing seam/`rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line

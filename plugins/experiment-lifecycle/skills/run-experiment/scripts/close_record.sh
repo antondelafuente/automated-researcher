@@ -162,12 +162,19 @@ stale_generated() {
 # ---------------------------------------------------------------------------------------------------------
 # Globals the verifier fills: LISTING (raw stdout, verbatim), OBJECTS, BYTES, HASH_MODE.
 LISTING=""; OBJECTS=0; BYTES=0; HASH_MODE="size-only (the store reported no hashes)"
-declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=()
+declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
 
-# local_artifact_set <dir>...: fill LOCAL_SIZE with `relative-path -> byte size` for every regular file
-# under each uploaded-from dir. Several dirs are accepted because the completion boundary uploads PER
-# ARTIFACT-COMPLETION (#460), so one root legitimately receives several local legs; a path two dirs disagree
-# on is ambiguous and fails closed rather than picking one.
+# local_artifact_set <dir>...: fill LOCAL_SIZE with `relative-path -> byte size` and LOCAL_SRC with
+# `relative-path -> the dir-qualified path of the first copy seen`, for every regular file under each
+# uploaded-from dir. Several dirs are accepted because the completion boundary uploads PER
+# ARTIFACT-COMPLETION (#460), so one root legitimately receives several local legs; a path two dirs DISAGREE
+# on is ambiguous and fails closed rather than picking one. Disagreement is SIZE **or** BYTES: two same-size
+# copies with different contents collapse into one entry that the verification below would then check
+# against whichever copy happened to be seen first, so a corrupted second leg could ride a matching first
+# leg into a "verified" manifest. Byte-identical copies are NOT a disagreement — two legs uploading the same
+# file say one thing — so the legitimate #460 multi-leg shape still verifies. Cost: `cmp` runs only on a
+# rel-path collision ACROSS legs and short-circuits at the first differing byte; priced fine at the ~10-agent
+# scale.
 # NUL-delimited (`%P\0`) so a path containing a newline is read raw rather than silently splitting into two
 # bogus entries — a corrupted local set would make the verification below assert the wrong thing. `-type f`
 # (regular files only, symlinks not followed) matches rclone's own default of skipping symlinks, so the two
@@ -177,10 +184,17 @@ local_artifact_set() {
   for d in "$@"; do
     while IFS=$'\t' read -r -d '' size rel; do
       [ -n "$rel" ] || continue
-      if [ -n "${LOCAL_SIZE["$rel"]:-}" ] && [ "${LOCAL_SIZE["$rel"]}" != "$size" ]; then
-        die "--uploaded-from dirs disagree about '$rel' (${LOCAL_SIZE["$rel"]} vs $size bytes) — the local artifact set must say ONE thing about each uploaded object; pass the dirs that were actually uploaded to distinct paths under the root"
+      if [ -n "${LOCAL_SIZE["$rel"]:-}" ]; then
+        if [ "${LOCAL_SIZE["$rel"]}" != "$size" ]; then
+          die "--uploaded-from dirs disagree about '$rel' (${LOCAL_SIZE["$rel"]} vs $size bytes) — the local artifact set must say ONE thing about each uploaded object; pass the dirs that were actually uploaded to distinct paths under the root"
+        fi
+        if ! cmp -s "${LOCAL_SRC["$rel"]}" "$d/$rel"; then
+          die "--uploaded-from dirs disagree about '$rel' (${LOCAL_SRC["$rel"]} and $d/$rel are the SAME size, $size bytes, but DIFFERENT bytes) — the local artifact set must say ONE thing about each uploaded object; pass the dirs that were actually uploaded to distinct paths under the root"
+        fi
+        continue
       fi
       LOCAL_SIZE["$rel"]="$size"
+      LOCAL_SRC["$rel"]="$d/$rel"
     done < <(find "$d" -type f -printf '%s\t%P\0')
   done
 }
@@ -277,13 +291,14 @@ observe_store() {
   return 0
 }
 
-# local_md5 <relative-path>: the md5 of the local copy of an uploaded object, found in whichever
-# --uploaded-from dir holds it (the first one wins; local_artifact_set already refused a disagreement).
+# local_md5 <relative-path>: the md5 of the local copy of an uploaded object — the copy LOCAL_SRC recorded,
+# which is the first --uploaded-from dir that held it. First-one-wins is provably right rather than merely
+# convenient: local_artifact_set refused any disagreement, and "disagreement" now covers same-size/different-
+# byte copies too, so every leg's copy of this path is byte-identical and they all hash the same.
 local_md5() {
-  local rel="$1" d
-  for d in "${UPLOADED_FROM[@]}"; do
-    if [ -f "$d/$rel" ]; then md5sum "$d/$rel" 2>/dev/null | cut -d' ' -f1; return 0; fi
-  done
+  local src="${LOCAL_SRC["$1"]:-}"
+  [ -n "$src" ] && [ -f "$src" ] || return 0
+  md5sum "$src" 2>/dev/null | cut -d' ' -f1
   return 0
 }
 

@@ -19,8 +19,9 @@
 #   - A1: listing = stdout only; a non-zero lister exit is a hard failure; a stdout line that is not in
 #     `rclone lsl` shape is never a counted object.
 #   - A2: non-empty AND byte-verified, or nothing — a local file absent from the listing, present at a
-#     different size, present with a different md5, or a listing object no local file explains, each mean
-#     NO manifest and a non-zero exit.
+#     different size, present with a different md5, a listing object no local file explains, or two
+#     --uploaded-from legs disagreeing about one path (different size, OR same size and different bytes),
+#     each mean NO manifest and a non-zero exit.
 #   - A3: atomic write-or-nothing — a failing check (or a failing ledger seam) leaves NO paperwork at all,
 #     and an earlier generated manifest is renamed `*.stale` rather than left claiming verified.
 #   - A4: `finalize` FETCHES `--base-ref` and proves the landing at the remote-tracking ref; a local branch
@@ -327,6 +328,26 @@ printf 'second leg\n' > "$U2/eval_summary.json"
 sync_store "$U"; cp "$U2/eval_summary.json" "$T/store/"
 run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" --uploaded-from "$U2"
 [ "$RC" = 0 ] && pass "A2: several --uploaded-from dirs verify as one local set (#460)" || fail "A2: multi-leg upload set rejected (rc=$RC: $ERR)"
+# The same rel path in two legs at the SAME SIZE but DIFFERENT BYTES is a disagreement, not an agreement:
+# size-only comparison collapsed it into one entry and hashed whichever leg was seen first, so a corrupted
+# second leg rode a matching first leg into a "verified" manifest (#823 round 3).
+D="$(new_record exp-a)"; U3="$T/work/upload3"; rm -rf "$U3"; mkdir -p "$U3"
+printf 'AAAA\n' > "$U/collide.bin"; printf 'BBBB\n' > "$U3/collide.bin"
+sync_store "$U"
+run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" --uploaded-from "$U3"
+{ [ "$RC" != 0 ] && case "$ERR" in *"disagree about 'collide.bin'"*"DIFFERENT bytes"*) true;; *) false;; esac; } \
+  && pass "A2: two legs, same size + different bytes BLOCK and the error names the path" \
+  || fail "A2: a same-size/different-byte collision was accepted (rc=$RC: $ERR)"
+[ -e "$D/ARTIFACT_MANIFEST.md" ] && fail "A3: a manifest was written despite an ambiguous local artifact set" \
+  || pass "A3: no manifest when two legs disagree about a path's bytes"
+# Byte-identical copies of the same rel path are NOT a disagreement — the legitimate #460 multi-leg shape
+# (two completions uploading the same file) must keep verifying, or the fix above over-blocks.
+printf 'AAAA\n' > "$U3/collide.bin"
+D="$(new_record exp-a)"; sync_store "$U"
+run paperwork run-1 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-a" --uploaded-from "$U" --uploaded-from "$U3"
+[ "$RC" = 0 ] && pass "A2: byte-identical copies of one path across legs still verify (#460 not over-blocked)" \
+  || fail "A2: byte-identical multi-leg copies were rejected (rc=$RC: $ERR)"
+rm -f "$U/collide.bin"
 
 # ---- 8. A3: a failing ledger seam leaves NO paperwork (write-or-nothing) ----
 D="$(new_record exp-a)"; sync_store "$U"
