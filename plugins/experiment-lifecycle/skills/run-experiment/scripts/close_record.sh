@@ -31,6 +31,10 @@
 #      MATCHING SIZE (and matching hash wherever the store gives one), and nothing in the listing is
 #      unaccounted for by that local set. Any of those failing → no manifest, exit non-zero, one line saying
 #      which. A successful-but-EMPTY listing is evidence AGAINST the upload, not for it (#820 rounds 1-2).
+#      That comparison is only as good as the COMPLETENESS of the two sets it runs over, which is a property
+#      of how they are built, not of the comparison — see the "A2 IS A CLAIM ABOUT TWO COMPLETE SETS" block
+#      below for the total-or-fatal / no-silent-per-file-skip / counted-equals-compared rules the whole
+#      section implements, and why they are derived there once instead of argued per line (#823 rounds 3, 5).
 #   3. ATOMIC WRITE-OR-NOTHING. Every generated file is written to a temp dir inside the record dir and moved
 #      into place only after every check has passed and the terminal ledger event has been written. A failed
 #      run leaves no partial artifact — and a PREVIOUS generated manifest is renamed `*.stale` rather than
@@ -122,7 +126,9 @@ trap cleanup_gen EXIT
 # stage_generated <name> <<'EOF' … : stage one generated file's body. Nothing touches the record dir yet.
 stage_generated() {
   local name="$1"
-  cat > "$TMPDIR_GEN/$name"
+  # The write's status is checked for the same reason every enumeration's is: a short write (a full disk)
+  # would otherwise stage a TRUNCATED artifact that commit_generated then moves into the record as complete.
+  cat > "$TMPDIR_GEN/$name" || die "could not stage the generated $name — nothing was moved into the record"
   GEN_NAMES+=("$name")
 }
 
@@ -162,8 +168,25 @@ stale_generated() {
 # ---------------------------------------------------------------------------------------------------------
 # Store observation + byte verification (invariants 1 + 2)
 # ---------------------------------------------------------------------------------------------------------
+# A2 IS A CLAIM ABOUT TWO COMPLETE SETS, so completeness is the rule this whole section implements — stated
+# once here rather than re-argued per line, because two review rounds (#823 rounds 3 and 5) landed on this
+# same surface for want of that:
+#   (a) TOTAL OR FATAL. Every step that produces a side of the comparison — the local enumeration, the store
+#       listing, either side's hashes — yields the WHOLE set or fails closed. Nothing runs behind a process
+#       substitution or a pipe whose exit status is dropped: output goes to a file whose status is checked,
+#       and a non-zero status is fatal. A partial set is never a set: it is well-formed, shorter, and
+#       indistinguishable from a complete one at the point where the manifest calls it verified.
+#   (b) NO SILENT PER-FILE SKIP. A local copy that cannot be hashed is a hard failure (it is a file this
+#       close cannot verify), and a hash pass that could not RUN is recorded in the manifest as an explicit
+#       size-only that NAMES WHY — never as the lookalike "the store reported no hashes", which is a
+#       different, and in that case false, statement about the store.
+#   (c) THE SET COUNTED IS THE SET COMPARED, asserted at the point of comparison rather than assumed: the
+#       enumerated local rows, the distinct local paths, the counted listing lines and the distinct listed
+#       paths all have to reduce to one number before a manifest may publish it.
 # Globals the verifier fills: LISTING (raw stdout, verbatim), OBJECTS, BYTES, HASH_MODE.
 LISTING=""; OBJECTS=0; BYTES=0; HASH_MODE="size-only (the store reported no hashes)"
+LOCAL_ROWS=0        # rows `find` actually emitted across every --uploaded-from leg (counted, never assumed)
+LOCAL_DEDUPED=0     # rows collapsed onto an already-seen rel path (byte-identical multi-leg copies, #460)
 declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
 
 # local_artifact_set <dir>...: fill LOCAL_SIZE with `relative-path -> byte size` and LOCAL_SRC with
@@ -182,10 +205,21 @@ declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
 # (regular files only, symlinks not followed) matches rclone's own default of skipping symlinks, so the two
 # sides of the comparison are the same set of things.
 local_artifact_set() {
-  local d rel size
+  local d rel size out leg=0
   for d in "$@"; do
+    leg=$((leg + 1))
+    out="$TMPDIR_GEN/.local-set.$leg"
+    # Rule (a): collected to a FILE whose exit status is checked, never `< <(find …)`. A process substitution
+    # discards find's status, so a traversal that hit an unreadable subdirectory — or a find without GNU
+    # `-printf` — handed the loop below a well-formed, SHORT enumeration and the verification then certified
+    # the store against it as though it were the complete uploaded set (#823 round 5, P0).
+    find "$d" -type f -printf '%s\t%P\0' > "$out" \
+      || die "enumerating --uploaded-from '$d' FAILED (find exit $?) — no ARTIFACT_MANIFEST.md was written: the local artifact set is what the listing is verified AGAINST, so a partially enumerated one would certify the store against a silently shortened set (an unreadable subdirectory, or a find without GNU -printf). Fix the traversal error above and re-run"
     while IFS=$'\t' read -r -d '' size rel; do
-      [ -n "$rel" ] || continue
+      LOCAL_ROWS=$((LOCAL_ROWS + 1))
+      # Rule (b): not `continue`. `-d` was already asserted on every leg, so an empty %P means the traversal
+      # produced a record this script does not understand — dropping it would shorten the set silently.
+      [ -n "$rel" ] || die "enumerating --uploaded-from '$d' produced a record with an EMPTY relative path — no ARTIFACT_MANIFEST.md was written: the local artifact set must be exactly the files that were uploaded, and a record this script cannot name is not one it can verify"
       if [ -n "${LOCAL_SIZE["$rel"]:-}" ]; then
         if [ "${LOCAL_SIZE["$rel"]}" != "$size" ]; then
           die "--uploaded-from dirs disagree about '$rel' (${LOCAL_SIZE["$rel"]} vs $size bytes) — the local artifact set must say ONE thing about each uploaded object; pass the dirs that were actually uploaded to distinct paths under the root"
@@ -193,12 +227,17 @@ local_artifact_set() {
         if ! cmp -s "${LOCAL_SRC["$rel"]}" "$d/$rel"; then
           die "--uploaded-from dirs disagree about '$rel' (${LOCAL_SRC["$rel"]} and $d/$rel are the SAME size, $size bytes, but DIFFERENT bytes) — the local artifact set must say ONE thing about each uploaded object; pass the dirs that were actually uploaded to distinct paths under the root"
         fi
+        LOCAL_DEDUPED=$((LOCAL_DEDUPED + 1))
         continue
       fi
       LOCAL_SIZE["$rel"]="$size"
       LOCAL_SRC["$rel"]="$d/$rel"
-    done < <(find "$d" -type f -printf '%s\t%P\0')
+    done < "$out"
   done
+  # Rule (c), local half: every enumerated row was either mapped or deliberately collapsed. Cheap, and it is
+  # the only thing that distinguishes "the map holds N paths" from "N paths is what was enumerated".
+  [ "$((LOCAL_ROWS - LOCAL_DEDUPED))" -eq "${#LOCAL_SIZE[@]}" ] \
+    || die "the local artifact set did not account for every enumerated file (find rows $LOCAL_ROWS, collapsed byte-identical copies $LOCAL_DEDUPED, distinct paths ${#LOCAL_SIZE[@]}) — no ARTIFACT_MANIFEST.md was written: a set the enumeration and the map disagree about is not a set the listing can be verified against"
 }
 
 # observe_store <artifact-root>: capture the listing from STDOUT ONLY, keep stderr separate and surface it,
@@ -219,7 +258,9 @@ observe_store() {
   # Invariant 1: every stdout line must be in `rclone lsl` shape (size, date, time, path). A line that is
   # not is not an object — it is a diagnostic that leaked onto stdout, or an rclone whose output format this
   # script does not understand, and counting it is exactly how an empty store became "1 object, 2026 bytes".
-  while IFS= read -r line; do
+  # `|| [ -n "$line" ]`: a final line with no trailing newline (a truncated stdout) is still a line — read
+  # returns non-zero on it, and letting the loop end there would silently drop it from the counted set.
+  while IFS= read -r line || [ -n "$line" ]; do
     [ -n "${line//[[:space:]]/}" ] || continue
     if [[ "$line" =~ ^[[:space:]]*([0-9]+)[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}[[:space:]]+[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?[[:space:]]+(.+)$ ]]; then
       size="${BASH_REMATCH[1]}"; path="${BASH_REMATCH[3]}"
@@ -230,7 +271,8 @@ observe_store() {
       return 1
     fi
   done < "$out"
-  LISTING="$(cat "$out")"
+  LISTING="$(cat "$out")" \
+    || { echo "BLOCK: the captured listing of '$root' could not be re-read from $out — no ARTIFACT_MANIFEST.md was written: the manifest embeds the listing verbatim, and one it could not read back is not one it can publish" >&2; return 1; }
   # (a) non-empty. A listing that SUCCEEDS and comes back empty is evidence AGAINST the upload: --artifact-root
   # is the caller asserting this run put heavy artifacts there, so zero objects means the upload landed
   # somewhere else (the #729 wrong-root shape) or never ran.
@@ -265,22 +307,62 @@ observe_store() {
     echo "BLOCK: ${#surplus[@]} object(s) in the listing of '$root' are unaccounted for by the local artifact set — no ARTIFACT_MANIFEST.md was written: $(printf '%s ' "${surplus[@]:0:5}"). Either --uploaded-from is not the set that was uploaded, or this root holds another run's objects (the #729 wrong-root shape); name the dirs that were uploaded, or upload to a root of this experiment's own" >&2
     return 1
   fi
-  # Hashes WHERE THE STORE GIVES ONE. A store that cannot hash (or a box without md5sum) is not a failure —
-  # sizes already matched — but it is recorded in the manifest so the record never overstates what was checked.
-  local hs_out hs_rc=0 want got
-  hs_out="$TMPDIR_GEN/.hashsum.out"
-  rclone hashsum md5 "$root" > "$hs_out" 2>/dev/null || hs_rc=$?
-  if [ "$hs_rc" -eq 0 ] && [ -s "$hs_out" ] && command -v md5sum >/dev/null 2>&1; then
-    while IFS= read -r line; do
+  # Rule (c): THE SET COUNTED IS THE SET COMPARED. Every number here comes from a different traversal —
+  # `find` rows, distinct local paths, counted listing lines, distinct listed paths — and the manifest
+  # publishes OBJECTS/BYTES while the three checks above ran over the DISTINCT paths. A listing that repeats
+  # a path makes those two different sets (`objects | N` would describe more than was verified, and the
+  # duplicate's bytes would be summed twice), so it is asserted here rather than assumed to be impossible.
+  local local_distinct="${#LOCAL_SIZE[@]}" store_distinct="${#STORE_SIZE[@]}"
+  if [ "$store_distinct" -ne "$OBJECTS" ]; then
+    echo "BLOCK: the listing of '$root' counted $OBJECTS object line(s) but only $store_distinct distinct object path(s) — a repeated path means the count this manifest would publish is not the set that was verified (and its bytes are summed twice) — no ARTIFACT_MANIFEST.md was written" >&2
+    return 1
+  fi
+  if [ "$local_distinct" -ne "$store_distinct" ] || [ "$((LOCAL_ROWS - LOCAL_DEDUPED))" -ne "$local_distinct" ]; then
+    echo "BLOCK: the local artifact set and the listing of '$root' did not reduce to one set at the point of comparison (find rows $LOCAL_ROWS, collapsed byte-identical copies $LOCAL_DEDUPED, distinct local paths $local_distinct, distinct listed paths $store_distinct, counted listing lines $OBJECTS) — no ARTIFACT_MANIFEST.md was written: a manifest may only report a count it actually compared" >&2
+    return 1
+  fi
+
+  # Hashes WHERE THE STORE GIVES ONE. A store that reports none is not a failure — sizes already matched —
+  # but rule (b) says the manifest must distinguish that from a hash pass that could not RUN. Three different
+  # size-only reasons, each named, because "size-only (the store reported no hashes)" standing in for "the
+  # hash command exited non-zero" is a false statement about the store in the permanent record.
+  local hs_out hs_err hs_rc=0 want got
+  hs_out="$TMPDIR_GEN/.hashsum.out"; hs_err="$TMPDIR_GEN/.hashsum.err"
+  rclone hashsum md5 "$root" > "$hs_out" 2> "$hs_err" || hs_rc=$?
+  # Same rule as the lister's stderr (invariant 1): diagnostics are surfaced verbatim, never parsed.
+  if [ -s "$hs_err" ]; then
+    note "rclone hashsum stderr (diagnostics, not hash content):"
+    sed 's/^/  | /' "$hs_err" >&2
+  fi
+  # Probed by RUNNING it, not by `command -v`: a name on PATH is not a working hasher, and that difference
+  # decides whether a per-file failure below is a capability gap (explicit size-only) or an unreadable local
+  # copy (hard failure). Either way it is recorded — never a silent skip.
+  local md5_ok=1
+  printf '' | md5sum >/dev/null 2>&1 || md5_ok=0
+  if [ "$hs_rc" -ne 0 ]; then
+    HASH_MODE="size-only (the store's md5 listing FAILED: \`rclone hashsum md5\` exit $hs_rc, its stderr surfaced in this close's log — NO hash was checked, and this close cannot say whether the store carries hashes at all)"
+  elif [ ! -s "$hs_out" ]; then
+    HASH_MODE="size-only (the store reported no hashes)"
+  elif [ "$md5_ok" -eq 0 ]; then
+    HASH_MODE="size-only (the store DID report hashes, but no working md5sum is available here, so the local side could not be hashed — NO hash was checked)"
+  else
+    local hs_unparsed=0
+    while IFS= read -r line || [ -n "$line" ]; do
       if [[ "$line" =~ ^([0-9a-fA-F]{32})[[:space:]]+(.+)$ ]]; then
         STORE_HASH["${BASH_REMATCH[2]}"]="${BASH_REMATCH[1],,}"
+      elif [ -n "${line//[[:space:]]/}" ]; then
+        # rclone prints a blank hash field for an object it has no md5 for. Counted, not dropped: the count
+        # is what stops "md5-verified (N of M)" from quietly meaning "M-N were never looked at".
+        hs_unparsed=$((hs_unparsed + 1))
       fi
     done < "$hs_out"
     local checked=0
     for p in "${!LOCAL_SIZE[@]}"; do
       want="${STORE_HASH["$p"]:-}"; [ -n "$want" ] || continue
-      got="$(local_md5 "$p")"
-      [ -n "$got" ] || continue
+      got="$(local_md5 "$p")" || {
+        echo "BLOCK: the store reports an md5 for '$p' but its local copy (${LOCAL_SRC["$p"]}) could NOT be hashed — no ARTIFACT_MANIFEST.md was written: md5sum works on this box, so this is an unreadable or vanished local file, and an uploaded file this close cannot re-hash is one it cannot verify (skipping it silently is how a partial check reads as a complete one)" >&2
+        return 1
+      }
       checked=$((checked + 1))
       [ "$got" = "$want" ] || hashbad+=("$p (local $got vs store $want)")
     done
@@ -288,7 +370,13 @@ observe_store() {
       echo "BLOCK: ${#hashbad[@]} uploaded file(s) are in the listing of '$root' at a matching size but a DIFFERENT md5 than the local copy — no ARTIFACT_MANIFEST.md was written (same size, different bytes is a corrupted upload, not a verified one): $(printf '%s; ' "${hashbad[@]:0:5}")" >&2
       return 1
     fi
-    [ "$checked" -gt 0 ] && HASH_MODE="md5-verified ($checked of $OBJECTS object(s) carried a store hash)"
+    if [ "$checked" -gt 0 ]; then
+      HASH_MODE="md5-verified ($checked of $OBJECTS object(s) carried a store md5, and every one matched)"
+    else
+      HASH_MODE="size-only (the store's hash listing covered none of the $OBJECTS listed object(s))"
+    fi
+    [ "$hs_unparsed" -eq 0 ] \
+      || HASH_MODE="$HASH_MODE; $hs_unparsed store hash line(s) carried no usable md5 and were NOT hash-checked"
   fi
   return 0
 }
@@ -297,11 +385,16 @@ observe_store() {
 # which is the first --uploaded-from dir that held it. First-one-wins is provably right rather than merely
 # convenient: local_artifact_set refused any disagreement, and "disagreement" now covers same-size/different-
 # byte copies too, so every leg's copy of this path is byte-identical and they all hash the same.
+# It RETURNS NON-ZERO rather than printing nothing when it cannot hash: `md5sum … | cut` dropped md5sum's
+# status into the pipe, so an unreadable file came back as an empty string the caller then skipped, and the
+# manifest reported the shortfall as "the store gave no hash for it" (rules (a) and (b)).
 local_md5() {
-  local src="${LOCAL_SRC["$1"]:-}"
-  [ -n "$src" ] && [ -f "$src" ] || return 0
-  md5sum "$src" 2>/dev/null | cut -d' ' -f1
-  return 0
+  local src="${LOCAL_SRC["$1"]:-}" line
+  [ -n "$src" ] && [ -f "$src" ] || return 1
+  line="$(md5sum -- "$src")" || return 1
+  line="${line%% *}"
+  [ "${#line}" -eq 32 ] || return 1
+  printf '%s' "${line,,}"
 }
 
 cmd_paperwork() {
@@ -387,6 +480,14 @@ cmd_paperwork() {
       stale_generated "$dir/ARTIFACT_MANIFEST.md"
       exit 1
     fi
+    # Derived BEFORE the heredoc, with the status checked: a command substitution that fails inside a heredoc
+    # does not fail the `cat` around it, so `$(sort … | head …)` there would embed a silently truncated
+    # "largest objects" block into a manifest that reports itself as verified.
+    local largest_file="$TMPDIR_GEN/.listing.sorted" largest
+    printf '%s\n' "$LISTING" | LC_ALL=C sort -k1,1nr > "$largest_file" \
+      || die "could not sort the observed listing of '$artifact_root' — no ARTIFACT_MANIFEST.md was written: the manifest's largest-objects block is derived from the listing, and a partially derived one misreports what is in the store"
+    largest="$(head -n 15 "$largest_file")" \
+      || die "could not read back the sorted listing of '$artifact_root' — no ARTIFACT_MANIFEST.md was written"
     stage_generated ARTIFACT_MANIFEST.md <<EOF
 $GEN_MARKER
 # Artifact manifest — $exp
@@ -412,7 +513,7 @@ identifier rather than from the variable the copy used (#729).
 ## Largest objects
 
 \`\`\`
-$(printf '%s\n' "$LISTING" | sort -k1,1nr | head -n 15)
+$largest
 \`\`\`
 
 ## Full listing
@@ -424,8 +525,14 @@ EOF
   fi
 
   # ---- REPRODUCTION.md — the #447 fresh-pull reproduction record ----
-  local scripts_list
-  scripts_list="$( (cd "$dir" && find . -type f \( -name '*.py' -o -name '*.sh' \) 2>/dev/null | LC_ALL=C sort) || true)"
+  # Same class as the --uploaded-from enumeration above, on a different set: this list is what a fresh reader
+  # re-runs, so a traversal that failed halfway (its status previously dropped into a pipe, then into
+  # `|| true`) would publish a reproduction recipe silently missing steps. Total or fatal here too.
+  local scripts_list scripts_file="$TMPDIR_GEN/.scripts.list"
+  ( cd "$dir" && find . -type f \( -name '*.py' -o -name '*.sh' \) ) > "$scripts_file" \
+    || die "enumerating the committed scripts under $dir FAILED (find exit $?) — no paperwork was written: REPRODUCTION.md lists the scripts a fresh reader re-runs (#447), and a partially enumerated list is a recipe that silently omits steps"
+  scripts_list="$(LC_ALL=C sort "$scripts_file")" \
+    || die "could not sort the committed-script list under $dir — no paperwork was written"
   [ -n "$scripts_list" ] || scripts_list="TODO(close): no committed *.py/*.sh found under this record — the scripts that produced the reported numbers MUST be committed here (#447)"
   local pull_block
   if [ "${#pull_cmds[@]}" -gt 0 ]; then pull_block="$(printf '%s\n' "${pull_cmds[@]}")"

@@ -464,6 +464,20 @@ gate_page_source() {
     die "this experiment's START.md snapshot carries a [recipes.viewer] recipe, so the publish leg is part of its close (#347) — but no page source is being landed: pass --page-source <dir> to land it in THIS PR (the one-landing close, #819), or --page-source-external <url> if the viewer lives in a different repo and its source already landed there; a viewer-recipe close whose page source lands nowhere is the silent miss #347 exists to prevent"
   fi
 }
+# staged_paths_into <outfile> [pathspec...]: write the NUL-delimited staged path list to <outfile> with git's
+# exit status CHECKED. Every guard below decides on a SET, and `while read … < <(git …)` DISCARDS git's
+# status: a listing that failed partway handed the guard a well-formed but SHORT set, so an incomplete scan
+# read as a clean one — the guards are fail-closed on their own errors (secret_scan already dies on a grep
+# error for exactly this reason) but were fail-OPEN on the enumeration that feeds them. Same construction
+# hole #823 round 5 found in close_record.sh's local artifact set, found here by that round's sweep: a
+# partial set is never a set. It goes through a FILE because a process substitution drops the status and
+# `$( )` cannot carry the NUL delimiters that make these paths safe to read raw.
+staged_paths_into() {
+  local out="$1" rc=0; shift
+  [ -n "${WT:-}" ] && [ -n "${WT_PARENT:-}" ] || die "internal: staged_paths_into called before stage_worktree"
+  git -C "$WT" diff --cached -z --name-only -- "$@" > "$out" || rc=$?
+  [ "$rc" -eq 0 ] || die "could not list the staged set (git diff --cached exit $rc) — refusing to log: the staged-content guards decide on that list, and a partially enumerated one would let an incomplete scan read as a clean one"
+}
 secret_scan() {
   # Deterministic scan for secret-VALUE patterns in the EXACT set git has STAGED in the commit worktree $WT
   # (`git diff --cached`); dies (fail-closed) on a hit or an incomplete scan. Shared by the note gate and the
@@ -492,8 +506,9 @@ secret_scan() {
   # NUL-delimited (`-z`) so a path with a newline / quote / non-ASCII char is read RAW (not git-quoted) — else
   # such a staged file could be skipped by the scan while still being committed (a scan bypass). Keep only
   # existing regular files (a staged deletion names a path that is gone).
-  while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$WT/$f" ] && files+=("$WT/$f"); done < <(
-    git -C "$WT" diff --cached -z --name-only -- "$@")
+  staged_paths_into "$WT_PARENT/scan-staged" "$@"
+  while IFS= read -r -d '' f; do [ -n "$f" ] && [ -f "$WT/$f" ] && files+=("$WT/$f"); done \
+    < "$WT_PARENT/scan-staged"
   # stage_worktree already fails closed on an empty staged set ("nothing to commit"), so a scan reaching here
   # normally has files; guard anyway (a staged pure-deletion would leave nothing to scan — nothing to leak).
   [ "${#files[@]}" -gt 0 ] || { note "secret scan: no staged file content — nothing to scan"; return 0; }
@@ -520,13 +535,17 @@ symlink_scan() {
   # relative vs absolute, dangling, or a target that today lives in-repo by accident), reject ALL staged
   # symlinks wholesale — simpler, and a real copy is never the wrong choice for a registry record.
   [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: symlink_scan called before stage_worktree (no staged worktree)"
-  local hits="" meta mode path
+  local hits="" meta mode path rc=0 raw="$WT_PARENT/scan-staged-raw"
+  # Status CHECKED, not dropped into a process substitution — same reason staged_paths_into exists: a raw
+  # listing that failed halfway would leave a staged symlink outside the set this guard ever looks at.
+  git -C "$WT" diff --cached --raw -z --no-renames -- > "$raw" || rc=$?
+  [ "$rc" -eq 0 ] || die "could not list the staged set to check for symlinks (git diff --cached --raw exit $rc) — refusing to log: a partially enumerated staged set would let a staged symlink through unseen"
   # --no-renames + raw mode line keeps the parse to one <meta>\0<path>\0 pair per entry (a rename/copy status
   # would otherwise emit a second path and desync the read loop). New-mode is the raw line's 2nd field.
   while IFS= read -r -d '' meta && IFS= read -r -d '' path; do
     mode="${meta#* }"; mode="${mode%% *}"
     [ "$mode" = "120000" ] && hits="${hits}${hits:+$'\n'}$path"
-  done < <(git -C "$WT" diff --cached --raw -z --no-renames --)
+  done < "$raw"
   [ -z "$hits" ] || { echo "staged symlink(s) found (a registry record must contain real file content, not a symlink):" >&2
     printf '%s\n' "$hits" | sed 's/^/  /' >&2; die "$KIND contains staged symlink(s)"; }
 }
@@ -542,7 +561,11 @@ temp_handoff_scan() {
   [ -n "${WT:-}" ] && [ -d "$WT" ] || die "internal: temp_handoff_scan called before stage_worktree (no staged worktree)"
   local hit="" root
   for root in "${ROOT_RELS[@]}"; do
-    hit="${hit}$(git -C "$WT" diff --cached --name-only -z -- "$root" | tr '\0' '\n' | grep -xF "$root/TEMP.md" || true)"
+    # The enumeration and the match are SEPARATE steps: `git … | grep -xF … || true` needed the `|| true` for
+    # grep's ordinary no-match exit 1, and that same `|| true` swallowed a failed enumeration — a TEMP.md the
+    # listing never reached read exactly like a TEMP.md that isn't there.
+    staged_paths_into "$WT_PARENT/scan-temp-md" "$root"
+    hit="${hit}$(tr '\0' '\n' < "$WT_PARENT/scan-temp-md" | grep -xF "$root/TEMP.md" || true)"
   done
   [ -z "$hit" ] || die "$KIND has a staged TEMP.md (run-experiment's transient successor-handoff scratch — never part of the record convention) — delete it and retry (run-experiment's close checklist deletes it before staging; automated-researcher#332)"
 }
@@ -773,8 +796,12 @@ check_excluded_claim() {
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   local -r NEGATION_RE=' not |n'"'"'t '
   local -a staged_paths=()
+  # Status checked (staged_paths_into) rather than dropped: a short list here would fail this check CLOSED
+  # rather than open, but "the set is whatever the enumeration managed to produce" is the same defect either
+  # way — a #331 die whose stated reason ("staged nowhere") would be untrue is not a correct block.
+  staged_paths_into "$WT_PARENT/scan-claim-staged" "$REL"
   while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
-    < <(git -C "$WT" diff --cached -z --name-only -- "$REL")
+    < "$WT_PARENT/scan-claim-staged"
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
     for f in "$@"; do

@@ -590,5 +590,49 @@ if run_dry "$T/reg/note" --only sub; then fail "an ancestor .gitignore in the in
     *) fail "blocked, but not on the ignored-file guard (the copy likely still touched the ignored file): $LAST_ERR";; esac; fi
 chmod 644 "$T/reg/note/sub/big46.bin"; rm -rf "$T"
 
+echo "[smoke] case 47: regression 823-A2 — a FAILED staged-set enumeration is fatal, never a shorter set to scan"
+# The construction hole #823 round 5 found in close_record.sh's local artifact set, swept for here: every
+# staged-content guard (secret_scan, symlink_scan, temp_handoff_scan, check_excluded_claim) decides on
+# `git diff --cached`'s output, and reading it through `< <(git …)` DISCARDED git's exit status. A listing
+# that failed partway therefore handed the guard a well-formed but SHORT set, so an incomplete scan read as
+# a clean one — fail-OPEN on the enumeration feeding guards that are otherwise fail-closed.
+#
+# The fixture arms a `git` that fails ONLY the staged-path listing (`diff --cached -z --name-only`) and
+# delegates everything else to the real one, so the run reaches the scans normally and only the enumeration
+# breaks. Pre-fix the gate PASSES having scanned nothing; post-fix it dies naming the enumeration.
+T=$(mktemp_d); make_repo "$T"
+printf 'ordinary content\n' > "$T/reg/note/plain47.md"
+STUBDIR="$(mktemp_d)"          # outside the fixture repo, so the stub is never itself staging input
+REAL_GIT="$(command -v git)"
+cat > "$STUBDIR/git" <<'STUB'
+#!/usr/bin/env bash
+n=$#; i=1
+while [ "$i" -le "$n" ]; do
+  if [ "${!i}" = "diff" ]; then
+    a=$((i+1)); b=$((i+2)); c=$((i+3))
+    if [ "${!a:-}" = "--cached" ] && [ "${!b:-}" = "-z" ] && [ "${!c:-}" = "--name-only" ]; then
+      echo "fatal: simulated index read failure" >&2; exit 128
+    fi
+  fi
+  i=$((i + 1))
+done
+exec "$REAL_GIT" "$@"
+STUB
+chmod +x "$STUBDIR/git"
+cfg47="$(mktemp_d)"
+# `if`, not a bare assignment: this case EXPECTS a non-zero exit, and `out=$(…)` under `set -e` would abort
+# the smoke instead of recording the result.
+if out47="$(PATH="$STUBDIR:$PATH" REAL_GIT="$REAL_GIT" XDG_CONFIG_HOME="$cfg47" AAR_PROFILE="" \
+    LOG_EXPERIMENT_BASE_BRANCH=main bash "$SCRIPT" "$T/reg/note" --dry-run 2>&1)"; then rc47=0; else rc47=$?; fi
+rm -rf "$cfg47" "$STUBDIR"
+if [ "$rc47" -eq 0 ]; then
+  fail "regression 823-A2: the gate PASSED on a staged set the enumeration never produced — an unscanned set read as a clean one: $out47"
+else
+  case "$out47" in *"could not list the staged set"*)
+      pass "regression 823-A2: a failed staged-set enumeration is fatal and says so";;
+    *) fail "regression 823-A2: blocked, but not on the enumeration (the dropped status may still be unchecked): $out47";; esac
+fi
+rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi

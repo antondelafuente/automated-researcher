@@ -13,7 +13,20 @@
   they differ in SIZE **or** in BYTES — a same-size/different-byte pair collapsed into a single entry that
   was then hashed from whichever leg was seen first, letting a corrupted second leg ride a matching first
   leg into a "verified" manifest; byte-identical copies stay legitimate, since two legs uploading the same
-  file say one thing.
+  file say one thing. That verification is only as good as the COMPLETENESS of the two sets it runs over, so
+  the sets are built total-or-fatal: no enumeration or hashing step runs behind a process substitution or a
+  pipe whose exit status is dropped (a `find` that hit an unreadable subdirectory used to hand the verifier
+  a well-formed but SHORT local set, which it then certified the store against as though complete), no
+  per-file step is silently skipped (a local copy that cannot be hashed is a hard failure; a hash pass that
+  could not RUN is recorded as an explicit size-only naming WHY, never as the lookalike "the store reported
+  no hashes"), and the set counted must equal the set compared — asserted at the point of comparison, which
+  is what catches a listing that repeats a path into `objects`/`total bytes` while the verification ran over
+  the distinct ones. The same construction rule is applied to REPRODUCTION.md's committed-script list, and
+  the same sweep found it in `log-experiment.sh`'s staged-content guards: `secret_scan`, `symlink_scan`,
+  `temp_handoff_scan` and `check_excluded_claim` all read `git diff --cached` through a process substitution
+  (or a `|| true` needed for grep's no-match exit), so a listing that failed partway left them scanning a
+  silently shortened set — guards that are fail-closed on their own errors were fail-OPEN on the enumeration
+  feeding them.
   Emission is atomic write-or-nothing (staged in a temp dir, moved into place only after every check and
   the terminal ledger event), a failed check renames an earlier generated manifest `*.stale` instead of
   leaving it claiming a verified upload, and a missing seam/`rclone` is exit 3 + a `CLOSE-RECORD-GAP:` line
