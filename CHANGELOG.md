@@ -12,7 +12,11 @@
   delete is statically bounded the way `reap_scratch.sh` gate 2 states it (argument checked against the
   derivation, never trusted), refuses a symlink / a cwd inside / a mount point at or under the target, and
   is DELEGATED — `close_record.sh` prints a reap-by-hand line rather than deriving an `rm -rf` of its own,
-  and a pull dir containing the record is refused at parse time. A blocked close keeps its pull for
+  and a pull dir containing the record is refused at parse time. That containment test compares BOTH sides
+  PHYSICALLY and fails CLOSED on a side it cannot resolve: a record reached through a symlink alias whose
+  target sits inside the pull is the same self-destructive delete wearing a different spelling, and nothing
+  downstream would catch it — `repro_pull.sh`'s own gates bound the PULL path and know nothing about the
+  record. A blocked close keeps its pull for
   forensics, and an unwired `EXPERIMENT_SCRATCH_ROOT` is a loud `REPRO-PULL-GAP:` no-op, never a guess.
   **New `run-experiment/scripts/stage_artifacts.sh` builds `artifacts/` from LINKS plus a manifest, never a
   `cp`.** Each file is hardlinked into the staging tree (one inode, two names, zero extra bytes — rclone

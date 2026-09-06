@@ -56,8 +56,10 @@
 #     the run-supervision record closes through its own helper (#376/#338).
 #   - #843 (`--reap-repro-pull`): the #447 fresh pull is deleted when the VERDICT is written (REPRODUCTION.md
 #     in the record) and not before — a BLOCKed close keeps it for forensics, a pull dir CONTAINING the
-#     record is refused at parse time with nothing written, and an unresolvable `repro_pull.sh` prints a
-#     reap-by-hand line rather than this script deriving an `rm -rf` from a caller-supplied path.
+#     record is refused at parse time with nothing written (whether the record is named physically or
+#     through a SYMLINK ALIAS into the pull — #846 round 2: the containment test resolves BOTH sides), and
+#     an unresolvable `repro_pull.sh` prints a reap-by-hand line rather than this script deriving an
+#     `rm -rf` from a caller-supplied path.
 #   - invariant 11 (the paperwork half): `--page-source-external <url>` is mutually exclusive with
 #     `--page-source` and is RECORDED as an external landing — LANDED.md never renders an external viewer as
 #     riding this PR, nor as a close whose snapshot carried no `[recipes.viewer]` recipe at all.
@@ -768,6 +770,28 @@ run paperwork run-rp3 "$INSIDE/registry/exp-in" --outcome completed-as-designed 
   && pass "a fresh-pull dir containing the record is refused at parse time" || fail "self-destructive reap accepted (rc=$RC: $ERR)"
 { [ -d "$INSIDE" ] && no_paperwork "$INSIDE/registry/exp-in"; } && pass "that refusal wrote nothing and deleted nothing" \
   || fail "the refused invocation still touched the record or the pull"
+
+# ...and the SAME delete wearing a different spelling: the record reached through a SYMLINK ALIAS whose
+# physical target sits inside the pull (#846 round 2's P0). The predicate that licenses this reap resolves
+# BOTH sides physically, so a logical spelling that "looks outside" the pull refuses exactly like the
+# physical one — repro_pull.sh's own gates bound the PULL path and know nothing about the record, so a miss
+# here is an `rm -rf` that takes the record's physical bytes with it.
+# (The predicate's other half — an unresolvable record dir failing CLOSED — is not asserted here: it cannot
+# be constructed in this harness, because `[ -d ]` and the logical `cd … && pwd` above it must both succeed
+# first, and bash's `pwd -P` canonicalizes the logical path itself rather than calling getcwd(3), so even an
+# unreadable ancestor still resolves. The branch guards a race/permission edge, not a reachable smoke shape.)
+ALIASED="$T/scratch/run-rp3b/fresh_reproduction"; mkdir -p "$ALIASED/registry/exp-alias/scripts"
+printf '# results\n' > "$ALIASED/registry/exp-alias/RESULTS.md"
+printf 'print(1)\n' > "$ALIASED/registry/exp-alias/scripts/a.py"
+ln -sfn "$ALIASED/registry/exp-alias" "$T/rec-alias"
+run paperwork run-rp3b "$T/rec-alias" --outcome completed-as-designed --no-artifacts \
+    --reap-repro-pull "$ALIASED"
+{ [ "$RC" = 1 ] && case "$ERR" in *"would delete this close's own record"*) true;; *) false;; esac; } \
+  && pass "a record dir reached through a SYMLINK ALIAS into the fresh pull is refused too (#846 round 2)" \
+  || fail "an aliased self-destructive reap was accepted (rc=$RC: $ERR)"
+{ [ -d "$ALIASED" ] && no_paperwork "$ALIASED/registry/exp-alias"; } \
+  && pass "that aliased refusal wrote nothing and deleted nothing" \
+  || fail "the refused aliased invocation still touched the record or the pull"
 
 # an unresolvable helper is a REAP-BY-HAND line, never an rm -rf derived here from a caller-supplied path.
 mv "$T/bin/repro_pull.sh" "$T/repro_pull.hidden"

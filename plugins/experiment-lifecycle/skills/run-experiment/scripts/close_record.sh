@@ -548,12 +548,28 @@ local_md5() {
 # nothing. Called at PARSE time (to refuse before anything is written) and again at REAP time against state
 # as it is then — one predicate, two call sites, so a check that licenses the delete and a check that
 # performs it can never disagree (PR #842's round-1 review, same surface).
+#
+# BOTH SIDES ARE COMPARED PHYSICALLY, and a side that cannot be physically resolved fails CLOSED — that is
+# the invariant governing every path comparison that licenses this delete (PR #846 round 2). The record dir
+# keeps its LOGICAL spelling everywhere else in this script (that is what the paperwork names), so the
+# physical resolution happens HERE, inside the one predicate, which is what makes both call sites carry it.
+# The round-2 finding was exactly the one-sided version: `pwd -P` on the pull vs a logical record path, so a
+# record reached through a symlink whose target sat inside the pull compared as OUTSIDE and licensed
+# `repro_pull.sh reap`, whose own gates bound the PULL path and know nothing about the record — the `rm -rf`
+# would have taken the record's physical bytes with it.
+#
+# The asymmetry between the two `|| return 0`s below is deliberate: an unresolvable PULL may still license,
+# because repro_pull.sh's own gates adjudicate that path either way (derived-path equality, physical==named,
+# cwd, mount table); an unresolvable RECORD must fail closed here, because NO downstream gate knows the
+# record exists — non-containment that cannot be established licenses nothing.
 repro_pull_conflict() {
-  local p="$1" rec="$2" preal=""
+  local p="$1" rec="$2" preal="" rreal=""
   [ -d "$p" ] || return 0                       # nothing there: repro_pull.sh's own bound adjudicates it
   preal="$(cd "$p" && pwd -P)" || return 0      # unresolvable: same
-  case "$rec/" in
-    "$preal"/*) printf 'the record dir %s is INSIDE the fresh-pull dir %s, so reaping it would delete the very paperwork that licenses the reap' "$rec" "$preal" ;;
+  rreal="$(cd "$rec" 2>/dev/null && pwd -P)" \
+    || { printf 'the record dir %s cannot be physically resolved, so it cannot be proven to be OUTSIDE the fresh-pull dir %s — refusing to license the reap' "$rec" "$preal"; return 0; }
+  case "$rreal/" in
+    "$preal"/*) printf 'the record dir %s (physically %s) is INSIDE the fresh-pull dir %s, so reaping it would delete the very paperwork that licenses the reap' "$rec" "$rreal" "$preal" ;;
   esac
   return 0
 }
