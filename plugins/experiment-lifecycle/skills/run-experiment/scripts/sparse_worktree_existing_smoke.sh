@@ -18,6 +18,10 @@
 #     proceeds when that same state sits inside a record the caller NAMED. Ignored state is included on
 #     purpose and the smoke proves why: git deletes an ignored-only record dir outright, and the registry's
 #     ignored artifacts are the one class a `git checkout` cannot bring back;
+#   - the PRESERVE read is total-or-fatal: the tree's own cone is read exactly ONCE (a probe-then-read-again
+#     pair is how an unchecked read silently narrows the applied cone), a read that FAILS on a sparse tree
+#     refuses rather than proceeding on an empty set, and that refusal does not over-fire on git's own
+#     "flagged but not actually sparse" state;
 #   - it is a NO-OP on a tree that is not a checkout of the research repo (a blind first act pointed at the
 #     wrong tree must not sparse-checkout an unrelated repo);
 #   - the narrow-default safety property survives in-place sparsification: `git add` outside the cone still
@@ -198,6 +202,59 @@ OUT8="$TMP/out8"
 if bash "$S" --existing "$OWT" 2>"$OUT8" >/dev/null; then ok other-repo-exit0; else no other-repo-exit0; fi
 grep -q "not a checkout of the research repo" "$OUT8" && ok other-repo-says-so || no "other-repo-says-so ($(cat "$OUT8"))"
 has other-repo-untouched "$OWT/src/a.md"
+
+# --- the PRESERVE read is total-or-fatal: an unreadable existing cone must never read as "no cone" ---------
+#     The preserved set is an INPUT the applied cone is derived from, and a failed read of it looks exactly
+#     like an empty one — the answer that NARROWS the cone and drops the record this mode promises to keep.
+#     Exercised with a `git` shim on PATH, since no real git state makes `sparse-checkout list` fail on a tree
+#     that is genuinely sparse (git 2.55 answers exit 0 / empty for a missing or unopenable sparse file).
+SHIM="$TMP/shim"; mkdir -p "$SHIM"
+REAL_GIT="$(command -v git)"
+cat > "$SHIM/git" <<SHIMEOF
+#!/usr/bin/env bash
+# Counts \`sparse-checkout list\` invocations, and fails them when SMOKE_FAIL_LIST is set.
+saw_sc=0; is_list=0
+for a in "\$@"; do
+  [ "\$a" = "sparse-checkout" ] && saw_sc=1
+  [ "\$saw_sc" = 1 ] && [ "\$a" = "list" ] && is_list=1
+done
+if [ "\$is_list" = 1 ]; then
+  echo call >> "$TMP/list-calls"
+  if [ -n "\${SMOKE_FAIL_LIST:-}" ]; then echo "shim: simulated 'sparse-checkout list' failure" >&2; exit 1; fi
+fi
+exec "$REAL_GIT" "\$@"
+SHIMEOF
+chmod +x "$SHIM/git"
+
+# (i) the cone is read ONCE. A probe-then-read-again pair is what let an unchecked second read narrow the set
+#     silently, so the call count is the direct regression assertion, not a proxy for one.
+WT9="$TMP/wt-list-once"
+bash "$S" --repo "$REPO" -b w9 "$WT9" main registry/exp-c >/dev/null 2>&1
+: > "$TMP/list-calls"
+if PATH="$SHIM:$PATH" bash "$S" --existing "$WT9" registry/exp-a >/dev/null 2>&1; then ok list-once-exit0; else no list-once-exit0; fi
+N=$(wc -l < "$TMP/list-calls" | tr -d ' ')
+[ "$N" = 1 ] && ok list-read-exactly-once || no "list-read-exactly-once (got $N invocations)"
+has list-once-preserves-existing-c "$WT9/registry/exp-c/DESIGN.md"
+has list-once-adds-named-a         "$WT9/registry/exp-a/DESIGN.md"
+
+# (ii) when that one read FAILS on a tree that is sparse, the run refuses instead of applying a cone derived
+#      from a set it could not read — and the record the tree was already made for is still there afterwards.
+WT10="$TMP/wt-list-fails"
+bash "$S" --repo "$REPO" -b w10 "$WT10" main registry/exp-c >/dev/null 2>&1
+has  list-fails-precondition-c "$WT10/registry/exp-c/DESIGN.md"
+SMOKE_FAIL_LIST=1 PATH="$SHIM:$PATH" bash "$S" --existing "$WT10" registry/exp-a >/dev/null 2>&1 \
+  && no refuse-unreadable-existing-cone || ok refuse-unreadable-existing-cone
+has  refuse-unreadable-kept-existing-c "$WT10/registry/exp-c/DESIGN.md"
+
+# (iii) ...and that refusal must not over-fire: `core.sparseCheckout=true` with no sparse-checkout file is
+#       git's own "flagged but not actually sparse" state (list: exit 0, empty), which has no cone to preserve
+#       and must still sparsify rather than refuse.
+WT11="$TMP/wt-flagged-not-sparse"
+full_wt "$WT11" w11
+git -C "$WT11" config core.sparseCheckout true
+if bash "$S" --existing "$WT11" registry/exp-a >/dev/null 2>&1; then ok flagged-not-sparse-proceeds; else no flagged-not-sparse-proceeds; fi
+has   flagged-not-sparse-keeps-named "$WT11/registry/exp-a/DESIGN.md"
+hasnt flagged-not-sparse-drops-b     "$WT11/registry/exp-b"
 
 # --- fail-closed refusals ---------------------------------------------------------------------------------
 bash "$S" --existing "$TMP/nope" >/dev/null 2>&1            && no refuse-missing-path      || ok refuse-missing-path

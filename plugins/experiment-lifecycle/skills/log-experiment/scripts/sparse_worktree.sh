@@ -84,6 +84,13 @@
 #     tracked file is left in place with a warning. So the pre-check above refuses all three rather than
 #     letting git pick, and the reclaimed figure is MEASURED with `du` afterwards rather than computed from
 #     the cone — the number reported is the number the filesystem actually gave back.
+#   - EVERY read the applied cone is derived from is TOTAL-OR-FATAL (#821's construction rule): the top-level
+#     dir enumeration, the tree's own existing `sparse-checkout list`, the `git status` refusal gate, and the
+#     `ls-tree` research-repo gate each go through a temp file with a checked exit status, never a pipeline or
+#     a process substitution whose failure is invisible. The reason is asymmetric: a failed read of any of them
+#     looks exactly like "nothing there", and "nothing there" is the answer that NARROWS the cone — i.e. the
+#     answer that drops records. The one deliberate exception is `du` (below), which only feeds the printed
+#     figure and never the cone.
 #   - git older than 2.27 has no `sparse-checkout set --cone`. That degrades LOUDLY to a full checkout rather
 #     than dying: this helper sits on log-experiment's record-landing path, and refusing to land a research
 #     record over a disk optimization would be the wrong trade. The warning names the version so the box gets
@@ -180,10 +187,17 @@ sparsify_existing(){
 
   # Refuse the MAIN working tree. On the instance that is the box's one FULL copy of the registry — the thing
   # every sparse worktree is sparse *against* — and #805's own verified property is that it stays non-sparse.
-  local gitdir commondir
-  gitdir="$(cd "$root" && cd "$(git rev-parse --git-dir)" && pwd -P)" \
+  # Each rev-parse is read into its own variable and checked before it is used: inlined as `cd "$(git …)"` a
+  # failed read expands to the empty string, and `cd ""` is a silent no-op success in bash, so the comparison
+  # below would be made between two values that were never actually read.
+  local gitdir commondir gd cd_
+  gd="$(git -C "$root" rev-parse --git-dir)" \
     || die "--existing: could not resolve the git dir of $root"
-  commondir="$(cd "$root" && cd "$(git rev-parse --git-common-dir)" && pwd -P)" \
+  cd_="$(git -C "$root" rev-parse --git-common-dir)" \
+    || die "--existing: could not resolve the common git dir of $root"
+  gitdir="$(cd "$root" && cd "$gd" && pwd -P)" \
+    || die "--existing: could not resolve the git dir of $root"
+  commondir="$(cd "$root" && cd "$cd_" && pwd -P)" \
     || die "--existing: could not resolve the common git dir of $root"
   [ "$gitdir" != "$commondir" ] \
     || die "--existing: refusing to sparsify $root — it is the MAIN working tree, the one full checkout the sparse ones exist to avoid duplicating; run this on a linked worktree instead"
@@ -200,18 +214,50 @@ sparsify_existing(){
   # Not a checkout of the research repo → nothing this helper knows how to sparsify. Exit 0 without touching
   # it: `--existing` is a session's blind first act, so pointing it at the wrong tree must be a no-op, never
   # a surprise sparse-checkout of an unrelated repo.
-  git -C "$root" ls-tree -d --name-only "$sha" -- "$HEAVY_DIR" 2>/dev/null | grep -qx "$HEAVY_DIR" || {
+  # Read total-or-fatal (temp file, checked exit) rather than through a pipeline: `ls-tree | grep -qx` cannot
+  # tell "$HEAVY_DIR/ is genuinely absent" from "the read failed", and conflating them would report the wrong
+  # reason for doing nothing on a tree that IS the research repo. Empty output with exit 0 is the real
+  # negative — a pathspec matching nothing is not an error to git.
+  local htf
+  htf="$(mktemp)" || die "could not create a temp file"
+  git -C "$root" ls-tree -d --name-only "$sha" -- "$HEAVY_DIR" > "$htf" \
+    || { rm -f "$htf"; die "--existing: could not read the top-level tree of $root at $sha — refusing to decide whether this is a checkout of the research repo from a read that failed"; }
+  if ! grep -qx "$HEAVY_DIR" "$htf"; then
+    rm -f "$htf"
     note "--existing: $root has no top-level $HEAVY_DIR/ at HEAD — not a checkout of the research repo; nothing to sparsify, leaving it alone."
     return 0
-  }
+  fi
+  rm -f "$htf"
 
   # PRESERVE the tree's own registry inclusions. This mode runs as the first act of a session standing in a
   # tree someone ELSE created, so it must never drop the record that tree was made for: an instance-convention
   # instance-created tree made sparse with `registry/<exp>` would otherwise be silently un-materialized by a
   # caller who did not know to re-name it (and a second run would undo the first). This is also what makes
   # re-running a no-op rather than a slow reshuffle.
-  local p
-  if git -C "$root" sparse-checkout list >/dev/null 2>&1; then
+  # ONE `sparse-checkout list`, read total-or-fatal through a temp file (the #821 construction rule, same as
+  # compute_cone and the status gate below). This cone is an INPUT the set applied at the end is derived from,
+  # so losing it is not a benign empty read: it silently narrows the cone and un-materializes exactly the
+  # record this block exists to preserve. A probe-then-read-again pair could not be total either — the read
+  # whose output is consumed was the unchecked one, and the two invocations need not agree.
+  local p ctf lrc=0
+  ctf="$(mktemp)" || die "could not create a temp file"
+  git -C "$root" sparse-checkout list > "$ctf" 2>/dev/null || lrc=$?
+  if [ "$lrc" -ne 0 ]; then
+    rm -f "$ctf"
+    # `list` fails on a tree that is not sparse AT ALL — the ordinary case for the harness/instance-created
+    # trees this mode exists for, where there is by definition no cone to preserve. It also fails on a real
+    # error, and the two must not be conflated, so which one happened is decided from the authoritative
+    # per-worktree setting rather than inferred from the failure: a tree that IS sparse but whose cone cannot
+    # be read is the case that must refuse, not the case that must proceed on an empty list. `config --get`
+    # exits 1 for "key not set" (the not-sparse answer) and >1 for a real read error — which is itself a read
+    # this decision depends on, so it is fatal rather than swallowed into "not sparse".
+    local sc="" src=0
+    sc="$(git -C "$root" config --bool --get core.sparseCheckout 2>/dev/null)" || src=$?
+    [ "$src" -le 1 ] \
+      || die "--existing: could not read core.sparseCheckout in $root (git config exited $src) — refusing to sparsify a tree whose existing sparse state cannot be determined"
+    [ "$sc" != "true" ] \
+      || die "--existing: $root is sparse (core.sparseCheckout=true) but 'git sparse-checkout list' failed there — refusing to apply a cone derived from a set that could not be read, since that would drop whatever $HEAVY_DIR/ record this tree was already made for"
+  else
     while IFS= read -r p; do
       [ -n "$p" ] || continue
       # In cone mode `list` prints plain directories (`registry/exp-a`). Some gits print the raw PATTERN form
@@ -221,11 +267,13 @@ sparsify_existing(){
       # record this tree was created for or silently no-ops a tree that needed sparsifying.
       case "$p" in
         '!'*|/*)
+          rm -f "$ctf"
           note "--existing: cannot read $root's existing sparse-checkout cone — this git prints it in pattern form ('$p'), so which $HEAVY_DIR/ record(s) it keeps is not readable here. Leaving the tree alone rather than guessing."
           return 0 ;;
       esac
       case "$p" in "$HEAVY_DIR"|"$HEAVY_DIR"/*) inc+=("$p") ;; esac
-    done < <(git -C "$root" sparse-checkout list 2>/dev/null)
+    done < "$ctf"
+    rm -f "$ctf"
   fi
   # Dedupe (the caller's includes and the tree's own cone routinely overlap) so the reported count is real.
   declare -a uniq=()

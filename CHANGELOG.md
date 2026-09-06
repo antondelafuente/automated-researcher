@@ -8,9 +8,13 @@
   creation path can be intercepted from here, the product-side lever is the FIRST ACT of the session that
   lands in such a tree: **`sparse_worktree.sh --existing <path> [registry/<exp> ...]`** applies the same cone
   in place, reclaiming the already-materialized registry copy instead of preventing it. One cone recipe now
-  serves both modes (extracted into a shared function, so create-side and in-place can't drift), and the
-  enumeration it is derived from is total-or-fatal rather than read through a process substitution whose
-  failure would silently narrow the cone to nothing (#821's construction rule). It is idempotent (a re-run
+  serves both modes (extracted into a shared function, so create-side and in-place can't drift), and EVERY
+  read the applied cone is derived from is total-or-fatal — the top-level enumeration, the tree's own
+  existing `sparse-checkout list`, the `git status` refusal gate and the research-repo gate each go through a
+  checked read rather than a pipeline or process substitution whose failure is invisible (#821's construction
+  rule). The asymmetry is why: a failed read of any of them looks exactly like "nothing there", and "nothing
+  there" is the answer that NARROWS the cone, i.e. the one that drops records. A tree that is sparse but
+  whose existing cone cannot be read is therefore a refusal, not an empty preserved set. It is idempotent (a re-run
   reclaims 0), and prints the bytes it reclaimed MEASURED with `du` before/after rather than computed from
   the cone, because what git actually gives back depends on state the cone doesn't describe. It fails closed
   rather than destructively, on each of the three behaviors verified directly against git 2.55: it refuses
