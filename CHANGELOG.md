@@ -12,7 +12,17 @@
   warrant that the worktree's is a stale earlier revision rather than the only copy). One off-allowlist path
   keeps the whole worktree out; a superseded-class *basename* at a path main lacks is not superseded at all.
   The reason string names the allowlist in full, since this is the one tier-1 bar that deletes bytes main
-  does not itself carry. **The age bar is now per tier:** `--merged-min-age-days` (default 2) for
+  does not itself carry. The allowlist spans all THREE residue categories — dirty, untracked AND **ignored**
+  — because a tier-1 reap deletes all three identically, so the set of paths the safety bar adjudicates has
+  to be the set the reap destroys. The ignored category is the main event, not a refinement: a normal
+  `.gitignore` (this repo's own included) already ignores `__pycache__/`, `*.pyc` and `*.run.log`, so on a
+  real box those paths arrive as ignored rather than untracked, and an allowlist consulted only against
+  dirty/untracked residue would be inert against exactly the worktrees it was written for. What does not
+  carry over is the byte-identity fallback: for ignored paths, allowlist membership is the only way through
+  and any other ignored path vetoes tier 1 outright, which keeps the widening bounded to the named
+  allowlist and preserves the veto's original purpose (a stray `.env`, unstaged secrets and a 6 GB venv are
+  none of the allowlisted classes). Ignored paths that cleared the bar are named explicitly in the tier-1
+  reason rather than folded into "clean". **The age bar is now per tier:** `--merged-min-age-days` (default 2) for
   ancestry-merged worktrees, `--min-age-days` (default 7, unchanged) for unmerged ones and scratch — for an
   unmerged tree the age IS the evidence nobody is continuing it, while for a merged one every committed byte
   is already on main and "is someone still working here" is answered by the live-owner veto, not by waiting;

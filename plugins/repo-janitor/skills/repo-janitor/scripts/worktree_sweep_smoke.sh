@@ -23,7 +23,11 @@
 #     non-identical residue is entirely regenerable (`*.run.log`, `__pycache__/`, `*.pyc`) or superseded by
 #     main's own copy of the same path reaches tier 1, names its allowlist in the reason, and is really
 #     removed — while ONE off-allowlist file, or a superseded-class basename at a path main does NOT carry,
-#     keeps the worktree reported and alive through a real --reap-tier1
+#     keeps the worktree reported and alive through a real --reap-tier1. The fixture repo carries a REAL
+#     .gitignore, so the regenerable classes arrive IGNORED (the category they land in on any real repo,
+#     this one included) rather than untracked: a merged worktree whose entire residue is ignored and
+#     allowlisted reaches tier 1, says so in its reason, and is really removed, while one off-allowlist
+#     ignored file (a local `.env`) keeps the whole worktree silent and intact through a real --reap-tier1
 #   - the PER-TIER age bar (#840): a merged worktree 3d old reaches tier 1 under the default 2-day merged
 #     bar while an unmerged 3d-old one stays silent under the unchanged 7-day bar, and each bar is movable
 #     independently (--merged-min-age-days / --min-age-days), with a negative value rejected
@@ -501,14 +505,26 @@ if [ -f "$M_REPO/registry/exp-1/RESULTS.md" ]; then ok "merged-residue-identity:
 #      record files main already holds in post-run form. The two negative cases below are the whole safety
 #      story for this bar: ONE off-allowlist file keeps the worktree out, and a SUPERSEDED-class basename
 #      whose exact path main does NOT carry is not superseded at all (it exists nowhere else).
+#
+#      THE FIXTURE CARRIES A REAL `.gitignore` (Codex review of PR #842), and that is load-bearing, not
+#      set dressing: a normal Python repo's ignore rules — including this repo's own — already cover
+#      `__pycache__/`, `*.pyc` and `*.run.log`, so on a real box those paths arrive from `git status` as
+#      IGNORED, not untracked. The first cut of this block used a fixture with no `.gitignore` at all, so
+#      every regenerable class read as untracked and the bar was only ever exercised against a category it
+#      does not meet in production; with the ignore rules in place these cases fail on the pre-fix code
+#      (the worktrees go SILENT under the old `ignored == 0` tier-1 gate) exactly as they did on the box.
 A_ORIGIN="$TMP/a-origin.git"; A_REPO="$TMP/a-repo"
 git init -q --bare -b main "$A_ORIGIN"
 git init -q -b main "$A_REPO"
 g "$A_REPO" config user.email t@example.com; g "$A_REPO" config user.name smoke
-echo hello > "$A_REPO/f.txt"; g "$A_REPO" add f.txt; g "$A_REPO" commit -q -m init
+echo hello > "$A_REPO/f.txt"; g "$A_REPO" add f.txt
+# `.env` is the off-allowlist ignored pattern Case E uses below: the local-secrets case the ignored veto
+# was built for, which must keep vetoing after the allowlist widens.
+printf '__pycache__/\n*.pyc\n*.run.log\n.env\n' > "$A_REPO/.gitignore"; g "$A_REPO" add .gitignore
+g "$A_REPO" commit -q -m init
 g "$A_REPO" remote add origin "$A_ORIGIN"; g "$A_REPO" push -q origin main
 
-for w in allow-ok allow-nonmember allow-unsuperseded; do
+for w in allow-ok allow-nonmember allow-unsuperseded allow-ignored-only allow-ignored-veto; do
   g "$A_REPO" worktree add -q -b "feat-$w" "$TMP/wt-$w" main
   GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-$w" commit -q --allow-empty -m "old-$w" --date="$OLD_DATE"
   g "$A_REPO" merge -q --no-edit "feat-$w"
@@ -547,6 +563,21 @@ printf 'hand-written notes that exist nowhere else\n' > "$TMP/wt-allow-nonmember
 # it, so it is unique content however familiar the filename looks.
 mkdir -p "$TMP/wt-allow-unsuperseded/registry/exp-9"
 printf 'the only copy of this record\n' > "$TMP/wt-allow-unsuperseded/registry/exp-9/CHECKLIST.md"
+# Case D: the measured production shape — a merged worktree that is tracked-clean with ZERO untracked
+# paths, whose entire residue is IGNORED and entirely allowlisted. Pre-fix this is the case that made the
+# feature inert: `git status` reports these as `!!`, the dirty/untracked allowlist scan never saw them, and
+# the `ignored == 0` tier-1 gate sent the worktree to SILENT — reported nowhere, reaped never.
+mkdir -p "$TMP/wt-allow-ignored-only/pipelines/__pycache__" "$TMP/wt-allow-ignored-only/registry/exp-1"
+printf 'auditor transcript\n'  > "$TMP/wt-allow-ignored-only/registry/exp-1/AUDIT.md.run.log"
+printf 'not-really-bytecode\n' > "$TMP/wt-allow-ignored-only/pipelines/__pycache__/driver.cpython-311.pyc"
+printf '{}\n'                  > "$TMP/wt-allow-ignored-only/pipelines/__pycache__/index.json"
+printf 'loose bytecode\n'      > "$TMP/wt-allow-ignored-only/loose.pyc"
+# Case E: allowlisted ignored residue PLUS one OFF-allowlist ignored file. The "one off-allowlist path
+# keeps the whole worktree out" rule has to hold in the ignored category too, or the widening would have
+# quietly turned the local-secrets veto into a blanket "ignored content is fine".
+mkdir -p "$TMP/wt-allow-ignored-veto/pipelines/__pycache__"
+printf 'not-really-bytecode\n' > "$TMP/wt-allow-ignored-veto/pipelines/__pycache__/driver.cpython-311.pyc"
+printf 'SECRET=hunter2\n'      > "$TMP/wt-allow-ignored-veto/.env"
 
 # CLAIMED_BY is the design-stage claim file; main carries none, so it must NOT be admitted on Case A above
 # unless main holds that exact path. Land it so Case A's own CLAIMED_BY has its warrant.
@@ -569,10 +600,24 @@ if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-nonmember"; then no "re
 if echo "$J_A" | has_path_in "d['tier3']" "$TMP/wt-allow-nonmember"; then ok "residue-allowlist: off-allowlist residue reported in tier3"; else no "residue-allowlist: off-allowlist worktree reported in neither tier1 nor tier3"; fi
 if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-unsuperseded"; then no "residue-allowlist: a SUPERSEDED-class basename with no copy on main wrongly reached tier1 (its only copy would be lost)"; else ok "residue-allowlist: a superseded-class basename main does not carry is correctly excluded"; fi
 
+# The ignored category (Codex review of PR #842). Case A above already proves the mixed shape — its
+# `*.run.log` and `__pycache__` paths are IGNORED under the fixture's .gitignore while its record files are
+# untracked — so these add the two pure cases either side of the line.
+if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-ignored-only"; then ok "ignored-allowlist: merged worktree whose only residue is ignored+allowlisted reaches tier1"; else no "ignored-allowlist: ignored-only allowlisted worktree NOT classified tier1 (the allowlist is inert against the category it actually meets on a box)"; fi
+if echo "$J_A" | reason_has "d['tier1']" "$TMP/wt-allow-ignored-only" "ignored path(s)"; then ok "ignored-allowlist: tier1 reason states that ignored paths are being reaped, not just 'clean'"; else no "ignored-allowlist: tier1 reason hides the ignored content the reap will delete"; fi
+if echo "$J_A" | reason_has "d['tier1']" "$TMP/wt-allow-ignored-only" "reap allowlist"; then ok "ignored-allowlist: tier1 reason names the allowlist that admitted the ignored paths"; else no "ignored-allowlist: tier1 reason doesn't name the allowlist basis for the ignored paths"; fi
+if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-ignored-veto"; then no "ignored-allowlist: one OFF-allowlist ignored file did NOT keep the worktree out of tier1 (a local .env would be destroyed)"; else ok "ignored-allowlist: a single off-allowlist ignored file keeps the whole worktree out of tier1"; fi
+ALL_A=$(echo "$J_A" | all_paths)
+if grep -qxF "$TMP/wt-allow-ignored-veto" <<<"$ALL_A"; then no "ignored-allowlist: off-allowlist ignored content should stay SILENT (build-cache-like clutter must not nag weekly), not be reported"; else ok "ignored-allowlist: off-allowlist ignored content is silent, exactly as before the allowlist widened"; fi
+
 python3 "$SWEEP" --repo "$A_REPO" --reap-tier1 >/dev/null 2>&1 || true
 if [ -d "$TMP/wt-allow-ok" ]; then no "residue-allowlist: allowlisted-residue worktree NOT removed by --reap-tier1 (reap-time re-verification regressed)"; else ok "residue-allowlist: allowlisted-residue worktree removed by --reap-tier1"; fi
 if [ -d "$TMP/wt-allow-nonmember" ]; then ok "residue-allowlist: off-allowlist worktree preserved by --reap-tier1"; else no "residue-allowlist: off-allowlist worktree was WRONGLY removed (hand-written notes lost)"; fi
 if [ -d "$TMP/wt-allow-unsuperseded" ]; then ok "residue-allowlist: unsuperseded record worktree preserved by --reap-tier1"; else no "residue-allowlist: unsuperseded record worktree was WRONGLY removed (only copy lost)"; fi
+# The reap-time re-verification runs the ignored allowlist in the same shape classification does — if it
+# still gated on `ignored == 0`, every one of these items would classify tier1 and then SKIP forever.
+if [ -d "$TMP/wt-allow-ignored-only" ]; then no "ignored-allowlist: ignored-only worktree NOT removed by --reap-tier1 (reap-time gate disagrees with classification)"; else ok "ignored-allowlist: ignored-only allowlisted worktree really removed by --reap-tier1"; fi
+if [ -f "$TMP/wt-allow-ignored-veto/.env" ]; then ok "ignored-allowlist: the off-allowlist ignored file survived a real --reap-tier1"; else no "ignored-allowlist: a local .env was DESTROYED by the reap"; fi
 if [ -f "$A_REPO/registry/exp-1/CHECKLIST.md" ]; then ok "residue-allowlist: main's own post-run record copies are untouched"; else no "residue-allowlist: the swept checkout's own record file disappeared"; fi
 
 # 3f4. automated-researcher#840: the age bar is PER TIER — merged clears at --merged-min-age-days (default

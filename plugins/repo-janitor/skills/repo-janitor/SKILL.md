@@ -62,14 +62,17 @@ genuinely initialized submodule at such a path and silently let it through a for
 1. **Deterministic ("safe to reap")** — merged into the default branch, clean of both tracked changes AND
    untracked files, carries no ignored content either, and older than `--min-age-days`; or the worktree's
    own administrative record is plain **prunable** (its working directory is already gone — someone
-   `rm -rf`'d it instead of `git worktree remove`). No one is asked. **No ignored content, verified
-   empirically:** `git worktree remove` deletes the entire directory tree once it judges the tree clean —
-   it does not spare `.gitignore`'d files (a local `.env`, unstaged secrets, anything a broad ignore
-   pattern happens to match), so any ignored file blocks tier 1 outright; a worktree that's otherwise
-   merged+clean+old but carries only ignored build-cache-like content (`node_modules`, `__pycache__`, a
-   venv) is simply **silent** rather than either reaped or nagged about weekly. The untracked/ignored scan
-   forces `--untracked-files=all --ignored`, so a repo's own `status.showUntrackedFiles=no` config can't
-   hide real content from this check. **Exception, load-bearing:** if `--worktree-root` derives an owner
+   `rm -rf`'d it instead of `git worktree remove`). No one is asked. **No ignored content beyond the
+   residue allowlist below, verified empirically:** `git worktree remove` deletes the entire directory tree
+   once it judges the tree clean — it does not spare `.gitignore`'d files (a local `.env`, unstaged
+   secrets, anything a broad ignore pattern happens to match), so any ignored file that is *not* an
+   allowlist member blocks tier 1 outright; a worktree that's otherwise merged+clean+old but carries such
+   ignored build-cache-like content (`node_modules`, a venv) is simply **silent** rather than either reaped
+   or nagged about weekly. The untracked/ignored scan forces `--untracked-files=all --ignored`, so a repo's
+   own `status.showUntrackedFiles=no` config can't hide real content from this check — and, with
+   `--untracked-files=all`, git lists ignored **files** individually at full depth rather than collapsing
+   them to a directory, so the per-path allowlist rules apply to them exactly as written.
+   **Exception, load-bearing:** if `--worktree-root` derives an owner
    for this path and that owner reads as *live* (see the seam below), it is **never** tier 1 even when
    every other condition holds — a persistent per-agent worktree that simply hasn't diverged from a quiet
    default branch recently is not proof of disuse. It demotes to tier 2 instead, with its own reason
@@ -134,7 +137,22 @@ genuinely initialized submodule at such a path and silently let it through a for
    *basename* at a path main lacks is not superseded at all: it is the only copy, and it keeps the worktree
    reported instead. This bar applies to ancestry-**merged** worktrees only; the squash-merge alternative
    above still requires whole-tree identity, since there nothing has established that the commits themselves
-   are durable. **The reap itself
+   are durable.
+   **The allowlist spans all three residue categories — dirty, untracked AND *ignored*.** A tier-1 reap
+   deletes all three identically, so the set of paths the safety bar adjudicates has to be the set the reap
+   destroys. This is not a refinement but the case that carries the feature: a normal `.gitignore` —
+   including this repo's own — already ignores `__pycache__/`, `*.pyc` and `*.run.log`, so on a real box
+   those paths arrive as ignored, not untracked, and an allowlist consulted only against dirty/untracked
+   residue is inert against precisely the worktrees it was written for (the merged worktree carrying
+   nothing but audit transcripts and bytecode stays silent and unreapable, which is the pre-#840 state).
+   What does **not** carry over between the categories is the byte-identity fallback: for the ignored
+   category, allowlist membership is the *only* way through, and any other ignored path is a confirmed
+   veto exactly as before. That is what keeps this widening bounded to the named allowlist and preserves
+   the concern the ignored veto was built for — a stray `.env`, unstaged secrets and a 6G venv are none of
+   `*.run.log` / `*.pyc` / `__pycache__/`, and the superseded class cannot admit a path the default branch
+   doesn't already carry. When ignored paths are what cleared the bar, the tier-1 reason says so
+   explicitly (`+N ignored path(s), all on the reap allowlist [...]`) rather than folding them into
+   "clean" — the reap's least visible effect is the one the report must not leave out. **The reap itself
    passes `--force`** whenever any of these residue bars (rather than plain
    mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
    to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
@@ -167,8 +185,9 @@ someone still working in this checkout" — is answered directly by the live-own
 Measured: at ~10G of residue per closed experiment and roughly a close a day, a uniform 7-day bar *was* the
 steady-state fill — the disk refilled before the bar expired, so the sweep's deletions never caught up with
 its own backlog. Both flags move independently, so an instance that wants the old uniform behavior passes
-`--merged-min-age-days 7`. Neither bar overrides anything else: a live (or unverifiable) owner, ignored
-content, an initialized submodule, and every UNKNOWN fact all still keep a worktree out of tier 1 at any age.
+`--merged-min-age-days 7`. Neither bar overrides anything else: a live (or unverifiable) owner,
+off-allowlist ignored content, an initialized submodule, and every UNKNOWN fact all still keep a worktree
+out of tier 1 at any age.
 
 ## Non-git scratch (`--scratch-glob`)
 
@@ -375,14 +394,19 @@ This plugin owns the classification + report format only. An instance wires:
 
 `scripts/worktree_sweep_smoke.sh` — builds real local git fixtures (no network) covering every tier, the
 live-owner tier-1 veto, fail-closed UNKNOWN handling, the silent cases, `--fetch` freshness, `--reap-tier1`
-with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored content never reaching tier
-1 (with a `status.showUntrackedFiles=no` config bypass attempt), the merged+identical-residue tier-1 bar
+with/without `--dry-run`, the `--json` shape, CLI argument validation, off-allowlist ignored content never
+reaching tier 1 (with a `status.showUntrackedFiles=no` config bypass attempt), the merged+identical-residue
+tier-1 bar
 (automated-researcher#804 — a merged-but-behind worktree whose untracked residue duplicates the default
 branch reaches tier 1 and is really removed, while residue that differs from it or sits at a path it lacks
 stays reported and survives a real `--reap-tier1`), the merged+allowlisted-residue tier-1 bar
 (automated-researcher#840 — allowlisted regenerable/superseded residue reaches tier 1 with the allowlist
 named in its reason and is really removed, while one off-allowlist file or a superseded-class basename the
-default branch doesn't carry keeps the worktree reported and alive), the per-tier age bar (a merged 3d-old
+default branch doesn't carry keeps the worktree reported and alive; the fixture repo carries the same
+`.gitignore` a real one does, so the regenerable classes arrive IGNORED and the bar is exercised on the
+category it actually meets on a box — plus a merged worktree whose only residue is ignored+allowlisted
+reaching tier 1 and really being removed, an off-allowlist ignored file still vetoing outright, and the
+reap-time re-verification agreeing with classification on both), the per-tier age bar (a merged 3d-old
 worktree reaches tier 1 while an unmerged 3d-old one stays silent, each bar movable independently), the
 repeatable `--worktree-root` giving a nested harness worktree root the live-owner veto with the owner id
 taken from the most specific match, the default branch's ref surviving a reap

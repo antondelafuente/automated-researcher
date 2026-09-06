@@ -11,7 +11,10 @@ checkout, how far behind/ahead of origin?), then route each flagged entry into e
                                             on the bounded regenerable/superseded allowlist,
                                             automated-researcher#840), or the worktree's administrative
                                             record is plain PRUNABLE (working directory already gone).
-                                            No one is asked.
+                                            No one is asked. The allowlist spans all THREE residue
+                                            categories — dirty, untracked AND ignored — because the reap
+                                            destroys all three identically; any ignored path off the
+                                            allowlist still vetoes tier 1 outright, as it always has.
   tier 2 (owner-session investigates)    — stray content, or a stale unmerged branch, whose candidate owner
                                             (derived from --worktree-root) reads as a LIVE session.
   tier 3 (researcher residual)          — everything flagged that isn't tier 1 and has no live owner to ask,
@@ -61,12 +64,19 @@ DEFAULT_MERGED_MIN_AGE_DAYS = 2
 DEFAULT_OWNER_DEPTH = 1
 DEFAULT_DEFAULT_BRANCH = "main"
 
-# Residue allowlist (automated-researcher#840) — the ONLY non-identical dirty/untracked content a MERGED
-# worktree may carry and still reach tier 1. Measured cause: four merged experiment worktrees (2.2-2.4G
-# each, 9.3G total) had to be removed by hand on 2026-09-06 because #804's byte-identity bar never admits
-# them — their only non-identical paths were `*.run.log` audit logs, `__pycache__`, and the design-stage
-# record files the default branch already holds in POST-RUN (newer) form. Every experiment worktree that
-# went through a design audit carries at least one of these, so none of them could ever reach tier 1.
+# Residue allowlist (automated-researcher#840) — the ONLY non-identical content a MERGED worktree may carry
+# and still reach tier 1. Measured cause: four merged experiment worktrees (2.2-2.4G each, 9.3G total) had
+# to be removed by hand on 2026-09-06 because #804's byte-identity bar never admits them — their only
+# non-identical paths were `*.run.log` audit logs, `__pycache__`, and the design-stage record files the
+# default branch already holds in POST-RUN (newer) form. Every experiment worktree that went through a
+# design audit carries at least one of these, so none of them could ever reach tier 1.
+#
+# It applies to ALL THREE residue categories git reports — dirty, untracked, and IGNORED — because a
+# tier-1 reap deletes all three the same way. The ignored category is not an afterthought here but the
+# main event: a normal `.gitignore` (including this repo's own) already ignores `__pycache__/`, `*.pyc`
+# and `*.run.log`, so on a real box these paths arrive as `!!` and an allowlist that only ever consulted
+# the dirty/untracked categories would be inert against exactly the worktrees it was written for. See
+# `ignored_allowlisted_fact` for what does and does not carry over between the categories.
 #
 # TWO CLASSES, and the difference is load-bearing:
 #   REGENERABLE — matched on the file's basename (or a `__pycache__` path component) at any depth, with NO
@@ -282,13 +292,22 @@ def merged_fact(repo, head, default_ref):
     return None  # any other exit (bad ref, unresolvable object, timeout) -> UNKNOWN, never a guess
 
 
-def dirty_untracked_entries(path):
-    """(entries, ok) — entries is the list of (status_code, relpath) for every dirty (tracked, changed) or
-    untracked file in `path`, never ignored. Used only by content_identical_fact below. NUL-parsed (`-z`)
-    rather than line-based, so a path containing a space/newline/quote can't be mis-split the way the
-    plain-line `--porcelain` parsing in status_facts() would (that parsing only ever needs prefix/count,
-    never the exact path, so it's safe as-is; this one hands paths to `open()`, so it isn't). ok=False
-    (entries=None) on any status failure — fails that fact closed, same as every other check here."""
+def status_entries(path):
+    """(entries, ok) — entries is the list of (status_code, relpath) for EVERY path `git status` reports in
+    `path`: dirty (tracked, changed), untracked, AND ignored (`!!`). The single parser behind both filters
+    below, so the three categories can never drift apart in how they're read — only in what each caller then
+    does with them. NUL-parsed (`-z`) rather than line-based, so a path containing a space/newline/quote
+    can't be mis-split the way the plain-line `--porcelain` parsing in status_facts() would (that parsing
+    only ever needs prefix/count, never the exact path, so it's safe as-is; these hand paths to `open()`, so
+    they aren't). ok=False (entries=None) on any status failure — fails that fact closed, same as every
+    other check here.
+
+    `--untracked-files=all` also governs how IGNORED content is listed (verified empirically, git 2.55):
+    with it, `--ignored` (traditional mode) lists ignored FILES individually at full depth
+    (`pkg/__pycache__/m.cpython-311.pyc`), not the collapsed directory `--ignored=matching` would print — so
+    the per-path allowlist rules apply to ignored residue exactly as written, with no directory-expansion
+    step of this script's own. A trailing-slash (directory) entry is still handled fail-closed by
+    `allowlisted_residue_path`, since nothing here should depend on that mode never changing."""
     rc, out, _ = run_git(["status", "--porcelain=v1", "--untracked-files=all", "--ignored", "-z"], cwd=path)
     if rc != 0:
         return None, False
@@ -303,10 +322,25 @@ def dirty_untracked_entries(path):
         code, filepath = tok[:2], tok[3:]
         if code[0] in ("R", "C") and i < len(tokens):
             i += 1  # skip the old-path token git emits for renames/copies in -z mode
-        if code == "!!":
-            continue
         entries.append((code, filepath))
     return entries, True
+
+
+def dirty_untracked_entries(path):
+    """(entries, ok) — the dirty/untracked half of `status_entries`, never ignored. Used by the residue
+    identity/allowlist scan below, whose bar is "does the default branch already carry this content"."""
+    entries, ok = status_entries(path)
+    if not ok:
+        return None, False
+    return [(code, rel) for code, rel in entries if code != "!!"], True
+
+
+def ignored_entries(path):
+    """(entries, ok) — the IGNORED half of `status_entries`. Used by `ignored_allowlisted_fact` below."""
+    entries, ok = status_entries(path)
+    if not ok:
+        return None, False
+    return [(code, rel) for code, rel in entries if code == "!!"], True
 
 
 def content_identical_fact(repo, path, head, default_ref):
@@ -319,7 +353,9 @@ def content_identical_fact(repo, path, head, default_ref):
     no-op here since the branch genuinely isn't an ancestor, and that failure is already non-fatal, so the
     ref simply survives) only risks losing content that exists NOWHERE else: every file this worktree's
     HEAD commit records, plus everything `git status` reports on top of it (besides ignored files, which
-    already block tier 1 independently). True when ALL of that is byte-identical to `default_ref` — i.e.
+    `ignored_allowlisted_fact` adjudicates independently — off-allowlist ignored content still blocks
+    tier 1 on its own, whatever this fact answers). True when ALL of that is byte-identical to
+    `default_ref` — i.e.
     the tree contains zero content the default branch doesn't already have.
 
     Two passes, deliberately not one uniform per-file scan (efficiency, and it changes what a "no" means):
@@ -414,6 +450,56 @@ def residue_allowlisted_fact(repo, path, default_ref):
     return residue_scan(repo, path, default_ref, allowlist=True)
 
 
+def ignored_allowlisted_fact(repo, path, default_ref):
+    """Is every IGNORED path in this worktree a member of the #840 allowlist? True / False (a confirmed
+    non-member) / None (UNKNOWN), same fail-closed tri-state as the two residue facts above.
+
+    WHY THE IGNORED CATEGORY NEEDS THIS AT ALL (Codex review of automated-researcher#842): a tier-1 reap
+    runs `git worktree remove`, which deletes the ENTIRE directory tree — dirty, untracked and ignored
+    content alike (git has no "preserve ignored files" mode; re-verified empirically 2026-09-06). So the
+    set of paths the safety bar adjudicates has to be the set the reap destroys, and that is all three
+    categories. Before #840 the three were covered by two rules that between them left nothing out:
+    dirty/untracked had to be byte-identical to `default_ref` (#804), and ignored content was an
+    unconditional veto (`ignored == 0`). #840 widened the FIRST rule with the regenerable/superseded
+    allowlist — but every regenerable class it names (`__pycache__/`, `*.pyc`, `*.run.log`) is precisely
+    what a normal `.gitignore` ignores, including this repo's own, so git reports those paths as `!!` and
+    the widened rule never saw a single one of them. The bar it was written to lift stayed in force under
+    the other rule, and a merged worktree carrying nothing but audit transcripts and bytecode stayed
+    silent and unreapable — the exact worktrees #840 exists to reap.
+
+    So the allowlist applies to the ignored category on the SAME terms, via the same
+    `allowlisted_residue_path` predicate: one shared membership rule, no second spelling of it to drift.
+    What does NOT carry over is the byte-identity fallback: an ignored path that is not an allowlist
+    member is a confirmed non-member and vetoes the reap outright, exactly as `ignored == 0` did. That
+    keeps the widening bounded to the named allowlist, which is what preserves the original concern this
+    veto was built for — a local `.env`, unstaged secrets, a 6G venv, anything a broad ignore pattern
+    happens to match is none of `*.run.log` / `*.pyc` / `__pycache__/`, and the superseded class can't
+    admit a path unless the default branch already carries it.
+    """
+    entries, ok = ignored_entries(path)
+    if not ok:
+        return None
+    if not entries:
+        return True
+    # `ref_modes` is resolved LAZILY, and the probe that decides whether it's needed is the SAME predicate
+    # rather than a second spelling of the allowlist (which is exactly the kind of duplicate that drifts):
+    # `ref_modes` is consulted only by the superseded branch and there only ever ADMITS a path, so a call
+    # with an empty mapping asks "is this admitted on regenerable grounds alone", and True is final. The
+    # common shape by far — ignored residue that is pure bytecode and audit transcripts — therefore costs no
+    # `ls-tree -r` of the default branch at all, on any worktree of any swept repo, on any sweep.
+    ref_modes = None
+    for _code, rel in entries:
+        if allowlisted_residue_path(rel, {}):
+            continue
+        if ref_modes is None:
+            ref_modes = ls_tree_modes(repo, default_ref)
+            if ref_modes is None:
+                return None
+        if not allowlisted_residue_path(rel, ref_modes):
+            return False
+    return True
+
+
 def allowlisted_residue_path(rel, ref_modes):
     """Is this one repo-relative residue path a member of the #840 allowlist? See the constants above for
     why the two classes have different admission rules. Matching is on the file's own basename (so a
@@ -423,11 +509,22 @@ def allowlisted_residue_path(rel, ref_modes):
     DIRECTORY `__pycache__/`, so a plain FILE that happens to be named `__pycache__` is not a member and
     falls through to the identity bar like anything else. `fnmatchcase`, never `fnmatch`: the latter
     normalizes case on some platforms, which would make `checklist.md` (a genuinely different file) match
-    the superseded entry for `CHECKLIST.md` on one box and not another."""
-    parts = rel.split("/")
+    the superseded entry for `CHECKLIST.md` on one box and not another.
+
+    A DIRECTORY entry (trailing `/`) stands for a whole subtree rather than one file, so only the
+    `__pycache__`-component rule can admit one, and there the component may be the entry's LAST part (the
+    directory named by the entry IS the `__pycache__/` the allowlist lists). A basename pattern says
+    nothing about the files underneath a directory, and nothing on the default branch can supersede a whole
+    tree, so both other classes fail closed here. Today's `git status --untracked-files=all --ignored`
+    expands ignored directories to their files and never emits this shape; the branch exists so a git
+    version or mode that DID collapse them could only ever under-admit, never wave a subtree through."""
+    is_dir = rel.endswith("/")
+    parts = rel.rstrip("/").split("/")
     base = parts[-1]
-    if RESIDUE_ALLOWLIST_PYCACHE_DIR in parts[:-1]:
+    if RESIDUE_ALLOWLIST_PYCACHE_DIR in (parts if is_dir else parts[:-1]):
         return True
+    if is_dir:
+        return False
     for pat in RESIDUE_ALLOWLIST_REGENERABLE:
         if fnmatch.fnmatchcase(base, pat):
             return True
@@ -508,7 +605,7 @@ def residue_scan(repo, path, default_ref, allowlist):
 def ls_tree_modes(repo, ref):
     """path -> git mode string (e.g. "100644") for every entry in `ref`'s tree, via a single `ls-tree -r -z`
     (NUL-separated so a tab/newline-containing path parses exactly, same discipline as
-    `dirty_untracked_entries`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look up
+    `status_entries`). None (UNKNOWN) on any failure — used by `content_identical_fact` to look up
     the default-ref side of its per-file mode comparison without one `git show`-style call per residue
     entry."""
     rc, out, _ = run_git(["ls-tree", "-r", "-z", ref], cwd=repo)
@@ -1081,6 +1178,19 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
             results["tier3"].append(dict(base, tier=3, reason=reason, action=inspect_action(path)))
         return
 
+    # The IGNORED category gets the same #840 allowlist, because a tier-1 reap destroys all three residue
+    # categories identically (`git worktree remove` takes ignored content down with the tree). Computed
+    # AFTER the UNKNOWN gate above, so `ignored` is a real count here and no git call is spent on an entry
+    # already bound for tier 2/3. An unresolvable default ref leaves the fact UNKNOWN, which — like a failed
+    # scan — is indistinguishable in effect from the pre-#840 `ignored == 0` veto: not tier 1.
+    if ignored == 0:
+        ignored_allowlisted = True
+    elif default_ref is not None:
+        ignored_allowlisted = ignored_allowlisted_fact(repo, path, default_ref)
+    else:
+        ignored_allowlisted = None
+    ignored_ok = ignored_allowlisted is True
+
     # The age bar is PER TIER (automated-researcher#840): a worktree ancestry has proven merged clears at
     # --merged-min-age-days (default 2), everything else at --min-age-days (default 7). What the grace
     # window buys differs between the two: for an unmerged worktree the age IS the evidence that no one is
@@ -1098,23 +1208,27 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
     # way to be clean — nothing durable is lost by reaping regardless (the worktree's branch ref survives
     # `git branch -d`'s no-op the same as always).
     clean_ok = (not dirty and untracked == 0) or residue_safe
-    # ignored == 0 is part of the tier-1 bar, NOT of stray_or_stale (code-review Finding 1): ignored
-    # build-artifact clutter (node_modules, __pycache__, a venv) is common and harmless to leave alone,
-    # so it doesn't need to nag a live tier2/3 report every week — but it DOES need to block automatic
-    # deletion, since `git worktree remove` deletes ignored content right along with everything else.
-    # merged+clean(tracked)+zero-untracked+old+has-ignored-content therefore falls through to SILENT
-    # (nothing unsafe happens, nothing noisy is reported) rather than either tier.
+    # ignored_ok is part of the tier-1 bar, NOT of stray_or_stale (code-review Finding 1): ignored
+    # build-artifact clutter (node_modules, a venv) is common and harmless to leave alone, so it doesn't
+    # need to nag a live tier2/3 report every week — but it DOES need to block automatic deletion, since
+    # `git worktree remove` deletes ignored content right along with everything else.
+    # merged+clean(tracked)+zero-untracked+old+has-OFF-allowlist-ignored-content therefore still falls
+    # through to SILENT (nothing unsafe happens, nothing noisy is reported) rather than either tier. What
+    # changed in #840 is only WHICH ignored content blocks: allowlisted regenerable/superseded paths no
+    # longer do (see ignored_allowlisted_fact for why they must not — they were the whole point of the
+    # allowlist and the `ignored == 0` spelling of this bar made it inert against them).
     # not has_submodule is likewise part of the tier-1 bar (merge-gate final-review MED finding): unlike
     # ignored content, an otherwise-safe worktree carrying an INITIALIZED submodule can't be silently left
     # alone — `git worktree remove` unconditionally refuses it, so it must be flagged (not silently
     # skipped) for a human to remove manually or with --force.
-    det_safe = merge_ok and clean_ok and ignored == 0 and is_old and not has_submodule
-    submodule_blocks_reap = merge_ok and clean_ok and ignored == 0 and is_old and has_submodule
+    det_safe = merge_ok and clean_ok and ignored_ok and is_old and not has_submodule
+    submodule_blocks_reap = merge_ok and clean_ok and ignored_ok and is_old and has_submodule
     stray_or_stale = ((dirty or untracked > 0) and not residue_safe) or (not merge_ok and is_old) or submodule_blocks_reap
 
     if not (det_safe or stray_or_stale):
         return  # in-progress (unmerged+fresh), just-merged-and-fresh, or merged+clean+old-but-ignored-content
 
+    allowlist_named = False
     if merged and not residue_safe:
         clean_old_phrase = f"merged, clean, {age_days}d old"
     elif merged and identity_safe:
@@ -1126,11 +1240,20 @@ def process_entry(repo, e, default_ref, args, live, seam_failed, now_ts, fetch_o
         # automated-researcher#840: merged by ancestry, and every dirty/untracked path is either such a
         # duplicate or a member of the bounded allowlist — named in full here, because this is the one
         # tier-1 bar that deletes bytes the default branch does not itself carry.
+        allowlist_named = True
         clean_old_phrase = (f"merged, residue entirely on the reap allowlist [{RESIDUE_ALLOWLIST_DESC}] "
                             f"or byte-identical to {args.default_branch}, {age_days}d old")
     else:
         clean_old_phrase = (f"clean (all residue already on {args.default_branch} — squash-merge equivalent), "
                             f"{age_days}d old")
+    # Ignored content that cleared the allowlist is reported EXPLICITLY, never folded into "clean": the reap
+    # deletes it, it is bytes the default branch does not carry, and on a real repo (whose .gitignore hides
+    # `__pycache__/`/`*.pyc`/`*.run.log`) this is the category the allowlist actually operates on — so a
+    # report that stayed silent about it would describe the reap's least obvious effect not at all.
+    if ignored and ignored_ok:
+        clean_old_phrase += (f" (+{ignored} ignored path(s), all on that same allowlist)" if allowlist_named
+                             else f" (+{ignored} ignored path(s), all on the reap allowlist "
+                                  f"[{RESIDUE_ALLOWLIST_DESC}])")
 
     if det_safe and liveness == "not_live":
         entry = dict(base, tier=1, reason=f"{clean_old_phrase} — safe to reap",
@@ -1269,6 +1392,11 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
         #   - the #840 allowlist bar is re-run in the same second-pass shape as classification, for the same
         #     reason: an item that qualified on it is dirty by definition, so skipping the re-check would
         #     make every allowlist-qualified tier-1 item SKIP here unconditionally.
+        #   - the IGNORED half of that allowlist is re-run here too, and for exactly the same reason one
+        #     case over: an item that qualified with allowlisted ignored residue has `ignored > 0` by
+        #     definition, so leaving the old `ignored == 0` spelling in this gate would make every one of
+        #     them SKIP unconditionally — classification would keep promoting them and the reap would keep
+        #     refusing them, forever.
         content_identical_now = None
         residue_allowlisted_now = None
         if default_ref_now is not None and head_now:
@@ -1278,11 +1406,17 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
                 content_identical_now = residue_identical_fact(repo, path, default_ref_now)
                 if content_identical_now is not True:
                     residue_allowlisted_now = residue_allowlisted_fact(repo, path, default_ref_now)
+        if ignored == 0:
+            ignored_allowlisted_now = True
+        elif default_ref_now is not None:
+            ignored_allowlisted_now = ignored_allowlisted_fact(repo, path, default_ref_now)
+        else:
+            ignored_allowlisted_now = None
         identity_safe_now = content_identical_now is True
         residue_safe_now = identity_safe_now or residue_allowlisted_now is True
         merge_ok_now = bool(merged_now) or identity_safe_now
         clean_ok_now = (dirty is False and untracked == 0) or residue_safe_now
-        still_safe = (clean_ok_now and ignored == 0 and head_unchanged and merge_ok_now
+        still_safe = (clean_ok_now and ignored_allowlisted_now is True and head_unchanged and merge_ok_now
                       and has_submodule_now is False)
         if not still_safe:
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
