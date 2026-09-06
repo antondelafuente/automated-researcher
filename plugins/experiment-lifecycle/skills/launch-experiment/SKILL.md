@@ -92,6 +92,19 @@ The executor works in that worktree and binds it to its own run-supervision reco
 executor from inside the worktree, at `start`) — you do not bind it for it; you only make it exist and point
 the launcher at it.
 
+**And sparsify the tree YOU are standing in, if you did not create it that way (automated-researcher#807):**
+
+- [ ] **`sparse_worktree.sh --existing . registry/<exp>`** as this step's other half, when this launching
+      session is itself running in a worktree of the research repo. Idempotent, prints the bytes it
+      reclaimed, and refuses rather than dropping a record carrying uncommitted / untracked / ignored files.
+- [ ] **Skip only** if you are in a shared checkout (no worktree of this class), or the tree is already sparse.
+
+The create-side helper above only reaches worktrees a scaffold *script* makes. Your own is usually made by the
+harness (`claude rc … --spawn worktree` → `.claude/worktrees/*`) or by the instance's own session launcher —
+neither is this repo's code, and measured 2026-09-06 those two paths held 16 of 36 live worktrees and 37G of
+48G (~77% of worktree disk; 2.3–2.6G full vs ~330M sparse). `--existing` reclaims what is already
+materialized, which is the only intercept a product script has on a tree it did not create.
+
 ## Step 2 — Write designer-of-record = THIS launching session
 
 **Resolve YOUR OWN harness session name; never assume one (automated-researcher#796).** The executor needs a
