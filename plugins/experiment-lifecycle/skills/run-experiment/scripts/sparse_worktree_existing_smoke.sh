@@ -178,6 +178,13 @@ if bash "$S" --existing "$WT7/plugins" registry/exp-a >/dev/null 2>&1; then ok s
 has   subdir-arg-keeps-named "$WT7/registry/exp-a/DESIGN.md"
 hasnt subdir-arg-drops-b     "$WT7/registry/exp-b"
 
+# --- `--existing .` from inside the tree: the literal invocation both SKILL checklists tell a session to run
+WT8="$TMP/wt-dot"
+full_wt "$WT8" w8
+if ( cd "$WT8" && bash "$S" --existing . registry/exp-a >/dev/null 2>&1 ); then ok dot-arg-exit0; else no dot-arg-exit0; fi
+has   dot-arg-keeps-named "$WT8/registry/exp-a/DESIGN.md"
+hasnt dot-arg-drops-b     "$WT8/registry/exp-b"
+
 # --- NO-OP on a tree that is not a checkout of the research repo -------------------------------------------
 OTHER="$TMP/other-repo"
 git init -q -b main "$OTHER"
