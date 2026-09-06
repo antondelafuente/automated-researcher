@@ -611,14 +611,18 @@ fi
 #     disk" (outside the temp root, nested, wrong name shape, symlink, not a linked worktree), plus the
 #     reap's license — a verdict written INSIDE the tree the reap removes is blocked before the auditor
 #     runs. A bounded-delete helper is exactly the class compile-only checks cannot cover. Runs when the
-#     script or its smoke changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/audit_checkout(_smoke)?\.sh$'; then
+#     script, its smoke, or either script this block actually EXECUTES changed (same dependency rationale
+#     as 10b2/23): `sparse_worktree.sh`, which audit_checkout.sh resolves next to itself and routes the
+#     whole create path through — it refuses a FULL checkout rather than substituting one, so the sparse +
+#     detached assertions here are assertions about that script; and `audit_experiment.sh`, which the smoke
+#     DRIVES (`--reap-checkout`) for the carry-through, unresolvable-helper and reap-license cases.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/(experiment-lifecycle/skills/run-experiment/scripts/(audit_checkout(_smoke)?|sparse_worktree)|verify-claims/skills/verify-claims/scripts/audit_experiment)\.sh$'; then
   AC_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/audit_checkout_smoke.sh"
   if [ -f "$AC_SMOKE" ]; then
     echo "[checks] close-audit checkout-lifecycle smoke" >&2
     bash "$AC_SMOKE" >&2 && ok "audit_checkout smoke" || err "audit_checkout smoke FAILED"
   else
-    err "audit_checkout.sh changed but audit_checkout_smoke.sh missing — cannot verify the audit-checkout lifecycle"
+    err "audit_checkout.sh, sparse_worktree.sh or audit_experiment.sh changed but audit_checkout_smoke.sh missing — cannot verify the audit-checkout lifecycle"
   fi
 fi
 
@@ -628,14 +632,18 @@ fi
 #     the DERIVED delete target (only `<root>/<run-id>`), the LOUD `SCRATCH-REAP-GAP:` marker + exit 3 that
 #     replaced the silent exit-0 log line (seven closes reaped zero scratch dirs while the disk refilled,
 #     #804), the dangling-symlink and venv exclusions reaching BOTH rclone verbs (#811, #840), and never
-#     deleting through a mount point. rclone is stubbed — offline. Runs when the script or its smoke changed.
-if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_scratch(_smoke)?\.sh$'; then
+#     deleting through a mount point. rclone is stubbed — offline. Runs when the script, its smoke, or
+#     run_supervision_record.sh changed: reap_scratch.sh resolves that record helper next to itself and
+#     asks it `is-closed` / `worktree-path`, so BOTH the clean-close guard and the never-reap-the-bound-
+#     worktree guard are answers this script gives — a record-interface change can weaken a fail-closed
+#     delete guard with nothing else re-run (same dependency rationale as 10b2/23; #845 review round 1).
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/(reap_scratch(_smoke)?|run_supervision_record)\.sh$'; then
   RSC_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_scratch_smoke.sh"
   if [ -f "$RSC_SMOKE" ]; then
     echo "[checks] executor-scratch archive+reap smoke" >&2
     bash "$RSC_SMOKE" >&2 && ok "reap_scratch smoke" || err "reap_scratch smoke FAILED"
   else
-    err "reap_scratch.sh changed but reap_scratch_smoke.sh missing — cannot verify the scratch archive+reap"
+    err "reap_scratch.sh or run_supervision_record.sh changed but reap_scratch_smoke.sh missing — cannot verify the scratch archive+reap"
   fi
 fi
 
