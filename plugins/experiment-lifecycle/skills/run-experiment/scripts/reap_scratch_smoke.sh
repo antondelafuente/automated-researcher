@@ -29,6 +29,9 @@
 #     on what the copy skipped), the carve-out is the directory NAME and nothing else (`venv.md` and
 #     `venv-notes/` stay ordinary archived content), a tree holding only a venv takes the no-bytes delete
 #     branch, and every reap prints a `SCRATCH-REAP-RECLAIMED:` line with a real measurement
+#   - the CLOSE'S PEAK footprint is reported from repro_pull.sh's record and never invented (#843): a
+#     recorded peak is printed, an absent or unparsable one reads `unmeasured` (not a fabricated 0), and
+#     the field is on the line for every branch that deletes
 #   - NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1): a scratch dir that IS, or
 #     CONTAINS, a mount point is refused with rclone never invoked (including when the mount point's path
 #     carries mountinfo's `\040` space escape), an ANCESTOR mount blocks nothing, and an unreadable mount
@@ -441,6 +444,51 @@ out=$(bash "$R" v4 "$s" 2>&1)
 case "$out" in
   *"SCRATCH-REAP-RECLAIMED: run=v4 "*"venv_bytes=0 venv_dirs=0 archived=verified"*) ok reclaimed-marker-always ;;
   *) no "reclaimed-marker-always (output was: $out)" ;;
+esac
+
+# --- gate 4d: the close's PEAK footprint is reported, and never invented (#843) -----------------------
+# This script runs at the very END of the close, so the peak (the run's own copy + the `artifacts/` staging
+# tree + the #447 fresh pull, all on disk at once — 15 GB for one close) is unobservable from here.
+# `repro_pull.sh` writes it into the scratch dir and this script reads it back. The three cases that matter
+# are "recorded", "never recorded" and "recorded but unreadable" — and the last two must NOT be a number.
+rec create p1 >/dev/null; rec close p1 >/dev/null
+s=$(mkscratch p1); printf 'before_bytes=11\npull_bytes=222\npeak_bytes=987654\n' > "$s/.close_footprint"; reset_log
+out=$(bash "$R" p1 "$s" 2>&1)
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=p1 "*"peak_bytes=987654 "*) ok peak-read-from-record ;;
+  *) no "peak-read-from-record (output was: $out)" ;;
+esac
+
+# no lifecycle ran for this close -> `unmeasured`. "The peak was not measured" and "the close peaked at 0"
+# are different statements, and a fabricated 0 would read on the record as the second.
+rec create p2 >/dev/null; rec close p2 >/dev/null
+s=$(mkscratch p2); reset_log
+out=$(bash "$R" p2 "$s" 2>&1)
+case "$out" in
+  *"peak_bytes=unmeasured "*) ok peak-absent-is-unmeasured ;;
+  *) no "peak-absent-is-unmeasured (output was: $out)" ;;
+esac
+
+# a truncated / hand-edited record is not a number either: only a whole `peak_bytes=<digits>` line counts,
+# so half a line can never ride onto the close report as a measurement.
+rec create p3 >/dev/null; rec close p3 >/dev/null
+s=$(mkscratch p3); printf 'peak_bytes=12ques\npeak_bytes\n' > "$s/.close_footprint"; reset_log
+out=$(bash "$R" p3 "$s" 2>&1)
+case "$out" in
+  *"peak_bytes=unmeasured "*) ok peak-unparsable-is-unmeasured ;;
+  *) no "peak-unparsable-is-unmeasured (output was: $out)" ;;
+esac
+
+# the no-bytes branch carries the field too: an empty tree is still a close, and a report that carries the
+# field for verified archives but not for empty ones is a record with a hole in exactly one shape. (It reads
+# `unmeasured` by construction — the footprint record is itself a file, so a tree that HAS one is never on
+# this branch.)
+rec create p4 >/dev/null; rec close p4 >/dev/null
+s="$TMP/work/p4"; mkdir -p "$s"; reset_log
+out=$(bash "$R" p4 "$s" 2>&1)
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=p4 "*"peak_bytes=unmeasured "*"archived=nothing-to-archive"*) ok peak-on-nothing-to-archive-branch ;;
+  *) no "peak-on-nothing-to-archive-branch (output was: $out)" ;;
 esac
 
 # --- never delete through a mount point (round-3 code-review Finding 1) -------------------------------
