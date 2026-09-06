@@ -796,10 +796,14 @@ upstream of everything in this ordering.
   # --size-only is OPTIONAL and legitimate in exactly one case: a backend that cannot report md5 at all
   # (set SIZE_ONLY=1 to add it). Without it a failed `rclone hashsum md5` BLOCKs, so the close either
   # hashes or says on its own face that it cannot — it never silently downgrades to a size-only check.
+  # UPLOAD_DIR is the dir rclone was pointed AT — the stage_artifacts.sh staging dir, not the sources under
+  # it. Set UPLOAD_FOLLOWS_SYMLINKS=1 exactly when that staging run printed ARTIFACT-STAGE-SYMLINKS: (so the
+  # upload ran -L); copy both from its ARTIFACT-STAGE-VERIFY-WITH: line rather than deciding here (#846).
   scripts/close_record.sh paperwork "$RUN_ID" "$REGISTRY_DIR" \
     --outcome completed-as-designed \
     --artifact-root "$ARTIFACT_ROOT" \
     --uploaded-from "$UPLOAD_DIR" \
+    ${UPLOAD_FOLLOWS_SYMLINKS:+--uploaded-from-follows-symlinks} \
     --page-source "$PAGE_SOURCE" \
     --pull-cmd "rclone copy $ARTIFACT_ROOT ./pull" \
     --repro-diff "$REPRO_DIFF" \
@@ -871,12 +875,24 @@ upstream of everything in this ordering.
   and **hardlinks** every file into the staging tree (a hardlink IS the original — one inode, two names,
   zero extra bytes; `rclone` reads bytes through it identically), writes a `MANIFEST.tsv` of
   `link-type / staged path / source path / bytes`, and **never falls back to a copy** — a file it can
-  neither hardlink nor symlink is a hard failure. It is also what keeps `--uploaded-from <staging-dir>`
-  honest: a hardlinked tree is regular files, so `close_record.sh`'s byte-verification sees exactly what
-  `rclone` uploads. On the cross-filesystem fallback it symlinks and says so loudly
-  (`ARTIFACT-STAGE-SYMLINKS:`) — then the upload must follow links (`-L`, which `r2_copy` always injects,
-  #295) and `--uploaded-from` must name the SOURCE dirs, since it enumerates regular files only. Put the
-  staging dir on the same filesystem as the run's artifacts and none of that applies. **Where a copy is
+  neither hardlink nor symlink is a hard failure. It also fails clean: a link that fails part way through
+  the traversal takes the partial tree back out, because a half-staged tree is what the next `rclone copy`
+  would upload as this close's artifact set.
+  **`--uploaded-from` is the STAGING DIR, and the script prints the exact flags to use.** `close_record.sh`
+  compares two sets of relative keys, so the local side must be rooted where `rclone` was rooted — the
+  staging dir — and must enumerate what `rclone` enumerated. `stage_artifacts.sh` emits both as one
+  copy-able `ARTIFACT-STAGE-VERIFY-WITH:` line, for the ordinary case as well as the exotic one, so the
+  close never re-derives which case it is in:
+  - hardlinked (same filesystem, the normal path) → `--uploaded-from <staging-dir>`. A hardlinked tree is
+    regular files, so the verification sees exactly what `rclone` uploads, as a copied tree did.
+  - symlinked (the cross-filesystem fallback, announced by `ARTIFACT-STAGE-SYMLINKS:`) → the upload must
+    follow links (`-L`, which `r2_copy` always injects, #295), so the close needs
+    `--uploaded-from <staging-dir> --uploaded-from-follows-symlinks` — the *same* root, walked with
+    `find -L` so symlinks count as the objects they were uploaded as. Do **not** substitute the SOURCE dirs:
+    their keys lack each source's basename and miss `MANIFEST.tsv`, so every object reads as missing AND
+    surplus at once and the manifest can never be written (#846).
+  Put the staging dir on the same filesystem as the run's artifacts and only the first case arises.
+  **Where a copy is
   genuinely unavoidable, the copy REPLACES the original rather than sitting beside it** — two live copies of
   the same bytes for the length of a close is the cost this rule exists to remove (one close ran 15 GB and
   82% → 92% disk on exactly this, #843).

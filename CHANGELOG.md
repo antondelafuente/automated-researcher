@@ -18,10 +18,21 @@
   `cp`.** Each file is hardlinked into the staging tree (one inode, two names, zero extra bytes — rclone
   reads through it identically), with `MANIFEST.tsv` recording link-type/staged path/source path/bytes; the
   cross-filesystem fallback is a symlink and says so loudly, because then the upload must follow links
-  (`-L`) and `--uploaded-from` must name the source dirs (it enumerates regular files only). A file that can
-  be neither hardlinked nor symlinked is a hard failure — falling back to a copy is the duplication the
-  script exists to remove. Source symlinks are recorded and counted rather than silently dropped, and every
-  refusal leaves no staging residue behind.
+  (`-L`, which `r2_copy` always injects, #295). A file that can be neither hardlinked nor symlinked is a
+  hard failure — falling back to a copy is the duplication the script exists to remove. Source symlinks are
+  recorded and counted rather than silently dropped, and no failure leaves staging residue behind: a
+  refusal about the arguments is caught before the tree exists, and one part way through the traversal takes
+  the partial tree back out (a half-staged tree is what the next `rclone copy` uploads as this close's set).
+  **The staging dir is the upload root, so it is also the VERIFY root** — `close_record.sh`'s A2 compares
+  two sets of relative KEYS, which holds only when the local side is rooted where rclone was rooted AND
+  enumerates what rclone enumerated. `stage_artifacts.sh` prints both as one copy-able
+  `ARTIFACT-STAGE-VERIFY-WITH:` line in every case, and `close_record.sh` gains
+  `--uploaded-from-follows-symlinks` (walk with `find -L`, dereferenced sizes, an unresolvable link fatal
+  rather than silently dropped) for the symlinked tree. Verifying a staged upload against the SOURCE dirs
+  instead — which this change's first revision documented — strips each source's basename off every key and
+  drops `MANIFEST.tsv`, so every object reads as missing AND surplus and the manifest could never be
+  written; `close_record_smoke.sh` now runs the two scripts against each other end to end so neither prose
+  can drift from the other again.
   **`reap_scratch.sh` now prints the close's PEAK local footprint** on its `SCRATCH-REAP-RECLAIMED:` line
   (`peak_bytes=`), read from the record `repro_pull.sh` writes around the fresh pull — this script runs too
   late to measure the high-water mark itself. Absent or unparsable reads `unmeasured`, never a fabricated 0:

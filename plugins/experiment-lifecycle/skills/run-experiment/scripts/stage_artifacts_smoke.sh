@@ -14,6 +14,11 @@
 #   - a symlink inside a source is RECORDED in the manifest and counted on the marker rather than silently
 #     dropped — the scaffold manufactures these (executors symlink `work/<exp>/scripts`, #811)
 #   - a staging dir inside a source (and vice versa) is refused before the traversal stages its own output
+#   - the ARTIFACT-STAGE-VERIFY-WITH line names the STAGING dir in BOTH cases, adding the follow flag only
+#     for the symlink one — the close copies those flags rather than re-deriving them (#846 round 1, P0;
+#     the end-to-end proof that they actually verify lives in close_record_smoke.sh section 9c)
+#   - a failure PART WAY THROUGH the traversal leaves no staging tree: the partial one would be uploaded by
+#     the next `rclone copy` as this close's artifact set (#846 round 1, P1)
 # Fully offline: nothing but the local filesystem is touched.
 set -uo pipefail
 
@@ -51,6 +56,16 @@ grep -qP '^hardlink\ttarget_probes/adapter\.tar\t'"$TMP"'/src/target_probes/adap
   && ok stage-manifest-row || no "stage-manifest-row ($(cat artifacts/MANIFEST.tsv))"
 head -1 artifacts/MANIFEST.tsv | grep -qF 'link	staged_path	source_path	bytes' \
   && ok stage-manifest-header || no stage-manifest-header
+# The verify flags are emitted for the ordinary case too, not only the exotic one: the close copies one line
+# instead of working out which case it is in — the derivation an earlier revision got wrong (#846).
+case "$out" in
+  *"ARTIFACT-STAGE-VERIFY-WITH: --uploaded-from $TMP/artifacts"*) ok stage-verify-with-hardlink ;;
+  *) no "stage-verify-with-hardlink (stdout was: $out)" ;;
+esac
+case "$out" in
+  *"--uploaded-from-follows-symlinks"*) no "stage-verify-with-hardlink-no-follow-flag (stdout was: $out)" ;;
+  *) ok stage-verify-with-hardlink-no-follow-flag ;;
+esac
 
 # re-staging into the same dir is refused: a stale leg would be uploaded as though this close staged it
 bash "$S" "$TMP/artifacts" "$TMP/src/target_probes" >/dev/null 2>&1 \
@@ -112,6 +127,17 @@ case "$out" in
   *) no "stage-symlink-fallback-marker (stdout was: $out)" ;;
 esac
 grep -q '^symlink	target_probes/adapter\.tar	' art9/MANIFEST.tsv && ok stage-symlink-fallback-manifest || no stage-symlink-fallback-manifest
+# THE P0 (#846 round 1): --uploaded-from is the STAGING dir here too, plus the follow flag. Naming the SOURCE
+# dirs instead — what this script's header used to say — strips each source's basename off every key and
+# drops MANIFEST.tsv, so every object reads as missing AND surplus and the close can never verify.
+case "$out" in
+  *"ARTIFACT-STAGE-VERIFY-WITH: --uploaded-from $TMP/art9 --uploaded-from-follows-symlinks"*) ok stage-verify-with-symlink ;;
+  *) no "stage-verify-with-symlink (stdout was: $out)" ;;
+esac
+case "$out" in
+  *"VERIFY-WITH: --uploaded-from $TMP/src/target_probes"*) no "stage-verify-with-never-names-source-dirs (stdout was: $out)" ;;
+  *) ok stage-verify-with-never-names-source-dirs ;;
+esac
 
 # ...and when NEITHER link form works, it fails rather than falling back to a copy
 cat > "$TMP/stub/ln" <<'STUB'
@@ -122,5 +148,32 @@ chmod +x "$TMP/stub/ln"
 PATH="$TMP/stub:$PATH" bash "$S" "$TMP/art10" "$TMP/src/target_probes" >/dev/null 2>&1 \
   && no stage-unlinkable-refused || ok stage-unlinkable-refused
 [ -e art10/target_probes/adapter.tar ] && no stage-unlinkable-made-no-copy || ok stage-unlinkable-made-no-copy
+# ...and it leaves NO TREE AT ALL, not merely no copied file (#846 round 1, P1). The failure is mid-traversal
+# — the arguments were all fine — so it is reachable only after the dir and its manifest exist. A staging dir
+# holding a manifest and a few links is not inert: the next `rclone copy` uploads it as this close's set.
+[ -e art10 ] && no "stage-midstage-failure-leaves-no-tree ($(find art10 2>/dev/null | tr '\n' ' '))" || ok stage-midstage-failure-leaves-no-tree
+
+# The same failure with SOME files already linked — the genuinely partial tree, not the fail-on-first case.
+# `ln` refuses only the second file, so the first is really staged before the run dies.
+cat > "$TMP/stub/ln" <<'STUB'
+#!/bin/bash
+for a in "$@"; do case "$a" in *eval.jsonl) exit 1 ;; esac; done
+exec /bin/ln "$@"
+STUB
+chmod +x "$TMP/stub/ln"
+mkdir -p partial/probes; echo one > partial/probes/adapter.tar; echo two > partial/probes/eval.jsonl
+PATH="$TMP/stub:$PATH" bash "$S" "$TMP/art11" "$TMP/partial/probes" >/dev/null 2>&1 \
+  && no stage-partial-refused || ok stage-partial-refused
+[ -e art11 ] && no "stage-partial-leaves-no-residue ($(find art11 2>/dev/null | tr '\n' ' '))" || ok stage-partial-leaves-no-residue
+# ...and the cleanup removed LINKS, never the originals' bytes: both sources are intact and unshared.
+{ [ -f partial/probes/adapter.tar ] && [ "$(links partial/probes/adapter.tar)" = 1 ]; } \
+  && ok stage-cleanup-left-sources-intact || no "stage-cleanup-left-sources-intact (link count $(links partial/probes/adapter.tar))"
+
+# A staging dir the CALLER pre-created (empty) is handed back the way they left it, not removed with the
+# residue — the cleanup is bounded to what this run made.
+mkdir -p art12
+PATH="$TMP/stub:$PATH" bash "$S" "$TMP/art12" "$TMP/partial/probes" >/dev/null 2>&1
+{ [ -d art12 ] && [ -z "$(find art12 -mindepth 1 -print -quit 2>/dev/null)" ]; } \
+  && ok stage-cleanup-keeps-callers-own-dir || no "stage-cleanup-keeps-callers-own-dir (dir=$([ -d art12 ] && echo yes || echo removed), contents=$(find art12 2>/dev/null | tr '\n' ' '))"
 
 [ "$fails" = 0 ] && { echo "stage_artifacts smoke PASS"; exit 0; } || { echo "stage_artifacts smoke FAIL"; exit 1; }

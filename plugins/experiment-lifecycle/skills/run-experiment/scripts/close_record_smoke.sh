@@ -156,10 +156,19 @@ chmod +x "$T/stub/rclone"
 # one. Armed only for the exact `--uploaded-from` root named in FIND_PARTIAL_ROOT (so the store stub's own
 # traversals and the committed-script enumeration pass straight through), and it re-emits close_record.sh's
 # own `-printf` format because that is the one call it stands in for.
+#
+# The local enumeration passes its WALK OPTION first (`find -P <dir>` by default, `find -L <dir>` under
+# --uploaded-from-follows-symlinks, #846), so the stub strips that leading option before matching on the
+# root — and appends it to $FIND_WALK_LOG, which is how the symlink case below PROVES the flag reaches
+# `find` as `-L` rather than merely that the run exited 0. It is armed only for the `-type f` enumeration,
+# never for the `-type l` broken-link scan that runs beside it under the same root.
 cat > "$T/stub/find" <<'STUB'
 #!/usr/bin/env bash
-if [ -n "${FIND_PARTIAL_ROOT:-}" ] && [ "${1:-}" = "$FIND_PARTIAL_ROOT" ]; then
-  "$REAL_FIND" "$1" -type f ! -name "${FIND_PARTIAL_SKIP:?}" -printf '%s\t%P\0'
+walk=""
+case "${1:-}" in -P|-L|-H) walk="$1"; shift ;; esac
+[ -n "${FIND_WALK_LOG:-}" ] && [ -n "$walk" ] && echo "$walk ${1:-} ${2:-} ${3:-}" >> "$FIND_WALK_LOG"
+if [ -n "${FIND_PARTIAL_ROOT:-}" ] && [ "${1:-}" = "$FIND_PARTIAL_ROOT" ] && [ "${3:-}" = "f" ]; then
+  "$REAL_FIND" ${walk:+"$walk"} "$1" -type f ! -name "${FIND_PARTIAL_SKIP:?}" -printf '%s\t%P\0'
   echo "find: '$1/locked': Permission denied" >&2
   exit 1
 fi
@@ -167,7 +176,7 @@ if [ -n "${FIND_SCRIPTS_FAIL:-}" ] && [ "${1:-}" = "." ] && [ "$(pwd)" = "$FIND_
   echo "find: './locked': Permission denied" >&2
   exit 1
 fi
-exec "$REAL_FIND" "$@"
+exec "$REAL_FIND" ${walk:+"$walk"} "$@"
 STUB
 chmod +x "$T/stub/find"
 
@@ -770,6 +779,118 @@ run paperwork run-rp4 "$D2" --outcome completed-as-designed --no-artifacts --rea
 mv "$T/repro_pull.hidden" "$T/bin/repro_pull.sh"
 unset EXPERIMENT_SCRATCH_ROOT
 
+# ---- 9c. A2 END TO END OVER A REAL stage_artifacts.sh TREE (#846 round 1, P0) -------------------------
+# A2 compares two sets of RELATIVE KEYS, so completeness alone proves nothing: the local half also has to be
+# rooted where rclone was rooted and enumerate what rclone enumerated. Every other A2 case above uploads a
+# plain directory, where both halves are trivially true — so the one shape the close ACTUALLY runs, a
+# stage_artifacts.sh staging tree, went unexercised across this boundary and shipped a header telling callers
+# to verify the SYMLINK case against the SOURCE dirs. That strips each source's basename off every key and
+# drops MANIFEST.tsv, so all of it reads as missing AND surplus at once: verification could never pass.
+# These cases run the two scripts against each other rather than asserting on either one's prose.
+SA="$SELF_DIR/stage_artifacts.sh"
+if [ ! -f "$SA" ]; then
+  fail "A2/#846: stage_artifacts.sh not found at $SA — the staging<->verification round trip cannot be checked"
+else
+  # `rclone copy <staging> <root>` is stood in for by copying the staging tree into the store the way the
+  # real upload reads it: dereferencing (`cp -rL`) exactly when the upload runs `-L`. So the store's keys are
+  # genuinely derived from the staged layout, not hand-written to match what the assertion wants.
+  mkdir -p "$T/sa/src/target_probes/sub"
+  printf 'adapter bytes\n'  > "$T/sa/src/target_probes/adapter.safetensors"
+  printf 'eval rows\n'      > "$T/sa/src/target_probes/sub/eval.jsonl"
+
+  # (i) the HARDLINK case: the staging dir verifies as-is, with no flag. This is the everyday path.
+  rm -rf "$T/sa/stage-hard"
+  bash "$SA" "$T/sa/stage-hard" "$T/sa/src/target_probes" > "$T/sa/hard.out" 2>/dev/null \
+    || fail "A2/#846: staging the hardlink case failed"
+  grep -qxF "ARTIFACT-STAGE-VERIFY-WITH: --uploaded-from $T/sa/stage-hard" "$T/sa/hard.out" \
+    && pass "#846: the hardlink case emits its own verify flags (the close copies them, never re-derives them)" \
+    || fail "#846: no//wrong ARTIFACT-STAGE-VERIFY-WITH on the hardlink case: $(cat "$T/sa/hard.out")"
+  rm -rf "$T/store"; mkdir -p "$T/store"; cp -r "$T/sa/stage-hard/." "$T/store/"; export STORE_DIR="$T/store"
+  D="$(new_record exp-sa)"
+  run paperwork run-sa "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-sa" \
+      --uploaded-from "$T/sa/stage-hard"
+  [ "$RC" = 0 ] && pass "A2/#846: a HARDLINKED staging tree byte-verifies against the store built from it" \
+    || fail "A2/#846: hardlinked staging tree failed verification (rc=$RC): $ERR"
+  grep -qF 'target_probes/sub/eval.jsonl' "$D/ARTIFACT_MANIFEST.md" \
+    && pass "#846: the verified keys carry the source basename — the STAGED layout is the store layout" \
+    || fail "#846: staged-layout keys absent from the manifest"
+
+  # (ii) the CROSS-FILESYSTEM case. `ln` is stubbed to fail the way EXDEV makes it fail, so the staging tree
+  # is symlinks; the upload follows them (`cp -rL`), so the store holds the same keys with dereferenced
+  # bytes. THE REGRESSION: with the pre-fix guidance (--uploaded-from = the SOURCE dirs) this cannot pass.
+  mkdir -p "$T/sa/lnstub"
+  cat > "$T/sa/lnstub/ln" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = "-s" ] && exec /bin/ln "$@"
+exit 1
+STUB
+  chmod +x "$T/sa/lnstub/ln"
+  rm -rf "$T/sa/stage-soft"
+  PATH="$T/sa/lnstub:$PATH" bash "$SA" "$T/sa/stage-soft" "$T/sa/src/target_probes" > "$T/sa/soft.out" 2>/dev/null \
+    || fail "A2/#846: staging the cross-filesystem case failed"
+  grep -qxF "ARTIFACT-STAGE-VERIFY-WITH: --uploaded-from $T/sa/stage-soft --uploaded-from-follows-symlinks" "$T/sa/soft.out" \
+    && pass "#846: the symlink case names the STAGING dir plus the follow flag (not the source dirs)" \
+    || fail "#846: wrong ARTIFACT-STAGE-VERIFY-WITH on the symlink case: $(cat "$T/sa/soft.out")"
+  [ -L "$T/sa/stage-soft/target_probes/adapter.safetensors" ] \
+    && pass "#846: the cross-filesystem fixture really did produce symlinks" \
+    || fail "#846: the symlink fixture's premise is broken (the file is not a symlink)"
+  rm -rf "$T/store"; mkdir -p "$T/store"; cp -rL "$T/sa/stage-soft/." "$T/store/"; export STORE_DIR="$T/store"
+
+  export FIND_WALK_LOG="$T/sa/walk.log"; : > "$FIND_WALK_LOG"
+  D="$(new_record exp-sa)"
+  run paperwork run-sa "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-sa" \
+      --uploaded-from "$T/sa/stage-soft" --uploaded-from-follows-symlinks
+  [ "$RC" = 0 ] \
+    && pass "A2/#846: a SYMLINKED staging tree byte-verifies with --uploaded-from-follows-symlinks" \
+    || fail "A2/#846: the cross-filesystem fallback still cannot pass verification (rc=$RC): $ERR"
+  grep -qF -- "-L $T/sa/stage-soft -type f" "$FIND_WALK_LOG" \
+    && pass "#846: the flag reaches the enumeration as \`find -L\` (the same visibility the -L upload had)" \
+    || fail "#846: the local enumeration did not walk with -L: $(cat "$FIND_WALK_LOG")"
+  grep -qF 'target_probes/sub/eval.jsonl' "$D/ARTIFACT_MANIFEST.md" \
+    && pass "#846: dereferenced sizes and staged-layout keys agree with the store" \
+    || fail "#846: the symlink case verified against the wrong key set"
+  : > "$FIND_WALK_LOG"
+
+  # ...and WITHOUT the flag the same pair BLOCKs rather than certifying a set it never covered. It is the
+  # visibility half that is wrong here, so the local set comes back empty — and the message has to name the
+  # flag, because a close that cannot tell WHY is a close that reaches for the source dirs again.
+  D="$(new_record exp-sa)"
+  run paperwork run-sa "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-sa" \
+      --uploaded-from "$T/sa/stage-soft"
+  { [ "$RC" = 1 ] && case "$ERR" in *"--uploaded-from-follows-symlinks"*) true;; *) false;; esac; } \
+    && pass "#846: a symlinked staging tree without the flag BLOCKs and names the flag" \
+    || fail "#846: symlinked staging tree without the flag: rc=$RC (expected a BLOCK naming the flag): $ERR"
+  no_paperwork "$D" && pass "#846: that BLOCK wrote no manifest" || fail "#846: a mis-enumerated close wrote paperwork"
+
+  # ...and the SOURCE dirs — the pre-fix guidance — must NOT verify: the keys lose `target_probes/` and
+  # MANIFEST.tsv is unaccounted for. This is the P0 itself, pinned so no future header can re-suggest it.
+  D="$(new_record exp-sa)"
+  run paperwork run-sa "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-sa" \
+      --uploaded-from "$T/sa/src/target_probes" --uploaded-from-follows-symlinks
+  { [ "$RC" = 1 ] && case "$ERR" in *ABSENT*|*"unaccounted for"*) true;; *) false;; esac; } \
+    && pass "#846 regression: verifying a staged upload against the SOURCE dirs is refused, not silently wrong" \
+    || fail "#846 regression: source-dir verification of a staged upload rc=$RC: $ERR"
+
+  # A BROKEN link under the flag is fatal, never a silent short set: `-L -type f` cannot see it and neither
+  # could the upload that followed links, so the local set would come back one file light and still "verify".
+  ln -s "$T/sa/nowhere.bin" "$T/sa/stage-soft/target_probes/dangling.bin"
+  D="$(new_record exp-sa)"
+  run paperwork run-sa "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-sa" \
+      --uploaded-from "$T/sa/stage-soft" --uploaded-from-follows-symlinks
+  { [ "$RC" = 1 ] && case "$ERR" in *"target does not exist"*) true;; *) false;; esac; } \
+    && pass "#846: an unresolvable symlink under the follow flag is FATAL, not a silently shortened set" \
+    || fail "#846: broken symlink under --uploaded-from-follows-symlinks rc=$RC: $ERR"
+  rm -f "$T/sa/stage-soft/target_probes/dangling.bin"
+  unset FIND_WALK_LOG
+
+  # the flag is a statement about an upload, so it is refused where the invocation says there was none
+  run paperwork run-sa "$D" --outcome completed-as-designed --no-artifacts --uploaded-from-follows-symlinks
+  { [ "$RC" = 1 ] && case "$ERR" in *"--no-artifacts"*) true;; *) false;; esac; } \
+    && pass "#846: --uploaded-from-follows-symlinks + --no-artifacts refused" \
+    || fail "#846: contradictory follow-symlinks flag accepted (rc=$RC)"
+fi
+U="$(new_upload)"; sync_store "$U"
+
 # ---- 10. regression R5 + A6: the canonical invocations documented in SKILL.md are the ones that RUN ----
 # The round-1 finding was a SKILL.md that documented `close_record.sh <run-id> <registry-dir> …` — an
 # invocation the script rejects as an unknown verb. Prose and code cannot drift here anymore: the blocks are
@@ -807,6 +928,15 @@ if [ -f "$SKILL_MD" ]; then
       || fail "A6: the documented --size-only did not record the caller's declaration"
   else
     fail "A6: SKILL.md documents --size-only as optional but the block rejects it: $(cat "$T/err")"
+  fi
+  # Same rule for the other documented optional, #846's --uploaded-from-follows-symlinks: the block shows it
+  # as `${UPLOAD_FOLLOWS_SYMLINKS:+…}`, so switching it on the documented way has to work — and on a leg with
+  # no symlinks it must be a NO-OP, since `-L` and the default enumerate an unlinked tree identically. That
+  # no-op is what makes it sound as a per-close statement about how the upload ran rather than a per-leg one.
+  if UPLOAD_FOLLOWS_SYMLINKS=1 bash -c "${PW_BLOCK//scripts\/close_record.sh/$CR}" >"$T/out" 2>"$T/err"; then
+    pass "A6/#846: the documented optional --uploaded-from-follows-symlinks runs, and is a no-op with no links present"
+  else
+    fail "A6/#846: SKILL.md documents --uploaded-from-follows-symlinks as optional but the block rejects it: $(cat "$T/err")"
   fi
   # The finalize block, before and after the landing: refused, then accepted.
   : > "$RSR_CALLS"

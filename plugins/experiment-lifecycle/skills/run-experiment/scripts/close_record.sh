@@ -37,7 +37,11 @@
 #      section implements, and why they are derived there once instead of argued per line (#823 rounds 3, 5).
 #      "Hash where the store gives one" has NO automatic downgrade path (#823 round 6): either this close
 #      hashes, or the INVOCATION says on its face that it cannot (`--size-only`) — see the
-#      "THREE HASH STATES" block in observe_store.
+#      "THREE HASH STATES" block in observe_store. Completeness is necessary but not sufficient: both sets
+#      are keyed on RELATIVE PATH, so a complete local set still verifies nothing unless `--uploaded-from`
+#      names the root rclone was actually pointed at AND enumerates entries the way that upload did. See
+#      local_artifact_set's "WHICH ENTRIES COUNT AS CONTENT" block for those two halves and the
+#      `--uploaded-from-follows-symlinks` flag that pins the second (#846 round 1).
 #   3. ATOMIC WRITE-OR-NOTHING, AND NOTHING SURVIVES THAT CLAIMS THIS CLOSE SUCCEEDED. Every generated file is
 #      written to a temp dir inside the record dir and moved into place only after every check has passed and
 #      the terminal ledger event has been written, so a failed run leaves no partial artifact. The other half
@@ -82,7 +86,8 @@
 # invocation this script would reject fails the smoke, #820 round 1):
 #   close_record.sh paperwork <run-id> <registry-dir> --outcome <abstract-outcome>
 #                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-#                   [--size-only] [--page-source <path> | --page-source-external <url>]
+#                   [--uploaded-from-follows-symlinks] [--size-only]
+#                   [--page-source <path> | --page-source-external <url>]
 #                   [--pull-cmd <cmd>]... [--repro-diff <file>] [--reap-repro-pull <path>]
 #   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 #
@@ -115,7 +120,8 @@ usage() {
 usage:
   close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
-                  [--size-only] [--page-source <path> | --page-source-external <url>]
+                  [--uploaded-from-follows-symlinks] [--size-only]
+                  [--page-source <path> | --page-source-external <url>]
                   [--pull-cmd <cmd>]... [--repro-diff <file>] [--reap-repro-pull <path>]
   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 USAGE
@@ -258,6 +264,7 @@ trap close_exit EXIT
 # Globals the verifier fills: LISTING (raw stdout, verbatim), OBJECTS, BYTES, HASH_MODE.
 LISTING=""; OBJECTS=0; BYTES=0; HASH_MODE=""
 SIZE_ONLY=0         # --size-only: the caller declares on the invocation's face that this store has no md5
+FOLLOW_SYMLINKS=0   # --uploaded-from-follows-symlinks: the upload ran `-L`, so a symlink IS an object (#846)
 LOCAL_ROWS=0        # rows `find` actually emitted across every --uploaded-from leg (counted, never assumed)
 LOCAL_DEDUPED=0     # rows collapsed onto an already-seen rel path (byte-identical multi-leg copies, #460)
 declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
@@ -274,19 +281,46 @@ declare -A STORE_SIZE=() STORE_HASH=() LOCAL_SIZE=() LOCAL_SRC=()
 # rel-path collision ACROSS legs and short-circuits at the first differing byte; priced fine at the ~10-agent
 # scale.
 # NUL-delimited (`%P\0`) so a path containing a newline is read raw rather than silently splitting into two
-# bogus entries — a corrupted local set would make the verification below assert the wrong thing. `-type f`
-# (regular files only, symlinks not followed) matches rclone's own default of skipping symlinks, so the two
-# sides of the comparison are the same set of things.
+# bogus entries — a corrupted local set would make the verification below assert the wrong thing.
+#
+# WHICH ENTRIES COUNT AS CONTENT IS THE UPLOAD'S PROPERTY, NOT THIS SCRIPT'S (#846 round 1, P0). The set
+# compared here has to be the set of KEYS the upload actually produced under --artifact-root, which pins two
+# things at once: the ROOT whose relative paths become the keys, and the VISIBILITY RULE for what rclone
+# treated as a file. Get either half wrong and every object reads as missing-plus-surplus.
+#   default            `find -type f`    — regular files only, symlinks not followed: rclone's own default.
+#   --uploaded-from-follows-symlinks
+#                      `find -L -type f` — the upload ran with `-L` (which gpu-job's `r2_copy` always
+#                                          injects, #295), so a symlink IS an uploaded object and its
+#                                          dereferenced size is the byte count the store received.
+# The flag is a statement about how the UPLOAD ran, so it applies to every leg — and it is safe to apply to
+# a leg holding no symlinks, where `-L` and the default enumerate identically. This is what lets
+# `stage_artifacts.sh`'s cross-filesystem fallback stay verifiable: `--uploaded-from` is ALWAYS the staging
+# dir (the root rclone was pointed at, so the staged layout IS the key layout), and the flag reconciles the
+# visibility half instead of swapping the root out from under it.
 local_artifact_set() {
-  local d rel size out leg=0
+  local d rel size out broken leg=0
+  # `-P` (never follow, find's own default) rather than an empty array: an unquoted/empty expansion is the
+  # kind of thing that works until a path has a space in it.
+  local walk=-P
+  [ "$FOLLOW_SYMLINKS" = 1 ] && walk=-L
   for d in "$@"; do
     leg=$((leg + 1))
     out="$TMPDIR_GEN/.local-set.$leg"
+    # Rule (b) under `-L`: a symlink the traversal CANNOT RESOLVE is invisible to `-L -type f` — it would
+    # drop out of the local set silently, which is the one thing rule (b) forbids, and the upload that
+    # followed links hit the same dangling target. `-L -type l` matches exactly the unresolvable ones (GNU
+    # find: under -L, -type l is true only for a broken link), so they are named and fatal, never missing.
+    if [ "$FOLLOW_SYMLINKS" = 1 ]; then
+      broken=$(find -L "$d" -type l -printf '%P\n') \
+        || die "scanning --uploaded-from '$d' for unresolvable symlinks FAILED (find exit $?; its stderr is above) — no ARTIFACT_MANIFEST.md was written: under --uploaded-from-follows-symlinks a link this close cannot resolve is a file it cannot count, and an uncounted file is how a short local set certifies a store it never covered"
+      [ -z "$broken" ] \
+        || die "--uploaded-from-follows-symlinks was passed, but '$d' holds symlink(s) whose target does not exist: $(printf '%s' "$broken" | head -5 | tr '\n' ' ')— no ARTIFACT_MANIFEST.md was written: a broken link is invisible BOTH to this enumeration and to the upload that followed links, so it would silently leave the local set short. Restore the targets (a reaped scratch dir under a stage_artifacts.sh staging tree is the usual cause) and re-run"
+    fi
     # Rule (a): collected to a FILE whose exit status is checked, never `< <(find …)`. A process substitution
     # discards find's status, so a traversal that hit an unreadable subdirectory — or a find without GNU
     # `-printf` — handed the loop below a well-formed, SHORT enumeration and the verification then certified
     # the store against it as though it were the complete uploaded set (#823 round 5, P0).
-    find "$d" -type f -printf '%s\t%P\0' > "$out" \
+    find "$walk" "$d" -type f -printf '%s\t%P\0' > "$out" \
       || die "enumerating --uploaded-from '$d' FAILED (find exit $?) — no ARTIFACT_MANIFEST.md was written: the local artifact set is what the listing is verified AGAINST, so a partially enumerated one would certify the store against a silently shortened set (an unreadable subdirectory, or a find without GNU -printf). Fix the traversal error above and re-run"
     while IFS=$'\t' read -r -d '' size rel; do
       LOCAL_ROWS=$((LOCAL_ROWS + 1))
@@ -377,7 +411,7 @@ observe_store() {
     return 1
   fi
   if [ "${#surplus[@]}" -gt 0 ]; then
-    echo "BLOCK: ${#surplus[@]} object(s) in the listing of '$root' are unaccounted for by the local artifact set — no ARTIFACT_MANIFEST.md was written: $(printf '%s ' "${surplus[@]:0:5}"). Either --uploaded-from is not the set that was uploaded, or this root holds another run's objects (the #729 wrong-root shape); name the dirs that were uploaded, or upload to a root of this experiment's own" >&2
+    echo "BLOCK: ${#surplus[@]} object(s) in the listing of '$root' are unaccounted for by the local artifact set — no ARTIFACT_MANIFEST.md was written: $(printf '%s ' "${surplus[@]:0:5}"). Either --uploaded-from is not the set that was uploaded, or this root holds another run's objects (the #729 wrong-root shape); name the dirs that were uploaded, or upload to a root of this experiment's own. If the uploaded tree was built by stage_artifacts.sh and it reported ARTIFACT-STAGE-SYMLINKS:, the upload followed links and this run needs --uploaded-from-follows-symlinks (without it the symlinked entries are invisible here and every one of them reads as surplus)" >&2
     return 1
   fi
   # Rule (c): THE SET COUNTED IS THE SET COMPARED. Every number here comes from a different traversal —
@@ -556,6 +590,8 @@ cmd_paperwork() {
       --uploaded-from) [ "$#" -ge 2 ] || die "--uploaded-from requires a value"; UPLOADED_FROM+=("$2"); shift 2 ;;
       --no-artifacts)  no_artifacts=1; shift ;;
       --size-only)     SIZE_ONLY=1; shift ;;
+      --uploaded-from-follows-symlinks)
+                       FOLLOW_SYMLINKS=1; shift ;;
       --page-source)   [ "$#" -ge 2 ] || die "--page-source requires a value";   page_source="$2"; shift 2 ;;
       --page-source-external)
                        [ "$#" -ge 2 ] || die "--page-source-external requires a value"; page_source_external="$2"; shift 2 ;;
@@ -588,6 +624,7 @@ cmd_paperwork() {
     [ -z "$artifact_root" ] || die "--artifact-root and --no-artifacts are mutually exclusive"
     [ "${#UPLOADED_FROM[@]}" -eq 0 ] || die "--uploaded-from has nothing to verify against under --no-artifacts (which asserts this run stored nothing) — drop one of them"
     [ "$SIZE_ONLY" = 0 ] || die "--size-only has no store to hash under --no-artifacts (which asserts this run stored nothing) — drop one of them"
+    [ "$FOLLOW_SYMLINKS" = 0 ] || die "--uploaded-from-follows-symlinks describes an upload that --no-artifacts says never happened (it asserts this run stored nothing) — drop one of them"
   else
     [ -n "$artifact_root" ] || die "one of --artifact-root <rclone-dest> or --no-artifacts is required — a record with heavy artifacts needs the ARTIFACT_MANIFEST.md that pins where they are (#232); an API-only run with nothing in the store says so explicitly"
     [ "${#UPLOADED_FROM[@]}" -gt 0 ] || die "--artifact-root needs at least one --uploaded-from <local-dir>: the manifest is written only when the store listing is BYTE-VERIFIED against the local set this run uploaded (#821 invariant 2), and without that local set there is nothing to verify against — a listing on its own only says what is in the bucket, never that YOUR artifacts are"
@@ -634,7 +671,7 @@ cmd_paperwork() {
   # ---- ARTIFACT_MANIFEST.md — from an observed, byte-verified listing, or not at all (#232/#331) -------
   if [ "$no_artifacts" = 0 ]; then
     local_artifact_set "${UPLOADED_FROM[@]}"
-    [ "${#LOCAL_SIZE[@]}" -gt 0 ] || die "--uploaded-from named no files (${UPLOADED_FROM[*]}) — an empty local set would make every listing 'verified' against nothing; pass the dir(s) whose contents were uploaded, or --no-artifacts if this run stored nothing"
+    [ "${#LOCAL_SIZE[@]}" -gt 0 ] || die "--uploaded-from named no files (${UPLOADED_FROM[*]}) — an empty local set would make every listing 'verified' against nothing; pass the dir(s) whose contents were uploaded, or --no-artifacts if this run stored nothing. A stage_artifacts.sh staging tree that fell back to SYMLINKS enumerates as empty here unless --uploaded-from-follows-symlinks is passed, matching the -L the upload ran with"
     # Invariant 2: no manifest, and nothing else written either. The earlier manifest (and LANDED.md) being
     # moved aside is NOT handled here — that is close_exit's job for every failure site alike, this one
     # included; handling it here is what left the sites below it uncovered (#823 round 6's P0).
