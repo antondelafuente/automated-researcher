@@ -604,4 +604,91 @@ if printf '%s\n' "${PATHS[@]}" | grep -Eq '^\.github/(workflows/reconcile-prs\.y
   fi
 fi
 
+# 21. close-audit checkout-lifecycle smoke (#840; #842 round 2): audit_checkout.sh MINTS the clean-room
+#     path itself (the one shape repo-janitor's backstop glob can name — 10.7G of ad-hoc-named clones from
+#     ONE close is what made the sweep unable to catch them), creates it SPARSE + detached (#805), and
+#     reaps it through a STATICALLY BOUNDED delete whose every guard fails closed to "reported, still on
+#     disk" (outside the temp root, nested, wrong name shape, symlink, not a linked worktree), plus the
+#     reap's license — a verdict written INSIDE the tree the reap removes is blocked before the auditor
+#     runs. A bounded-delete helper is exactly the class compile-only checks cannot cover. Runs when the
+#     script, its smoke, or either script this block actually EXECUTES changed (same dependency rationale
+#     as 10b2/23): `sparse_worktree.sh`, which audit_checkout.sh resolves next to itself and routes the
+#     whole create path through — it refuses a FULL checkout rather than substituting one, so the sparse +
+#     detached assertions here are assertions about that script; and `audit_experiment.sh`, which the smoke
+#     DRIVES (`--reap-checkout`) for the carry-through, unresolvable-helper and reap-license cases.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/(experiment-lifecycle/skills/run-experiment/scripts/(audit_checkout(_smoke)?|sparse_worktree)|verify-claims/skills/verify-claims/scripts/audit_experiment)\.sh$'; then
+  AC_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/audit_checkout_smoke.sh"
+  if [ -f "$AC_SMOKE" ]; then
+    echo "[checks] close-audit checkout-lifecycle smoke" >&2
+    bash "$AC_SMOKE" >&2 && ok "audit_checkout smoke" || err "audit_checkout smoke FAILED"
+  else
+    err "audit_checkout.sh, sparse_worktree.sh or audit_experiment.sh changed but audit_checkout_smoke.sh missing — cannot verify the audit-checkout lifecycle"
+  fi
+fi
+
+# 22. executor-scratch archive+reap smoke (#792; #804, #811, #840): NO DELETE WITHOUT A VERIFIED ARCHIVE
+#     (copy failure, a `Can't follow symlink` NOTICE on an exit-0 copy, a failed `rclone check`, or a
+#     destination listing that doesn't show the run-id all leave the tree in place), the clean-close guard,
+#     the DERIVED delete target (only `<root>/<run-id>`), the LOUD `SCRATCH-REAP-GAP:` marker + exit 3 that
+#     replaced the silent exit-0 log line (seven closes reaped zero scratch dirs while the disk refilled,
+#     #804), the dangling-symlink and venv exclusions reaching BOTH rclone verbs (#811, #840), and never
+#     deleting through a mount point. rclone is stubbed — offline. Runs when the script, its smoke, or
+#     run_supervision_record.sh changed: reap_scratch.sh resolves that record helper next to itself and
+#     asks it `is-closed` / `worktree-path`, so BOTH the clean-close guard and the never-reap-the-bound-
+#     worktree guard are answers this script gives — a record-interface change can weaken a fail-closed
+#     delete guard with nothing else re-run (same dependency rationale as 10b2/23; #845 review round 1).
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/(reap_scratch(_smoke)?|run_supervision_record)\.sh$'; then
+  RSC_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_scratch_smoke.sh"
+  if [ -f "$RSC_SMOKE" ]; then
+    echo "[checks] executor-scratch archive+reap smoke" >&2
+    bash "$RSC_SMOKE" >&2 && ok "reap_scratch smoke" || err "reap_scratch smoke FAILED"
+  else
+    err "reap_scratch.sh or run_supervision_record.sh changed but reap_scratch_smoke.sh missing — cannot verify the scratch archive+reap"
+  fi
+fi
+
+# 23. workspace self-reap smoke (#532; #535 review round 2): the clean-close guard (a parked/blocked or
+#     deliberately-stopped run is never reaped), the run-id<->worktree binding read from the run-supervision
+#     record's own `worktree_path` (a clean-closed run-id must resolve to the SAME worktree it bound at its
+#     own start, never a peer's), the $OLDPWD self-only sequencing gate, the real `git worktree remove
+#     --force`, and refusal on a path that isn't a worktree — a deleting close action, so behavior the
+#     JSON/syntax checks can't cover. Runs when the script, its smoke, or run_supervision_record.sh (the
+#     record it resolves the binding from, same rationale as 10b2) changed.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/run-experiment/scripts/(reap_worktree(_smoke)?|run_supervision_record)\.sh$'; then
+  RW_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/reap_worktree_smoke.sh"
+  if [ -f "$RW_SMOKE" ]; then
+    echo "[checks] workspace self-reap smoke" >&2
+    bash "$RW_SMOKE" >&2 && ok "reap_worktree smoke" || err "reap_worktree smoke FAILED"
+  else
+    err "reap_worktree.sh or run_supervision_record.sh changed but reap_worktree_smoke.sh missing — cannot verify the workspace self-reap"
+  fi
+fi
+
+# 24. sparse-worktree smokes (#805 creation mode, #807 `--existing` in-place mode): the default cone really
+#     excludes `registry/` while keeping the named record(s) and the ancestor `.gitignore` rule files
+#     log-experiment decides against, `git add` outside the cone FAILS rather than silently staging a short
+#     commit, `--full` still escapes, and fail-closed refusals leave no half-created worktree; `--existing`
+#     adds the in-place sparsifier's own contract — idempotence, PRESERVING a tree's existing cone entries,
+#     refusing the main working tree or a tree carrying modified/untracked/IGNORED state inside a record the
+#     cone would drop, the total-or-fatal cone read, and the no-op on an unrelated repo.
+#     BOTH smokes run off the ONE script: wiring only the creation-mode smoke would leave sparse_worktree.sh
+#     half-gated. The creation smoke also asserts the log-experiment copy is byte-identical (same
+#     per-skill-copy precedent as 1e/1f), so a change to EITHER copy re-runs them.
+if printf '%s\n' "${PATHS[@]}" | grep -Eq '^plugins/experiment-lifecycle/skills/(run-experiment|log-experiment)/scripts/sparse_worktree(_smoke|_existing_smoke)?\.sh$'; then
+  SW_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/sparse_worktree_smoke.sh"
+  if [ -f "$SW_SMOKE" ]; then
+    echo "[checks] sparse-worktree creation-mode smoke" >&2
+    bash "$SW_SMOKE" >&2 && ok "sparse_worktree smoke" || err "sparse_worktree smoke FAILED"
+  else
+    err "sparse_worktree.sh changed but sparse_worktree_smoke.sh missing — cannot verify the creation-mode helper"
+  fi
+  SWE_SMOKE="$ROOT/plugins/experiment-lifecycle/skills/run-experiment/scripts/sparse_worktree_existing_smoke.sh"
+  if [ -f "$SWE_SMOKE" ]; then
+    echo "[checks] sparse-worktree --existing in-place smoke" >&2
+    bash "$SWE_SMOKE" >&2 && ok "sparse_worktree --existing smoke" || err "sparse_worktree --existing smoke FAILED"
+  else
+    err "sparse_worktree.sh changed but sparse_worktree_existing_smoke.sh missing — cannot verify the in-place sparsifier"
+  fi
+fi
+
 [ "$fail" = 0 ] && { echo "[checks] PASS" >&2; exit 0; } || { echo "[checks] FAIL" >&2; exit 1; }
