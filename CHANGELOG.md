@@ -1,4 +1,4 @@
-- experiment-lifecycle 0.8.0, repo-janitor 0.4.0, verify-claims 0.9.0 (2026-09-06): reaper follow-up 2
+- experiment-lifecycle 0.9.0, repo-janitor 0.4.0, verify-claims 0.9.0 (2026-09-06): reaper follow-up 2
   (#840) — a week after #804 the disk hit 95% again (12 GB free of 225 GB), and each of the five measured
   residue classes had its own reason for surviving the daily sweep. **repo-janitor: tier 1 admits merged
   worktrees whose non-identical residue is entirely on a bounded ALLOWLIST.** #804's byte-identity bar can
@@ -46,6 +46,44 @@
   helper prints a loud reap-by-hand line and deletes nothing rather than deriving an `rm -rf` of its own.
   Not claimed here: #840's own non-claim about the session janitor killing executors mid-archive stays
   unverified and out of scope.
+- experiment-lifecycle 0.8.0 (2026-09-06): sparse worktrees, part 2 — the creation paths #805 could not
+  intercept (#807). #805 made worktrees a scaffold SCRIPT creates sparse by default; 7 days later the
+  instance disk hit 95% again, and the measurement said why: of 36 live worktrees of the research repo, 16
+  were full checkouts made by paths that are not this repo's code — 5 harness-spawned
+  (`claude rc … --spawn worktree` → `.claude/worktrees/*`, 12.8G) and 11 from an instance's own worktree
+  convention (24.1G) — holding 37G of the 48G total, i.e. ~77% of worktree disk. A full checkout is now
+  2.3–2.6G (0.3G on 2026-07-01 → 1.8G on 08-01 → 2.6G on 09-06) against ~330M sparse. Since neither
+  creation path can be intercepted from here, the product-side lever is the FIRST ACT of the session that
+  lands in such a tree: **`sparse_worktree.sh --existing <path> [registry/<exp> ...]`** applies the same cone
+  in place, reclaiming the already-materialized registry copy instead of preventing it. One cone recipe now
+  serves both modes (extracted into a shared function, so create-side and in-place can't drift), and EVERY
+  read the applied cone is derived from is total-or-fatal — the top-level enumeration, the tree's own
+  existing `sparse-checkout list`, the `git status` refusal gate and the research-repo gate each go through a
+  checked read rather than a pipeline or process substitution whose failure is invisible (#821's construction
+  rule). The asymmetry is why: a failed read of any of them looks exactly like "nothing there", and "nothing
+  there" is the answer that NARROWS the cone, i.e. the one that drops records. A tree that is sparse but
+  whose existing cone cannot be read is therefore a refusal, not an empty preserved set. It is idempotent (a re-run
+  reclaims 0), and prints the bytes it reclaimed MEASURED with `du` before/after rather than computed from
+  the cone, because what git actually gives back depends on state the cone doesn't describe. It fails closed
+  rather than destructively, on each of the three behaviors verified directly against git 2.55: it refuses
+  the MAIN working tree (the box's one full copy, which #805's own verified property keeps non-sparse); it
+  PRESERVES whatever `registry/` records the tree's own cone already includes, so the first-act guidance can
+  never un-materialize the record an already-sparse instance-created tree was created for; and it refuses when
+  modified, untracked, or **ignored** state sits inside a record the cone would drop. Ignored state counts
+  because a dropped directory holding ONLY ignored files is deleted outright, silently, exit 0 — and the
+  registry's big artifacts are exactly what `registry/.gitignore` covers, living on disk and in the artifact
+  store rather than in git, so unlike a dropped tracked file they do not come back with a `git checkout`
+  (the other two are non-destructive but leave a half-sparsified record and an untrue reclaim figure). The
+  remedy is the caller's to pick — land the work, or name that record as an include path — never the
+  script's to guess. Pointing it at a tree with no top-level `registry/` at HEAD is a no-op, so a blind
+  first act aimed at the wrong repo cannot sparse-checkout it. `design-experiment` gets a Step 0 and
+  `launch-experiment` a second half to its worktree step, both as checklist lines rather than prose, since
+  the intercept only works if the session actually runs it first.
+  `sparse_worktree_existing_smoke.sh` covers all of the above alongside the existing creation-mode smoke —
+  including an assertion that git really would delete that ignored artifact, so the day git stops doing it
+  the guard's justification fails loudly instead of silently over-refusing. Instance-side wiring (the
+  instance's own session launchers calling the helper) and a harness-side `--spawn worktree` flag stay out
+  of scope per #807: neither has a product-repo surface.
 - experiment-lifecycle 0.7.1 (2026-09-02): the close's two SCRIPTS, re-specified as invariants (#821, split
   from #819 after PR #820 took five CHANGES_REQUESTED rounds on exactly these two files). Each of that PR's
   nine findings is now a named smoke case that fails on the pre-fix code, and both smokes are wired into

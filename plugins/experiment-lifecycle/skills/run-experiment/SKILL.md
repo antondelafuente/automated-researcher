@@ -240,6 +240,12 @@ Three obligations, maintained continuously (not at close):
   > `registry/`, plus only the record(s) this run touches (`--full` for the rare task that needs all of them).
   > A full checkout carries a duplicate of the entire registry, which is the disk-growth driver reaping can't
   > outrun (`automated-researcher#805`); see the Invariants entry for the measurement.
+  > If you were **spawned into** a worktree that is already a full checkout (the harness's own
+  > `claude rc … --spawn worktree`, or an instance convention — neither passes through the helper above),
+  > sparsify it in place instead, as your first act:
+  > `scripts/sparse_worktree.sh --existing . registry/<exp>` (`automated-researcher#807`) — same cone,
+  > idempotent, prints the bytes it reclaimed, and refuses rather than dropping a record that carries
+  > uncommitted / untracked / ignored files.
   > **Do not hand-write the session handle.** Its *shape* is instance-owned (a tmux name / systemd unit /
   > pid-file path) but it is not yours to choose: the instance's teardown seams compare the recorded value
   > against the current session's OWN identity, so a plausible near-miss — `tmux:run-x` where the seam derives
@@ -1252,6 +1258,18 @@ through env seams; see the "three seams" note at the top of this skill.
   keep up. `--full` is the explicit escape hatch for a task that genuinely needs every record (a synthesis
   sweep, cross-experiment viz). A too-narrow cone is loud, never a short commit: `git add` refuses a path
   outside the sparse set.
+- **A worktree the helper did NOT create is sparsified IN PLACE, as the session's first act (#807).**
+  `scripts/sparse_worktree.sh --existing <path> registry/<exp>` — the same cone, applied to a tree that
+  already exists, because the two paths that make most of the worktrees are not this repo's code: the
+  harness's `claude rc … --spawn worktree` (`.claude/worktrees/*`) and an instance's own session launchers.
+  Measured 2026-09-06, 7 days after #805 + reaping landed and the disk hit 95% again: 16 of 36 live worktrees
+  were full checkouts from those two paths, holding 37G of 48G — ~77% of worktree disk, against 2.3–2.6G per
+  full checkout and ~330M sparse. It *reclaims* rather than prevents, which is the only lever a script has on
+  a tree someone else made. Idempotent, prints the bytes it gave back, and fails closed rather than
+  destructively: it refuses the main working tree, preserves whatever `registry/` records the tree's own cone
+  already keeps, and refuses when modified / untracked / **ignored** state sits inside a record the cone would
+  drop — git deletes an ignored-only record dir outright, and ignored registry artifacts are the one class a
+  `git checkout` cannot bring back.
 - **Tear down your own worktree at a clean close** — the workspace member of the same teardown symmetry as
   pod-teardown and session-reap: removed (`git worktree remove --force`, branch ref kept) only AFTER upload is
   verified AND `log-experiment` has merged the record, gated on the same clean-close `is-closed` check as

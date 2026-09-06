@@ -60,6 +60,26 @@ by **`launch-experiment`** (Step 4).
   sequence runs unbroken and the triage reaches them as a report (Step 2's loop, automated-researcher#817);
   only a load-bearing arbitration re-opens the conversation. Don't over-engineer past the real flaws.
 
+## Step 0 — First act in a worktree you did not create: sparsify it (automated-researcher#807)
+
+- [ ] **If this session is running in a worktree of the research repo, sparsify it before anything else:**
+      `run-experiment`'s **`sparse_worktree.sh --existing . registry/<exp>`** — naming the record(s) this
+      design touches (nothing, for a design whose record doesn't exist yet). Invoke that companion skill and
+      let it resolve its own script path; never hardcode a path into another skill's `scripts/` dir.
+      Idempotent; prints the bytes it reclaimed; refuses rather than dropping a record that has uncommitted,
+      untracked, or ignored files in it.
+- [ ] **Skip it only if you were given no worktree** (working directly in a shared checkout — nothing of this
+      class to sparsify), or if `--existing` reports the tree is already sparse.
+
+`sparse_worktree.sh` makes a worktree it *creates* sparse (#805), but a design session's tree is usually
+created by something else: the harness (`claude rc … --spawn worktree` → `.claude/worktrees/*`) or an
+instance's own session launcher, neither of which is this repo's code. Measured 2026-09-06: 16 of 36 live
+worktrees were full checkouts made that way, carrying 37G of the 48G total — ~77% of worktree disk sitting
+behind creation paths no product script is called on. A full checkout is 2.3–2.6G against ~330M sparse, so
+this one line is the difference between a design session costing ~2.5G and ~0.3G. It **reclaims** rather than
+prevents (the registry copy is already materialized when you arrive), which is the only lever available on a
+tree someone else created — and it is the creation-time counterpart of the reap contract in Step 4.
+
 ## Step 1 — Write `DESIGN.md` (the data-collection spec)
 
 An experiment's job is to produce **trustworthy DATA**. *Interpretation* — "what does it mean" — is a **separate step the
