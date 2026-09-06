@@ -54,6 +54,14 @@
   owns the statically-bounded delete (direct child of the audit temp root, the `-audit.` name shape, a
   linked worktree, `git worktree remove --force`); verify-claims installs independently, so an unresolvable
   helper prints a loud reap-by-hand line and deletes nothing rather than deriving an `rm -rf` of its own.
+  That delete takes the tree's tracked, untracked AND ignored content alike, so the reap is licensed by the
+  verdict being durable somewhere the reap does not reach — and that is CHECKED, not assumed: an out-file
+  inside the checkout (the DEFAULT when the audited dir is the checkout's own record copy) is BLOCKED before
+  the auditor runs, so the mistake costs an error message rather than a cross-family audit run whose verdict
+  the next line deletes. Auditing the record copy inside the clean room stays allowed — it is the point —
+  with the verdict named explicitly in the durable record. One predicate, asserted at both the pre-run gate
+  and immediately before the delete (plus a non-empty verdict at `$OUT` as the delete's own precondition),
+  because a check that licenses a delete and the delete itself must never be able to disagree.
   Not claimed here: #840's own non-claim about the session janitor killing executors mid-archive stays
   unverified and out of scope.
 - experiment-lifecycle 0.8.0 (2026-09-06): sparse worktrees, part 2 — the creation paths #805 could not

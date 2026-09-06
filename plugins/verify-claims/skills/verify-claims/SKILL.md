@@ -180,6 +180,18 @@ remove --force`); this plugin installs independently, so when that helper can't 
 a loud reap-by-hand line and deletes **nothing** rather than deriving an `rm -rf` of its own. A set-but-wrong
 `AUDIT_CHECKOUT_HELPER` is that same loud no-op, never a silent substitution of some other copy.
 
+**The verdict must land OUTSIDE the checkout, and that is checked rather than assumed.** The removal is
+`git worktree remove --force`, which takes the tree's tracked, untracked **and** ignored content alike — so
+an out-file inside the checkout would turn "removed the moment the verdict is written" into "deleted the
+verdict it was gated on", with `findings -> …` printed and exit 0 all the same. Auditing the record *copy*
+inside the clean room is exactly the point and stays allowed; **writing the verdict there is not.** So when
+the experiment dir you pass is itself inside the checkout, name the durable destination explicitly —
+`audit_experiment.sh --reap-checkout "$WT" "$WT/registry/<exp>" ~/orchestrator/<exp>/AUDIT.md` — because a
+co-located out-file is **BLOCKED before the auditor runs**, so the mistake costs an error message instead of
+a whole cross-family audit run. The same predicate is re-asserted immediately before the delete (and the
+delete additionally requires a non-empty verdict at `$OUT`): the check that licenses a delete and the delete
+itself must never be able to disagree.
+
 **Cross-family selection (required `AAR_SUBSTRATE`).** Set `AAR_SUBSTRATE` to the family that RAN the work
 (`claude` or `codex`) — it is REQUIRED and the script fails closed if unset/unknown, so a wrong default can
 never make the audit same-family (matching `log-experiment`). The auditor is ALWAYS the opposite family and

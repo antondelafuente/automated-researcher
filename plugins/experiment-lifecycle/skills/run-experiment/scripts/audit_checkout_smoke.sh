@@ -17,6 +17,10 @@
 #     becomes both a path segment and the backstop glob's own target
 #   - audit_experiment.sh --reap-checkout carries the path through to the verdict-written moment, and an
 #     unresolvable helper prints a reap-by-hand line rather than deriving a delete of its own
+#   - the reap's LICENSE (PR #842 round 2): the verdict must land OUTSIDE the tree the reap removes. A
+#     co-located out-file — the default when the audited dir is the checkout's own record copy — is BLOCKED
+#     BEFORE the auditor runs (`git worktree remove --force` would delete the verdict it was gated on),
+#     while auditing that copy with the verdict written to the durable record stays allowed and still reaps
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -175,6 +179,59 @@ if [ -f "$AUDIT" ]; then
     no "audit-failed-run-exits-nonzero" || ok audit-failed-run-exits-nonzero
   [ -d "$forensic" ] && ok audit-failed-run-keeps-checkout || no "audit-failed-run-keeps-checkout (a blocked audit lost its clean-room tree)"
   bash "$A" reap "$forensic" >/dev/null 2>&1 || true
+
+  # --- the reap's LICENSE: the verdict must be OUTSIDE the tree the reap removes (PR #842 round 2) ------
+  # `git worktree remove --force` takes tracked, untracked and ignored content alike, so a verdict written
+  # INSIDE the checkout is destroyed by the very step that was gated on it having been written. A stub that
+  # touches a sentinel proves the refusal happens BEFORE the auditor runs — the point of the pre-run gate is
+  # that a co-located invocation costs an error message, not a whole cross-family audit run.
+  RAN="$TMP/auditor-ran"
+  STUB_RUNS="touch '$RAN'; "'printf "FINDING 1: LOW [smoke]\nSUMMARY: high=0 med=0 low=1\n" > "$OUT_TMP"'
+
+  # (a) the audited dir IS the checkout's own record copy, so the DEFAULT out-file lands inside it
+  colo=$(bash "$A" create exp-1 --repo "$REPO" -- main registry/exp-1 2>/dev/null)
+  rm -f "$RAN"
+  errout=$(AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD="$STUB_RUNS" AUDIT_CHECKOUT_HELPER="$A" \
+    bash "$AUDIT" --reap-checkout "$colo" "$colo/registry/exp-1" 2>&1 >/dev/null) && rc=0 || rc=$?
+  [ "$rc" != 0 ] && ok license-colocated-verdict-blocked || no "license-colocated-verdict-blocked (exit 0 — the audit would have written its verdict into the tree it then deletes)"
+  case "$errout" in
+    *BLOCKED*INSIDE*) ok license-colocated-says-why ;;
+    *) no "license-colocated-says-why (stderr was: $errout)" ;;
+  esac
+  [ -e "$RAN" ] && no "license-colocated-blocks-before-auditor (the cross-family run was spent first)" || ok license-colocated-blocks-before-auditor
+  [ -d "$colo" ] && ok license-colocated-keeps-checkout || no "license-colocated-keeps-checkout"
+  [ -e "$colo/registry/exp-1/AUDIT.md" ] && no "license-colocated-wrote-no-verdict-inside" || ok license-colocated-wrote-no-verdict-inside
+
+  # (b) same refusal for an EXPLICIT out-file inside the checkout, with the audited dir outside it — the
+  #     gate is on where the VERDICT lands, not on where the experiment dir is. Its own checkout, so the
+  #     case still means something if (a) regressed and destroyed that one.
+  colo2=$(bash "$A" create exp-1 --repo "$REPO" -- main registry/exp-1 2>/dev/null)
+  rm -f "$RAN"
+  errout=$(AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD="$STUB_RUNS" AUDIT_CHECKOUT_HELPER="$A" \
+    bash "$AUDIT" --reap-checkout "$colo2" "$expdir" "$colo2/AUDIT.md" 2>&1 >/dev/null) && rc=0 || rc=$?
+  [ "$rc" != 0 ] && ok license-explicit-outfile-inside-blocked || no license-explicit-outfile-inside-blocked
+  [ -e "$RAN" ] && no "license-explicit-outfile-blocks-before-auditor" || ok license-explicit-outfile-blocks-before-auditor
+  [ -d "$colo2" ] && ok license-explicit-outfile-keeps-checkout || no license-explicit-outfile-keeps-checkout
+
+  # (c) a destination that does not RESOLVE cannot be shown to be outside the checkout -> fail closed
+  rm -f "$RAN"
+  errout=$(AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD="$STUB_RUNS" AUDIT_CHECKOUT_HELPER="$A" \
+    bash "$AUDIT" --reap-checkout "$colo2" "$expdir" "$TMP/no-such-dir/AUDIT.md" 2>&1 >/dev/null) && rc=0 || rc=$?
+  [ "$rc" != 0 ] && ok license-unresolvable-outfile-blocked || no license-unresolvable-outfile-blocked
+  [ -d "$colo2" ] && ok license-unresolvable-keeps-checkout || no license-unresolvable-keeps-checkout
+
+  # (d) ...and the legitimate clean-room shape is UNCHANGED: audit the record copy INSIDE the checkout,
+  #     write the verdict to the durable record OUTSIDE it, and the checkout is still reaped on the verdict.
+  colo3=$(bash "$A" create exp-1 --repo "$REPO" -- main registry/exp-1 2>/dev/null)
+  rm -f "$RAN" "$expdir/AUDIT.md"
+  AAR_SUBSTRATE=claude AUDIT_VERIFIER_CMD="$STUB_RUNS" AUDIT_CHECKOUT_HELPER="$A" \
+    bash "$AUDIT" --reap-checkout "$colo3" "$colo3/registry/exp-1" "$expdir/AUDIT.md" >/dev/null 2>&1 || true
+  [ -e "$RAN" ] && ok license-durable-outfile-runs-auditor || no "license-durable-outfile-runs-auditor (the legitimate clean-room shape was refused too)"
+  [ -s "$expdir/AUDIT.md" ] && ok license-durable-outfile-verdict-survives || no "license-durable-outfile-verdict-survives"
+  [ -e "$colo3" ] && no "license-durable-outfile-reaps (the checkout survived a written verdict)" || ok license-durable-outfile-reaps
+
+  bash "$A" reap "$colo"  >/dev/null 2>&1 || true
+  bash "$A" reap "$colo2" >/dev/null 2>&1 || true
 else
   echo "note: $AUDIT not present (verify-claims not checked out beside experiment-lifecycle) — integration cases skipped"
 fi

@@ -40,6 +40,17 @@
 #   mints the fixed reapable `<temp root>/<exp>-audit.<random>` shape, and this flag reaps it here.
 #   Only on the SUCCESS path — a failed audit keeps its checkout for forensics, exactly like a
 #   parked/crashed run keeps its scratch, and repo-janitor's backstop glob is what catches that one.
+#   THE VERDICT MUST LIE OUTSIDE THE TREE THIS REMOVES, and that is CHECKED, not assumed (PR #842 round-2
+#   review): the delete ends in `git worktree remove --force`, which takes the whole tree — tracked,
+#   untracked and ignored alike — so an $OUT inside the checkout turns "removed the moment the verdict is
+#   written" into "deleted the verdict it was gated on", while this script still printed `findings -> $OUT`
+#   and exited 0. The experiment dir being AUDITED may live inside the checkout — reading the record from
+#   the clean room is the point — but the verdict may not; pass an out-file in the durable record when it
+#   does:  audit_experiment.sh --reap-checkout "$WT" "$WT/registry/<exp>" ~/orchestrator/<exp>/AUDIT.md
+#   ONE predicate decides (reap_conflict_reason), asserted TWICE: once BEFORE the auditor runs, so a
+#   co-located invocation costs an error message instead of a whole cross-family audit run, and again
+#   immediately before the delete — a gate that licenses and a gate that deletes must never be able to
+#   disagree (PR #842 round-1's own lesson, one surface over in repo-janitor).
 #   The removal is delegated to `audit_checkout.sh` (which owns the statically-bounded delete), resolved
 #   via AUDIT_CHECKOUT_HELPER or a sibling-plugin lookup. Unresolvable -> a LOUD line telling the caller to
 #   reap by hand, never a delete this script derives itself: verify-claims is independently installable, so
@@ -146,6 +157,44 @@ else
   OUT=${2:-${EXP%/}/AUDIT.md}
 fi
 [ -d "$EXP" ] || { echo "BLOCKED: context/experiment dir missing: $EXP" >&2; exit 1; }
+
+# --- the reap's LICENSE: the verdict must live outside the tree the reap removes (#840, PR #842 rd 2) ---
+# `audit_checkout.sh reap` ends in `git worktree remove --force`, which deletes the tree's tracked,
+# untracked AND ignored content identically. So "remove it the moment the verdict is written" is safe only
+# while $OUT — and the sibling transcript $OUT.run.log written next to it — sit somewhere that removal does
+# not reach. Compared as PHYSICAL paths on both sides (`pwd -P`), because what a delete destroys is the
+# physical tree: an $OUT reached through a symlinked ancestor into the checkout has to compare as INSIDE.
+# Prints a reason when the reap would eat the verdict, nothing when it would not; never fails the caller.
+reap_conflict_reason(){
+  local wt=$1 wt_real out_dir out_dir_real
+  # No tree at that path -> the reap is already a no-op ('nothing to reap', exit 0 in the helper), so there
+  # is nothing for it to destroy and nothing to refuse.
+  wt_real=$(cd "$wt" 2>/dev/null && pwd -P) || return 0
+  out_dir=$(dirname "$OUT")
+  if ! out_dir_real=$(cd "$out_dir" 2>/dev/null && pwd -P); then
+    # Fail CLOSED: a destination that does not resolve cannot be SHOWN to lie outside the checkout, and
+    # this predicate licenses a delete. It is also already broken — the atomic `mv "$OUT_TMP" "$OUT"`
+    # needs that directory — so refusing costs the caller nothing but an earlier, clearer error.
+    printf "the verdict's directory '%s' does not resolve, so it cannot be shown to lie outside the checkout '%s'" "$out_dir" "$wt_real"
+    return 0
+  fi
+  case "$out_dir_real" in
+    "$wt_real"|"$wt_real"/*) printf "the verdict destination '%s' is INSIDE the checkout '%s'" "$OUT" "$wt_real" ;;
+  esac
+  return 0
+}
+if [ -n "$REAP_CHECKOUT" ]; then
+  REAP_CONFLICT=$(reap_conflict_reason "$REAP_CHECKOUT")
+  if [ -n "$REAP_CONFLICT" ]; then
+    echo "BLOCKED: --reap-checkout '$REAP_CHECKOUT' would delete this audit's own verdict — $REAP_CONFLICT." >&2
+    echo "  The checkout is a THROWAWAY clean room; the verdict belongs in the experiment's durable record." >&2
+    echo "  Auditing the copy inside the checkout is fine — WRITING THE VERDICT there is not. Pass an" >&2
+    echo "  out-file outside it (the last positional in every mode: close '<exp-dir> <out-file>', --design" >&2
+    echo "  '<exp-dir> <design-file> <out-file>', --data '<exp-dir> <manifest> <out-file>')." >&2
+    echo "  Refused BEFORE the auditor runs, so this costs an error message, not a cross-family run (#840)." >&2
+    exit 1
+  fi
+fi
 
 # --- cross-family auditor selection (guaranteed by construction; #262 / #239) -------------------
 # RUNNER_FAMILY is the family that RAN the experiment (AAR_SUBSTRATE — REQUIRED, no default: a wrong
@@ -508,7 +557,23 @@ codex_apikey_fallback(){
 # Never fatal either way: the verdict is already durable at $OUT by the time this runs, and failing an
 # audit over a leftover directory would trade a real result for a disk-space cleanup.
 reap_audit_checkout(){
-  local wt=$1 helper="" why=""
+  local wt=$1 helper="" why="" conflict
+  # The SAME predicate the pre-run gate used, re-asserted against state as it is NOW: at parse time only
+  # $OUT's directory existed to resolve, here the verdict itself is on disk. A check that LICENSES a delete
+  # and a check that PERFORMS it must never be able to disagree — a classification gate and a reap-time
+  # gate that could is precisely the defect PR #842's round-1 review turned up one surface over.
+  conflict=$(reap_conflict_reason "$wt")
+  if [ -n "$conflict" ]; then
+    echo "[audit_experiment] NOT REAPING '$wt': $conflict — the verdict at '$OUT' is the record this reap" >&2
+    echo "  was licensed by, and trading it for a reclaimed temp tree is never that trade. Remove the" >&2
+    echo "  checkout by hand, or leave it for repo-janitor's backstop glob (#840)." >&2
+    return 0
+  fi
+  if [ ! -s "$OUT" ]; then
+    echo "[audit_experiment] NOT REAPING '$wt': the verdict at '$OUT' is missing or empty, so nothing" >&2
+    echo "  licenses this delete (#840). Remove the checkout by hand once the verdict is durable." >&2
+    return 0
+  fi
   if [ -n "${AUDIT_CHECKOUT_HELPER:-}" ]; then
     # An EXPLICITLY CONFIGURED seam decides, including when it's wrong: silently substituting a
     # co-located/sibling copy for a path the instance named would hide the misconfiguration and make

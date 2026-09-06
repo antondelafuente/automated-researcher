@@ -681,7 +681,11 @@ upstream of everything in this ordering.
     be matched by `repo-janitor`'s backstop globs either, so both the close-time cleanup and the sweep of
     last resort missed them. A **failed** audit keeps its checkout for forensics (same disposition as a
     parked run's scratch); reap that one by hand with `audit_checkout.sh reap <path>` once you're done with
-    it, or leave it for the sweep.
+    it, or leave it for the sweep. **The verdict lands in the experiment's durable record, never inside the
+    checkout** — the removal is `git worktree remove --force`, so an `AUDIT.md` written into the clean room
+    would be deleted by the very step that was gated on it. Auditing the record copy *inside* the checkout is
+    fine; when you do, name the durable destination explicitly (`audit_experiment --reap-checkout <path>
+    <path>/registry/<exp> <exp>/AUDIT.md`). A co-located out-file is refused before the auditor runs.
 - **Then the publish chain, once and against the FINAL numbers. Run ONE real fresh-pull reproduction of the
   aggregation/rendering script(s) that produced the headline numbers/figures (#447):** commit every driver
   script whose output is reported, not just its CSV/PNG output; then from a clean state — remove local
