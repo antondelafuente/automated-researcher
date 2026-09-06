@@ -1,3 +1,31 @@
+- experiment-lifecycle 0.10.0 (2026-09-06): the close leg stops holding a run's artifacts THREE times
+  (#843, follow-up to #840/#842). Measured on the instance while one experiment was in its close leg: 13
+  unique 0.35 GB adapter tars were present 39 times — the run's own `target_probes/`, a second copy staged
+  under `artifacts/`, and `fresh_reproduction/pull/target_probes/` from the #447 fresh-pull gate. 15 GB on
+  disk for one close while the canonical 4.65 GB copy already sat in the artifact store; the box went 82% ->
+  92% full in three hours, and a close that starts with <20 GB free can fail mid-audit. #842's
+  `reap_scratch.sh` runs at the very END of the close, so the peak stood for the whole audit.
+  **New `run-experiment/scripts/repro_pull.sh` gives the fresh pull the lifecycle #842 gave the audit
+  checkout.** `create <run-id>` mints it at one derived, bounded path (`<EXPERIMENT_SCRATCH_ROOT>/<run-id>/
+  fresh_reproduction` — never a name the caller invents) and `close_record.sh paperwork --reap-repro-pull
+  <path>` deletes it the moment `REPRODUCTION.md` is durably in the record, not at reap-scratch time. The
+  delete is statically bounded the way `reap_scratch.sh` gate 2 states it (argument checked against the
+  derivation, never trusted), refuses a symlink / a cwd inside / a mount point at or under the target, and
+  is DELEGATED — `close_record.sh` prints a reap-by-hand line rather than deriving an `rm -rf` of its own,
+  and a pull dir containing the record is refused at parse time. A blocked close keeps its pull for
+  forensics, and an unwired `EXPERIMENT_SCRATCH_ROOT` is a loud `REPRO-PULL-GAP:` no-op, never a guess.
+  **New `run-experiment/scripts/stage_artifacts.sh` builds `artifacts/` from LINKS plus a manifest, never a
+  `cp`.** Each file is hardlinked into the staging tree (one inode, two names, zero extra bytes — rclone
+  reads through it identically), with `MANIFEST.tsv` recording link-type/staged path/source path/bytes; the
+  cross-filesystem fallback is a symlink and says so loudly, because then the upload must follow links
+  (`-L`) and `--uploaded-from` must name the source dirs (it enumerates regular files only). A file that can
+  be neither hardlinked nor symlinked is a hard failure — falling back to a copy is the duplication the
+  script exists to remove. Source symlinks are recorded and counted rather than silently dropped, and every
+  refusal leaves no staging residue behind.
+  **`reap_scratch.sh` now prints the close's PEAK local footprint** on its `SCRATCH-REAP-RECLAIMED:` line
+  (`peak_bytes=`), read from the record `repro_pull.sh` writes around the fresh pull — this script runs too
+  late to measure the high-water mark itself. Absent or unparsable reads `unmeasured`, never a fabricated 0:
+  "the lifecycle wasn't wired" and "the close peaked at 0" are different statements.
 - experiment-lifecycle 0.9.0, repo-janitor 0.4.0, verify-claims 0.9.0 (2026-09-06): reaper follow-up 2
   (#840) — a week after #804 the disk hit 95% again (12 GB free of 225 GB), and each of the five measured
   residue classes had its own reason for surviving the daily sweep. **repo-janitor: tier 1 admits merged

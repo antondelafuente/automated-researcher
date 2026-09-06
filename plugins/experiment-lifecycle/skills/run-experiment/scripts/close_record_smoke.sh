@@ -54,6 +54,10 @@
 #     name is refused outright.
 #   - A5: the ledger event goes through the seam keyed on the REGISTRY DIR NAME (#473), never the run-id, and
 #     the run-supervision record closes through its own helper (#376/#338).
+#   - #843 (`--reap-repro-pull`): the #447 fresh pull is deleted when the VERDICT is written (REPRODUCTION.md
+#     in the record) and not before — a BLOCKed close keeps it for forensics, a pull dir CONTAINING the
+#     record is refused at parse time with nothing written, and an unresolvable `repro_pull.sh` prints a
+#     reap-by-hand line rather than this script deriving an `rm -rf` from a caller-supplied path.
 #   - invariant 11 (the paperwork half): `--page-source-external <url>` is mutually exclusive with
 #     `--page-source` and is RECORDED as an external landing — LANDED.md never renders an external viewer as
 #     riding this PR, nor as a close whose snapshot carried no `[recipes.viewer]` recipe at all.
@@ -86,6 +90,7 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 # that helper from its own directory, so this exercises the real resolution path.
 mkdir -p "$T/bin"
 cp "$SCRIPT" "$T/bin/close_record.sh"; chmod +x "$T/bin/close_record.sh"
+cp "$SELF_DIR/repro_pull.sh" "$T/bin/repro_pull.sh" 2>/dev/null && chmod +x "$T/bin/repro_pull.sh"
 cat > "$T/bin/run_supervision_record.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$RSR_CALLS"
@@ -715,6 +720,55 @@ grep -qxF "stop run-1" "$RSR_CALLS" && pass "--stop maps to the record's stop ve
 RSR_FAIL=1 run finalize run-1 "$G" --base-ref origin/main
 { [ "$RC" = 1 ] && case "$ERR" in *"still desired-active"*) true;; *) false;; esac; } \
   && pass "a failed record close is loud (reaping stays gated)" || fail "failed record close swallowed (rc=$RC: $ERR)"
+
+# ---- 9b. --reap-repro-pull: the fresh pull dies when the VERDICT is written (#843) --------------------
+# The #447 gate re-downloads the run's heavy artifacts, so leaving that pull until reap-scratch time makes
+# the close's peak stand for the whole audit (15 GB for one close, 82% -> 92% disk in three hours). Its end
+# of life is REPRODUCTION.md landing in the record — the lifecycle #842 gave the audit checkout on AUDIT.md.
+# The bounded delete is repro_pull.sh's, never this script's, so what is asserted here is the DELEGATION and
+# its licensing conditions.
+export EXPERIMENT_SCRATCH_ROOT="$T/scratch"
+mkpull() {   # mkpull <run-id> -> prints the fresh-pull dir, with bytes in it
+  local d="$T/scratch/$1/fresh_reproduction"
+  mkdir -p "$d"; printf 'pulled adapter bytes\n' > "$d/adapter.safetensors"; printf '%s' "$d"
+}
+D="$(new_record exp-rp)"; U="$(new_upload)"; sync_store "$U"
+P="$(mkpull run-rp)"
+run paperwork run-rp "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/exp-rp" \
+    --uploaded-from "$U" --reap-repro-pull "$P"
+{ [ "$RC" = 0 ] && [ ! -e "$P" ]; } && pass "--reap-repro-pull deletes the fresh pull once REPRODUCTION.md is in the record (#843)" \
+  || fail "--reap-repro-pull did not reap (rc=$RC, exists=$([ -e "$P" ] && echo yes || echo no)): $ERR"
+[ -f "$D/REPRODUCTION.md" ] && pass "the reap ran AFTER the verdict landed" || fail "REPRODUCTION.md missing after a reaping close"
+[ -d "$T/scratch/run-rp" ] && pass "the reap took the pull only, not the run's scratch" || fail "the reap took more than the fresh pull"
+
+# a BLOCKED close keeps its pull — the same forensics disposition #842 gives a failed audit's checkout, and
+# the reason the reap sits after every check rather than beside the flag that requested it.
+P="$(mkpull run-rp2)"
+run paperwork run-rp2 "$D" --outcome completed-as-designed --artifact-root "r2:artifacts/WRONG-exp" \
+    --uploaded-from "$U" --reap-repro-pull "$P"
+{ [ "$RC" != 0 ] && [ -d "$P" ]; } && pass "a BLOCKed close keeps its fresh pull for forensics" \
+  || fail "a BLOCKed close reaped its fresh pull anyway (rc=$RC)"
+
+# a pull dir that CONTAINS the record is refused at PARSE time — before anything is written, because
+# discovering it afterwards would mean the delete had already destroyed what licensed it.
+INSIDE="$T/scratch/run-rp3/fresh_reproduction"; mkdir -p "$INSIDE/registry/exp-in/scripts"
+printf '# results\n' > "$INSIDE/registry/exp-in/RESULTS.md"; printf 'print(1)\n' > "$INSIDE/registry/exp-in/scripts/a.py"
+run paperwork run-rp3 "$INSIDE/registry/exp-in" --outcome completed-as-designed --no-artifacts \
+    --reap-repro-pull "$INSIDE"
+{ [ "$RC" = 1 ] && case "$ERR" in *"would delete this close's own record"*) true;; *) false;; esac; } \
+  && pass "a fresh-pull dir containing the record is refused at parse time" || fail "self-destructive reap accepted (rc=$RC: $ERR)"
+{ [ -d "$INSIDE" ] && no_paperwork "$INSIDE/registry/exp-in"; } && pass "that refusal wrote nothing and deleted nothing" \
+  || fail "the refused invocation still touched the record or the pull"
+
+# an unresolvable helper is a REAP-BY-HAND line, never an rm -rf derived here from a caller-supplied path.
+mv "$T/bin/repro_pull.sh" "$T/repro_pull.hidden"
+D2="$(new_record exp-rp4)"; P="$(mkpull run-rp4)"
+run paperwork run-rp4 "$D2" --outcome completed-as-designed --no-artifacts --reap-repro-pull "$P"
+{ [ "$RC" = 0 ] && [ -d "$P" ] && case "$ERR" in *"REAP BY HAND"*) true;; *) false;; esac; } \
+  && pass "an unresolvable repro_pull.sh is a reap-by-hand line, not a locally-derived delete" \
+  || fail "missing helper mishandled (rc=$RC, exists=$([ -e "$P" ] && echo yes || echo no)): $ERR"
+mv "$T/repro_pull.hidden" "$T/bin/repro_pull.sh"
+unset EXPERIMENT_SCRATCH_ROOT
 
 # ---- 10. regression R5 + A6: the canonical invocations documented in SKILL.md are the ones that RUN ----
 # The round-1 finding was a SKILL.md that documented `close_record.sh <run-id> <registry-dir> …` — an

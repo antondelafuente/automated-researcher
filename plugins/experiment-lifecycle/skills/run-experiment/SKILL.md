@@ -696,6 +696,21 @@ upstream of everything in this ordering.
   the second is what a future reader/auditor needs, and only the second passes this gate. It runs **after**
   the audit's fixes are in (#819) so it reproduces what actually lands — reproducing pre-audit numbers proves
   nothing about the record, and re-running the whole chain per finding is the rework this ordering removes.
+  - **The fresh pull lands in `scripts/repro_pull.sh create <run-id>`'s directory, and dies the moment the
+    verdict is written (automated-researcher#843).** The helper prints the path
+    (`<scratch>/fresh_reproduction`, derived from `EXPERIMENT_SCRATCH_ROOT` + the run-id — never a name you
+    invent), and `close_record.sh paperwork --reap-repro-pull <path>` deletes it as soon as
+    `REPRODUCTION.md` is in the record: the same end-of-life `audit_checkout.sh` has on `AUDIT.md` (#842),
+    for the same reason. **Reap-scratch time is far too late** — the fresh pull re-downloads the run's heavy
+    artifacts, so leaving it until the end of the close makes the peak stand for the whole audit. Closing
+    ONE experiment on 2026-09-06 held its artifacts locally THREE times (the run's own dir, an `artifacts/`
+    staging copy, and this pull): 13 unique 0.35 GB adapter tars present 39 times, 15 GB for one close,
+    82% → 92% disk in three hours — while the canonical 4.65 GB copy already sat in the store. A close that
+    starts with <20 GB free fails mid-audit for want of this. A BLOCKED close keeps its pull for forensics
+    (same disposition as a failed audit's checkout); reap that one by hand with
+    `repro_pull.sh reap <run-id> <path>` when you're done, or let `reap_scratch.sh` take it with the rest of
+    the scratch. With `EXPERIMENT_SCRATCH_ROOT` unwired the helper is a loud no-op (a `REPRO-PULL-GAP:` line
+    + exit 3): pull by hand, delete by hand, and put the gap line on the close report.
 - **Write `presentation_manifest.json` next to `RESULTS.md` — unconditional, config-free.** Every close writes this file,
   whether or not an instance viewer is configured (a no-op consumer is fine — the manifest still stands alone as
   plain-language arm documentation). Required: `{title, labels: [{match, label}]}` (`title` — one plain sentence
@@ -788,6 +803,7 @@ upstream of everything in this ordering.
     --page-source "$PAGE_SOURCE" \
     --pull-cmd "rclone copy $ARTIFACT_ROOT ./pull" \
     --repro-diff "$REPRO_DIFF" \
+    ${REPRO_PULL_DIR:+--reap-repro-pull "$REPRO_PULL_DIR"} \
     ${SIZE_ONLY:+--size-only}
   ```
   <!-- CLOSE-RECORD-PAPERWORK:END -->
@@ -802,6 +818,11 @@ upstream of everything in this ordering.
   `LANDED.md` records where the viewer actually landed and says it did NOT ride this PR, rather than claiming it
   rode the record's own PR (what passing the URL as `--page-source` would assert) or that the `START.md`
   snapshot carried no `[recipes.viewer]` recipe at all (what dropping the flag would assert).
+  **`--reap-repro-pull` is the fresh pull's end of life (#843)** — pass the path `repro_pull.sh create` printed
+  and the directory is deleted here, once `REPRODUCTION.md` is durably in the record and not one step before
+  (a blocked close keeps it for forensics). The delete itself is `repro_pull.sh`'s, never this script's: a
+  helper it cannot resolve prints a reap-by-hand line rather than deriving an `rm -rf` from a path it was
+  handed. A path that CONTAINS the record dir is refused at parse time, before anything is written.
   Run it before the `TEMP.md` delete + staging below, so its output stages with the
   rest of the record. Three properties are worth knowing before you read its output (#821):
   - **The manifest is byte-verified or absent.** `--uploaded-from` names the local dir(s) this run uploaded
@@ -844,6 +865,21 @@ upstream of everything in this ordering.
   of MB into git to satisfy a reproducibility read. If the close audit raises a remote-only reproducibility
   finding, the canonical triage response is to point at the verified `ARTIFACT_MANIFEST.md` + upload (accept-
   with-manifest), recorded in the audit-response section like any other finding.
+  **Stage the upload set with `scripts/stage_artifacts.sh <staging-dir> <source>…`, never a `cp -r`
+  (automated-researcher#843).** Giving `rclone` one root to upload from is the right instinct; making that
+  root a second full copy of files the box already holds is not. The helper mirrors each source's structure
+  and **hardlinks** every file into the staging tree (a hardlink IS the original — one inode, two names,
+  zero extra bytes; `rclone` reads bytes through it identically), writes a `MANIFEST.tsv` of
+  `link-type / staged path / source path / bytes`, and **never falls back to a copy** — a file it can
+  neither hardlink nor symlink is a hard failure. It is also what keeps `--uploaded-from <staging-dir>`
+  honest: a hardlinked tree is regular files, so `close_record.sh`'s byte-verification sees exactly what
+  `rclone` uploads. On the cross-filesystem fallback it symlinks and says so loudly
+  (`ARTIFACT-STAGE-SYMLINKS:`) — then the upload must follow links (`-L`, which `r2_copy` always injects,
+  #295) and `--uploaded-from` must name the SOURCE dirs, since it enumerates regular files only. Put the
+  staging dir on the same filesystem as the run's artifacts and none of that applies. **Where a copy is
+  genuinely unavoidable, the copy REPLACES the original rather than sitting beside it** — two live copies of
+  the same bytes for the length of a close is the cost this rule exists to remove (one close ran 15 GB and
+  82% → 92% disk on exactly this, #843).
   **A per-branch `git add -f` does NOT survive landing (automated-researcher#553).** Force-adding a small
   pinned record (screen verdicts, slot sets, data-audit samples) past the blanket `registry/**/*.jsonl`
   ignore rule commits it on your own branch, but `log-experiment` stages from a FRESH worktree off
@@ -997,10 +1033,16 @@ upstream of everything in this ordering.
   archive", and it is the directory name and nothing else** — `venv.md` and `venv-notes/` are ordinary
   archived content — so **anything genuinely unique must not live inside a directory called `venv`/`.venv`**,
   the same discipline `.gitignore`'d build output already follows. Every reap now also prints a one-line
-  **`SCRATCH-REAP-RECLAIMED: run=… bytes=… venv_bytes=… venv_dirs=… archived=… scratch=…`** marker on
+  **`SCRATCH-REAP-RECLAIMED: run=… bytes=… peak_bytes=… venv_bytes=… venv_dirs=… archived=… scratch=…`**
+  marker on
   stdout: **put it on the close report and the ledger line the same way as the gap marker.** Whether the
   reaper is keeping up with the fill is only answerable from that number, and it was absent from the record
   before — #840's own cost line ("today's by-hand pass reclaimed 28G") was a hand measurement.
+  **`peak_bytes` is the close's HIGH-WATER mark, not what this step gave back (#843)** — this step runs at
+  the very end, so by the time it measures anything the peak is gone. `repro_pull.sh` stands at both moments
+  (before the fresh pull, and immediately before deleting it) and leaves the numbers in the scratch dir for
+  this line to read; a close that never ran that lifecycle reads `unmeasured`, which is a different
+  statement from "the close peaked at 0" and is printed as such.
 
   Fires **only on a clean close**, same as the two steps around it: a parked/blocked/crashed run keeps its
   scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop for whatever this step
@@ -1056,7 +1098,7 @@ yours to configure mid-run.
 | --- | --- | --- |
 | `EXPERIMENT_SESSION_HANDLE_CMD` | `run_supervision_record.sh start` — binds the session handle from the instance's own self-identity lookup | the handle must be passed explicitly, and a hand-written near-miss is uncorrectable later (`#673`) |
 | `EXPERIMENT_SESSION_REAP_CMD` | `reap_session.sh` (self-only teardown seam) | logged no-op: the session outlives the close (the janitor is the backstop) |
-| `EXPERIMENT_SCRATCH_ROOT` | `reap_scratch.sh` — the one root whose direct children are reapable | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; scratch accumulates until the disk fills |
+| `EXPERIMENT_SCRATCH_ROOT` | `reap_scratch.sh` — the one root whose direct children are reapable; also `repro_pull.sh`, which derives the fresh-pull dir from it (#843) | **exit 3 + a `SCRATCH-REAP-GAP:` (resp. `REPRO-PULL-GAP:`) line for the close record**; scratch accumulates until the disk fills, and the fresh pull is pulled and deleted by hand |
 | `EXPERIMENT_SCRATCH_ARCHIVE_DEST` | `reap_scratch.sh` — the rclone destination root archives land under | **exit 3 + a `SCRATCH-REAP-GAP:` line for the close record**; same accumulation |
 | `SESSION_JANITOR_LIST_CMD` / `_IDLE_CMD` / `_KILL_CMD` | `session_janitor.sh` (the crashed-close backstop, scheduled by the instance) | the backstop doesn't run; only self-reap frees sessions |
 | `EXPERIMENT_LEDGER_EVENT_CMD` | `close_record.sh paperwork` — writes the instance's terminal ledger event (`<cmd> <run> <abstract-outcome> <registry-dir>`; the abstract→concrete status mapping is the instance's ledger recipe, #376) | **exit 3 + a `CLOSE-RECORD-GAP:` line for the close record, and NOTHING written** — nothing wrote the run's terminal event, so every consumer would still read it as open (#473), and paperwork that asserted that event existed would be false (#821 invariant 3) |
@@ -1290,7 +1332,9 @@ through env seams; see the "three seams" note at the top of this skill.
   point is refused (`rm -rf` destroys the mounted data before it fails), read from the mount table, with no readable
   mount table the same recorded gap. A `venv`/`.venv` DIRECTORY is the one bounded carve-out (#840): excluded from
   both the copy and the check (regenerable from archived inputs) and still deleted, so an excluded path can't strand
-  the tree — and every reap prints a `SCRATCH-REAP-RECLAIMED:` line with the reclaimed bytes for the close record.
+  the tree — and every reap prints a `SCRATCH-REAP-RECLAIMED:` line with the reclaimed bytes AND the close's peak
+  local footprint (`peak_bytes=`, read from what `repro_pull.sh` measured around the fresh pull, #843) for the
+  close record.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

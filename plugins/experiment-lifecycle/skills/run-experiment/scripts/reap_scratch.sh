@@ -129,9 +129,22 @@
 # Call it at close, AFTER artifact-store upload is verified and `log-experiment` has merged the record —
 # same sequencing responsibility as reap_worktree.sh gate 4: this script cannot re-check those itself.
 #
+#   4d. THE CLOSE'S PEAK LOCAL FOOTPRINT IS REPORTED, not just the bytes this reap gave back.
+#      INCIDENT (automated-researcher#843, 2026-09-06): the close leg held the run's artifacts on the box
+#      THREE times as real copies (the run's own dir, an `artifacts/` staging copy, and the #447 gate's
+#      fresh pull) — 15 GB for one close, 82% -> 92% disk in three hours. This script runs at the very END
+#      of the close, so by the time it measures anything the peak is already unobservable from here: what
+#      it reclaims is the tail, not the high-water mark. `repro_pull.sh` stands at both moments (before the
+#      fresh pull, and immediately before deleting it), so it writes them into "<scratch>/.close_footprint"
+#      and this script READS that record and prints `peak_bytes=` alongside its own measurement. Absent or
+#      unparsable -> `unmeasured`, never a made-up number: "the lifecycle wasn't wired for this close" and
+#      "the close peaked at 0" are different statements. The file name is a CROSS-SCRIPT CONVENTION shared
+#      with repro_pull.sh — change it in both or in neither.
+#
 # STDOUT MARKERS (both are single lines a close report / ledger line is written from):
-#   SCRATCH-REAP-RECLAIMED: ...  a reap happened — how many local bytes came back, and how many of them
-#                                were the excluded virtualenv(s) (#840).
+#   SCRATCH-REAP-RECLAIMED: ...  a reap happened — how many local bytes came back, how many of them were
+#                                the excluded virtualenv(s) (#840), and the close's PEAK local footprint
+#                                (#843).
 #   SCRATCH-REAP-GAP: ...        nothing was archived and nothing was deleted; a seam is unset (#804).
 #
 # EXIT CODES (all three are outcomes a close report states; none of them is "ignore me"):
@@ -153,6 +166,11 @@ GAP_EXIT=3
 # creating tool's own declaration that the tree is a regenerable materialization of archived inputs.
 VENV_DIR_NAMES=(venv .venv)
 
+# The close-footprint record repro_pull.sh writes inside the scratch dir (gate 4d, #843). A CROSS-SCRIPT
+# CONVENTION: the same literal appears in repro_pull.sh, and a change to one without the other silently
+# turns every close's `peak_bytes` into `unmeasured`.
+FOOTPRINT_FILE=".close_footprint"
+
 say(){ echo "reap_scratch: $*" >&2; }
 die(){ echo "reap_scratch: $*" >&2; exit 1; }
 # tree_bytes <path>... — total apparent bytes, or the empty string when it cannot be measured. `du -sb`
@@ -164,13 +182,25 @@ tree_bytes(){
   out=$(du -sk -- "$@" 2>/dev/null | awk '{t+=$1} END{if (NR) print t*1024}') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
   return 1
 }
+# close_peak — the close's PEAK local footprint (gate 4d, #843), read from the record repro_pull.sh wrote
+# into the scratch dir. Read STRICTLY: only a `peak_bytes=<digits>` line counts, so a truncated or
+# hand-edited record reports `unmeasured` rather than feeding a half-line onto the close report as a number.
+# Nothing here is parsed as code (no eval, no sourcing) — the file lives inside a tree this script is about
+# to delete, so it is data, and only ever data.
+close_peak(){
+  local f="${scratch_real:-}/$FOOTPRINT_FILE" v
+  [ -n "${scratch_real:-}" ] && [ -r "$f" ] || { printf 'unmeasured'; return 0; }
+  v=$(grep -m1 -E '^peak_bytes=[0-9]+$' -- "$f" 2>/dev/null) || { printf 'unmeasured'; return 0; }
+  printf '%s' "${v#peak_bytes=}"
+}
 # reclaimed <archived-word> — the #840 close-report line. Printed on EVERY path that actually deleted the
 # tree (including the nothing-to-archive branch), because "how many bytes came back" is the number that
 # says whether the reaper is keeping up with the fill, and it was absent from this script's record before.
-# Byte counts are captured BEFORE the rm -rf by the callers; this only formats them.
+# Byte counts are captured BEFORE the rm -rf by the callers; this only formats them. `peak_bytes` is the
+# whole close's high-water mark (#843), which this script cannot measure itself — see gate 4d.
 reclaimed(){
-  printf 'SCRATCH-REAP-RECLAIMED: run=%s bytes=%s venv_bytes=%s venv_dirs=%s archived=%s scratch=%s\n' \
-    "${id:-unknown}" "${tree_total:-unknown}" "${venv_total:-0}" "${#venv_dirs[@]}" "$1" \
+  printf 'SCRATCH-REAP-RECLAIMED: run=%s bytes=%s peak_bytes=%s venv_bytes=%s venv_dirs=%s archived=%s scratch=%s\n' \
+    "${id:-unknown}" "${tree_total:-unknown}" "${peak_total:-unmeasured}" "${venv_total:-0}" "${#venv_dirs[@]}" "$1" \
     "${scratch_real:-${scratch:-unresolved}}"
 }
 # gap <cause-slug> <one-line detail> — the loud, on-the-record no-op (#804). The marker goes to STDOUT
@@ -403,8 +433,10 @@ if [ -z "$tree_content" ]; then
   else
     say "scratch '$scratch_real' holds no files — nothing to archive (and rclone copy would create no destination prefix to verify). Deleting the empty tree."
   fi
-  # Measured BEFORE the delete — afterwards there is nothing left to measure (#840).
+  # Measured BEFORE the delete — afterwards there is nothing left to measure (#840). The peak is READ from
+  # the close-footprint record for the same reason, one gate over (#843): it lives inside this tree.
   tree_total=$(tree_bytes "$scratch_real") || tree_total=unknown
+  peak_total=$(close_peak)
   rm -rf -- "$scratch_real" || die "empty scratch delete failed ('rm -rf $scratch_real') — delete it by hand"
   reclaimed nothing-to-archive
   say "done — empty scratch removed; nothing was archived because there was nothing to archive. Put the SCRATCH-REAP-RECLAIMED line on the close report."
@@ -450,8 +482,10 @@ if ! rclone lsf "$dest_root/" 2>/dev/null | grep -qxF "$id/"; then
 fi
 
 say "archive VERIFIED at '$dest' — deleting local scratch '$scratch_real'"
-# Measured BEFORE the delete — afterwards there is nothing left to measure (#840).
+# Measured BEFORE the delete — afterwards there is nothing left to measure (#840). The peak is READ from the
+# close-footprint record for the same reason, one gate over (#843): it lives inside this tree.
 tree_total=$(tree_bytes "$scratch_real") || tree_total=unknown
+peak_total=$(close_peak)
 rm -rf -- "$scratch_real" || die "archive verified but 'rm -rf $scratch_real' failed — delete it by hand"
 reclaimed verified
 say "done — scratch archived and removed (recover with: rclone copy '$dest' '$scratch_real'). The ${#venv_dirs[@]} excluded virtualenv(s) are NOT in the archive and are gone locally — regenerate from the archived lockfile/requirements. Put the SCRATCH-REAP-RECLAIMED line on the close report."

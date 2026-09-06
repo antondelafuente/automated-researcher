@@ -83,7 +83,7 @@
 #   close_record.sh paperwork <run-id> <registry-dir> --outcome <abstract-outcome>
 #                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
 #                   [--size-only] [--page-source <path> | --page-source-external <url>]
-#                   [--pull-cmd <cmd>]... [--repro-diff <file>]
+#                   [--pull-cmd <cmd>]... [--repro-diff <file>] [--reap-repro-pull <path>]
 #   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 #
 #   paperwork  runs BEFORE the TEMP.md delete + staging, so its output lands with the record.
@@ -116,7 +116,7 @@ usage:
   close_record.sh paperwork <run-id> <registry-dir> --outcome <completed-as-designed|technical-failure|deliberate-abandon>
                   (--artifact-root <rclone-dest> --uploaded-from <local-dir>... | --no-artifacts)
                   [--size-only] [--page-source <path> | --page-source-external <url>]
-                  [--pull-cmd <cmd>]... [--repro-diff <file>]
+                  [--pull-cmd <cmd>]... [--repro-diff <file>] [--reap-repro-pull <path>]
   close_record.sh finalize  <run-id> <registry-dir> --base-ref <remote>/<branch> [--stop]
 USAGE
   exit 1
@@ -497,9 +497,56 @@ local_md5() {
   printf '%s' "${line,,}"
 }
 
+# ---------------------------------------------------------------------------------------------------------
+# The #447 fresh-pull directory's END OF LIFE (automated-researcher#843) — the same lifecycle #840/#842 gave
+# the close-audit checkout, one directory over. The fresh pull is the third of the three local copies of a
+# run's artifacts that a close was holding at once (15 GB for one close, 82% -> 92% disk in three hours), and
+# its end of life is THE MOMENT THE REPRODUCTION VERDICT IS WRITTEN — which is here, once REPRODUCTION.md is
+# in the record — not reap-scratch time at the very end of the close.
+#
+# DELEGATED, never reimplemented (audit_experiment.sh's shape on the same problem): `repro_pull.sh` owns the
+# statically-bounded delete, so an unresolvable helper prints a loud reap-by-hand line rather than this
+# script deriving an `rm -rf` of its own from a caller-supplied path. Never fatal either way: the paperwork
+# is already durable by the time this runs, and failing a close over a leftover directory would trade the
+# record for a disk-space cleanup.
+# ---------------------------------------------------------------------------------------------------------
+# repro_pull_conflict <pull-path> <record-dir>: print the reason this reap would destroy its own licence, or
+# nothing. Called at PARSE time (to refuse before anything is written) and again at REAP time against state
+# as it is then — one predicate, two call sites, so a check that licenses the delete and a check that
+# performs it can never disagree (PR #842's round-1 review, same surface).
+repro_pull_conflict() {
+  local p="$1" rec="$2" preal=""
+  [ -d "$p" ] || return 0                       # nothing there: repro_pull.sh's own bound adjudicates it
+  preal="$(cd "$p" && pwd -P)" || return 0      # unresolvable: same
+  case "$rec/" in
+    "$preal"/*) printf 'the record dir %s is INSIDE the fresh-pull dir %s, so reaping it would delete the very paperwork that licenses the reap' "$rec" "$preal" ;;
+  esac
+  return 0
+}
+
+reap_repro_pull() {
+  local run_id="$1" p="$2" rec="$3" helper="$SELF_DIR/repro_pull.sh" reason=""
+  reason="$(repro_pull_conflict "$p" "$rec")"
+  if [ -n "$reason" ]; then
+    note "NOT REAPING the fresh-pull dir '$p': $reason. Remove it by hand once the record is safe (#843)."
+    return 0
+  fi
+  if [ ! -s "$rec/REPRODUCTION.md" ]; then
+    note "NOT REAPING the fresh-pull dir '$p': REPRODUCTION.md is missing or empty in '$rec', so nothing licenses this delete (#843). Remove it by hand once the verdict is durable."
+    return 0
+  fi
+  if [ ! -f "$helper" ]; then
+    note "REAP BY HAND: the fresh-pull dir '$p' was NOT removed — repro_pull.sh was not found beside this script. Run 'repro_pull.sh reap $run_id $p', or let reap_scratch.sh take it with the rest of the scratch at the end of the close. Nothing is deleted from here: the bounded delete lives in that helper (#843)."
+    return 0
+  fi
+  bash "$helper" reap "$run_id" "$p" \
+    || note "WARN: 'repro_pull.sh reap $run_id $p' failed — the paperwork in $rec is written and durable; the fresh pull is still on disk (reap_scratch.sh will take it with the rest of the scratch, at the peak this exists to remove). Say so on the close report."
+  return 0
+}
+
 cmd_paperwork() {
   local run_id="$1" dir="$2"; shift 2
-  local outcome="" artifact_root="" no_artifacts=0 page_source="" page_source_external="" repro_diff=""
+  local outcome="" artifact_root="" no_artifacts=0 page_source="" page_source_external="" repro_diff="" repro_pull_dir=""
   local -a pull_cmds=()
   UPLOADED_FROM=()
   while [ "$#" -gt 0 ]; do
@@ -514,6 +561,8 @@ cmd_paperwork() {
                        [ "$#" -ge 2 ] || die "--page-source-external requires a value"; page_source_external="$2"; shift 2 ;;
       --pull-cmd)      [ "$#" -ge 2 ] || die "--pull-cmd requires a value";      pull_cmds+=("$2"); shift 2 ;;
       --repro-diff)    [ "$#" -ge 2 ] || die "--repro-diff requires a value";    repro_diff="$2"; shift 2 ;;
+      --reap-repro-pull)
+                       [ "$#" -ge 2 ] || die "--reap-repro-pull requires a value"; repro_pull_dir="$2"; shift 2 ;;
       *) die "unknown argument: $1" ;;
     esac
   done
@@ -553,6 +602,13 @@ cmd_paperwork() {
     esac
   fi
   [ -z "$repro_diff" ] || [ -f "$repro_diff" ] || die "--repro-diff file not found: $repro_diff"
+  # Refused HERE, before anything is written (invariant 3): a fresh-pull dir that contains the record dir is
+  # a delete this close must never be licensed to make, and finding that out only after the paperwork landed
+  # would leave the caller believing the reap happened (#843).
+  if [ -n "$repro_pull_dir" ]; then
+    local pull_conflict; pull_conflict="$(repro_pull_conflict "$repro_pull_dir" "$dir")"
+    [ -z "$pull_conflict" ] || die "--reap-repro-pull '$repro_pull_dir' would delete this close's own record — $pull_conflict"
+  fi
 
   # ---- preconditions, BEFORE anything is written (invariant 3) ----------------------------------------
   # A missing seam or a missing lister means this close cannot record what it is supposed to record. That is
@@ -760,6 +816,10 @@ EOF
 
   [ "${#WROTE[@]}" -eq 0 ] || note "wrote: ${WROTE[*]}"
   [ "${#KEPT[@]}"  -eq 0 ] || note "kept (hand-authored): ${KEPT[*]}"
+  # ...and ONLY here, with REPRODUCTION.md durably in the record: the fresh pull's end of life is the verdict
+  # being written (#843). Every failure path above exits before this line, so a blocked close keeps its
+  # fresh pull — the same forensics disposition #842 gives a failed audit's checkout.
+  [ -z "$repro_pull_dir" ] || reap_repro_pull "$run_id" "$repro_pull_dir" "$dir"
   # Nothing stales an earlier ARTIFACT_MANIFEST.md here on the --no-artifacts path any more, and nothing
   # needs to: --no-artifacts stages no manifest, so close_exit's one rule already renames the earlier one
   # aside — an assertion that this run stored nothing is exactly as incompatible with a manifest pinning a
