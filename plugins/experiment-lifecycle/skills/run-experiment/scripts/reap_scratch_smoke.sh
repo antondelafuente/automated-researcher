@@ -24,6 +24,11 @@
 #     abort on the entry the copy skipped), glob metacharacters in the link's name are escaped so the
 #     exclude cannot swallow real files, and a tree whose ONLY content is dangling links takes the no-bytes
 #     delete branch (after exclusion it would copy nothing, so the destination probe could never pass)
+#   - a LOCAL VIRTUALENV is excluded from the archive and still deleted (#840): `venv`/`.venv` directories
+#     at any depth reach BOTH rclone verbs as excludes (an exclude on the copy alone makes the verify abort
+#     on what the copy skipped), the carve-out is the directory NAME and nothing else (`venv.md` and
+#     `venv-notes/` stay ordinary archived content), a tree holding only a venv takes the no-bytes delete
+#     branch, and every reap prints a `SCRATCH-REAP-RECLAIMED:` line with a real measurement
 #   - NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1): a scratch dir that IS, or
 #     CONTAINS, a mount point is refused with rclone never invoked (including when the mount point's path
 #     carries mountinfo's `\040` space escape), an ANCESTOR mount blocks nothing, and an unreadable mount
@@ -361,6 +366,82 @@ s=$(mkscratch d3); ln -s "$TMP/gone-worktree/scripts" "$s/dead[1]*link"; reset_l
 if bash "$R" d3 "$s" >/dev/null 2>&1; then ok dangling-glob-exit0; else no dangling-glob-exit0; fi
 grep -qF -- '--exclude /dead\[1\]\*link ' "$RCLONE_LOG" && ok dangling-glob-escaped \
   || no "dangling-glob-escaped ($(grep '^copy' "$RCLONE_LOG"))"
+
+# --- gate 4c: a local virtualenv is excluded from the archive, deleted locally, and ON THE RECORD (#840)
+# Measured: two `~/work` dirs carried a 6G venv each (12.7G, 12.2G of it venv). The artifact archive rightly
+# excludes `venv/`, so the local copy was pure residue after the archive verified — and nothing removed it,
+# because the delete is gated on "every source byte verified at the destination". The two halves have to
+# move together, and the exclude has to reach BOTH rclone verbs or the verify aborts on what the copy skipped.
+rec create v1 >/dev/null; rec close v1 >/dev/null
+s=$(mkscratch v1)
+mkdir -p "$s/venv/lib" "$s/.venv/bin" "$s/nested/venv/lib"
+echo wheelbytes > "$s/venv/lib/libtorch.so"
+echo pybin      > "$s/.venv/bin/python"
+echo nestedwheel > "$s/nested/venv/lib/other.so"
+echo realdata   > "$s/nested/results.json"
+reset_log
+out=$(bash "$R" v1 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok venv-exit0 || no "venv-exit0 (got rc=$rc)"
+[ -d "$s" ] && no venv-scratch-deleted || ok venv-scratch-deleted
+# every venv, at any depth, on both rclone verbs — the contents form and the directory form
+for verb in copy check; do
+  okv=1
+  for vrel in venv .venv nested/venv; do
+    grep -qF -- "--exclude /$vrel/** --exclude /$vrel/ " "$RCLONE_LOG" || okv=0
+    grep -q "^$verb $s .*--exclude /$vrel/\*\*" "$RCLONE_LOG" || okv=0
+  done
+  [ "$okv" = 1 ] && ok "venv-$verb-excludes" || no "venv-$verb-excludes ($(grep "^$verb" "$RCLONE_LOG"))"
+done
+case "$out" in
+  *"LOCAL VIRTUALENV"*"$s/venv"*) ok venv-logged ;;
+  *) no "venv-logged (output was: $out)" ;;
+esac
+# the reclaimed-bytes line: present, non-zero total, and a venv share that is a real measurement
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=v1 "*"venv_dirs=3 "*"archived=verified"*) ok venv-reclaimed-marker ;;
+  *) no "venv-reclaimed-marker (output was: $out)" ;;
+esac
+vb=$(printf '%s\n' "$out" | sed -n 's/.*venv_bytes=\([0-9]*\) .*/\1/p')
+[ -n "$vb" ] && [ "$vb" -gt 0 ] && ok venv-reclaimed-bytes-measured || no "venv-reclaimed-bytes-measured (venv_bytes='$vb')"
+tb=$(printf '%s\n' "$out" | sed -n 's/.*RECLAIMED: run=v1 bytes=\([0-9]*\) .*/\1/p')
+[ -n "$tb" ] && [ "$tb" -ge "$vb" ] && ok venv-reclaimed-total-covers-venv || no "venv-reclaimed-total-covers-venv (bytes='$tb' venv_bytes='$vb')"
+
+# a tree whose ONLY content is a venv copies zero bytes once excluded, so rclone creates no destination
+# prefix and the parent-listing probe could only ever report a false failure — the no-bytes branch (#811's
+# shape one class over), still deleted, still on the record.
+rec create v2 >/dev/null; rec close v2 >/dev/null
+s="$TMP/work/v2"; mkdir -p "$s/venv/lib"; echo wheelbytes > "$s/venv/lib/libtorch.so"; reset_log
+out=$(bash "$R" v2 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok venv-only-exit0 || no "venv-only-exit0 (got rc=$rc)"
+[ -d "$s" ] && no venv-only-scratch-deleted || ok venv-only-scratch-deleted
+[ "$(rclone_calls)" = 0 ] && ok venv-only-no-rclone || no venv-only-no-rclone
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=v2 "*"archived=nothing-to-archive"*) ok venv-only-reclaimed-marker ;;
+  *) no "venv-only-reclaimed-marker (output was: $out)" ;;
+esac
+
+# THE CARVE-OUT IS THE DIRECTORY NAME AND NOTHING ELSE: a file named `venv`, or a directory whose name
+# merely CONTAINS it, is ordinary content that must still be archived and verified before deletion.
+rec create v3 >/dev/null; rec close v3 >/dev/null
+s=$(mkscratch v3); echo "notes about the venv" > "$s/venv.md"; mkdir -p "$s/venv-notes"
+echo "hand-written" > "$s/venv-notes/keep.txt"; reset_log
+out=$(bash "$R" v3 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok venv-lookalike-exit0 || no "venv-lookalike-exit0 (got rc=$rc)"
+grep -q -- '--exclude /venv' "$RCLONE_LOG" && no venv-lookalike-not-excluded || ok venv-lookalike-not-excluded
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=v3 "*"venv_dirs=0 "*) ok venv-lookalike-zero-venvs ;;
+  *) no "venv-lookalike-zero-venvs (output was: $out)" ;;
+esac
+
+# every reap prints the reclaimed line, venv or not — that number is what says whether the reaper is
+# keeping up with the fill, and it was absent from this script's record before #840.
+rec create v4 >/dev/null; rec close v4 >/dev/null
+s=$(mkscratch v4); reset_log
+out=$(bash "$R" v4 "$s" 2>&1)
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=v4 "*"venv_bytes=0 venv_dirs=0 archived=verified"*) ok reclaimed-marker-always ;;
+  *) no "reclaimed-marker-always (output was: $out)" ;;
+esac
 
 # --- never delete through a mount point (round-3 code-review Finding 1) -------------------------------
 # `rm -rf` deletes a bind mount's contents THROUGH the mount and only then fails with EBUSY on the mount

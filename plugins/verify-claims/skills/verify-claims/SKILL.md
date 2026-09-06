@@ -165,6 +165,21 @@ final findings path only after the verifier exits successfully. While the verifi
 absent or empty final findings file is not evidence of a hang; inspect the process/log state instead of killing
 or retrying solely because the findings file has not appeared.
 
+**`--reap-checkout <path>` — the clean-room checkout dies when the verdict is written (#840).** The
+reproducibility dimension often needs a fresh tree to answer "does the committed code regenerate the
+headline numbers". Create it with `experiment-lifecycle`'s `audit_checkout.sh create <exp> --repo <repo> --
+<committish> registry/<exp>` (sparse, detached, at the fixed reapable path `<temp root>/<exp>-audit.<random>`)
+and pass that path here: the audit removes it **immediately after `AUDIT.md` is atomically written**, which
+is the checkout's natural end of life and the one moment a script can act on it. Closing ONE experiment on
+2026-09-06 left three hand-made clones in `/tmp` (10.7G) that nothing owned and whose ad-hoc names no
+backstop glob could match. A **failed or blocked** audit exits before this step, so it keeps its checkout for
+forensics. The removal is **delegated** to `audit_checkout.sh`, which owns the statically-bounded delete
+(direct child of the audit temp root, the `-audit.` name shape it mints, a linked git worktree, `git worktree
+remove --force`); this plugin installs independently, so when that helper can't be resolved
+(`AUDIT_CHECKOUT_HELPER`, else a lookup beside this script and at the sibling plugin's path) the audit prints
+a loud reap-by-hand line and deletes **nothing** rather than deriving an `rm -rf` of its own. A set-but-wrong
+`AUDIT_CHECKOUT_HELPER` is that same loud no-op, never a silent substitution of some other copy.
+
 **Cross-family selection (required `AAR_SUBSTRATE`).** Set `AAR_SUBSTRATE` to the family that RAN the work
 (`claude` or `codex`) — it is REQUIRED and the script fails closed if unset/unknown, so a wrong default can
 never make the audit same-family (matching `log-experiment`). The auditor is ALWAYS the opposite family and

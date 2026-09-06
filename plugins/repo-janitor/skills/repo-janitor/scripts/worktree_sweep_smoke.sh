@@ -19,6 +19,17 @@
 #     whose only residue is a byte-identical duplicate of the default branch reaches tier 1 and is really
 #     removed, while one whose residue differs from main, or sits at a path main lacks entirely, stays
 #     reported and survives a real --reap-tier1
+#   - the MERGED+allowlisted-residue tier-1 bar (automated-researcher#840): a merged worktree whose
+#     non-identical residue is entirely regenerable (`*.run.log`, `__pycache__/`, `*.pyc`) or superseded by
+#     main's own copy of the same path reaches tier 1, names its allowlist in the reason, and is really
+#     removed — while ONE off-allowlist file, or a superseded-class basename at a path main does NOT carry,
+#     keeps the worktree reported and alive through a real --reap-tier1
+#   - the PER-TIER age bar (#840): a merged worktree 3d old reaches tier 1 under the default 2-day merged
+#     bar while an unmerged 3d-old one stays silent under the unchanged 7-day bar, and each bar is movable
+#     independently (--merged-min-age-days / --min-age-days), with a negative value rejected
+#   - repeatable --worktree-root (#840): naming the harness's own (nested) worktree root gives its trees the
+#     live-owner tier-2 veto they never had, without changing the workspace root's own classification; the
+#     owner id comes from the most specific matching root, and a whitespace-only root is rejected
 #   - a worktree with an INITIALIZED submodule is excluded from tier1 even when merged+clean+old, since
 #     `git worktree remove` unconditionally refuses it (merge-gate final-review MED)
 #   - --scratch-glob, the non-git scratch prune (automated-researcher#792): a stale entry reaches tier1 and
@@ -482,6 +493,158 @@ if [ -d "$TMP/wt-merged-dup" ]; then no "merged-residue-identity: duplicate-resi
 if [ -d "$TMP/wt-merged-differs" ]; then ok "merged-residue-identity: differing-residue worktree preserved by --reap-tier1"; else no "merged-residue-identity: differing-residue worktree was WRONGLY removed (local edits lost)"; fi
 if [ -d "$TMP/wt-merged-novel" ]; then ok "merged-residue-identity: novel-residue worktree preserved by --reap-tier1"; else no "merged-residue-identity: novel-residue worktree was WRONGLY removed"; fi
 if [ -f "$M_REPO/registry/exp-1/RESULTS.md" ]; then ok "merged-residue-identity: the default branch's own copy of the duplicated path is untouched"; else no "merged-residue-identity: the swept checkout's own registry file disappeared"; fi
+
+# 3f3. automated-researcher#840: a MERGED worktree whose NON-identical residue is entirely on the bounded
+#      regenerable/superseded allowlist. Measured cause: four merged experiment worktrees (2.2-2.4G each,
+#      9.3G total) had to be removed by hand on 2026-09-06 because #804's byte-identity bar never admitted
+#      them — their only non-identical paths were `*.run.log` audit logs, `__pycache__`, and design-stage
+#      record files main already holds in post-run form. The two negative cases below are the whole safety
+#      story for this bar: ONE off-allowlist file keeps the worktree out, and a SUPERSEDED-class basename
+#      whose exact path main does NOT carry is not superseded at all (it exists nowhere else).
+A_ORIGIN="$TMP/a-origin.git"; A_REPO="$TMP/a-repo"
+git init -q --bare -b main "$A_ORIGIN"
+git init -q -b main "$A_REPO"
+g "$A_REPO" config user.email t@example.com; g "$A_REPO" config user.name smoke
+echo hello > "$A_REPO/f.txt"; g "$A_REPO" add f.txt; g "$A_REPO" commit -q -m init
+g "$A_REPO" remote add origin "$A_ORIGIN"; g "$A_REPO" push -q origin main
+
+for w in allow-ok allow-nonmember allow-unsuperseded; do
+  g "$A_REPO" worktree add -q -b "feat-$w" "$TMP/wt-$w" main
+  GIT_COMMITTER_DATE="$OLD_DATE" git -C "$TMP/wt-$w" commit -q --allow-empty -m "old-$w" --date="$OLD_DATE"
+  g "$A_REPO" merge -q --no-edit "feat-$w"
+done
+g "$A_REPO" push -q origin main
+
+# main then lands the POST-RUN form of the design-stage record files, from its own branch — so every
+# worktree above is merged-and-BEHIND and its own copies read untracked, exactly as on the box.
+mkdir -p "$A_REPO/registry/exp-1"
+printf 'post-run checklist\n' > "$A_REPO/registry/exp-1/CHECKLIST.md"
+printf 'post-run start\n'     > "$A_REPO/registry/exp-1/START.md"
+printf 'post-run audit\n'     > "$A_REPO/registry/exp-1/DESIGN_AUDIT2.md"
+g "$A_REPO" add registry/exp-1
+g "$A_REPO" commit -q -m "close landed registry/exp-1 in post-run form"
+g "$A_REPO" push -q origin main
+
+# Case A: every non-identical path is on the allowlist. `AUDIT.md.run.log` and the __pycache__ entry exist
+# nowhere on main (the REGENERABLE class needs no main copy); the three record files are the SUPERSEDED
+# class and carry DIFFERENT bytes from main's post-run copies, which is precisely what #804's bar refuses.
+# `registry/exp-1/RESULTS.md` is a byte-identical duplicate, proving the two bars compose in one worktree.
+mkdir -p "$TMP/wt-allow-ok/registry/exp-1" "$TMP/wt-allow-ok/pipelines/__pycache__"
+printf 'auditor transcript\n'  > "$TMP/wt-allow-ok/registry/exp-1/AUDIT.md.run.log"
+printf 'design-stage form\n'   > "$TMP/wt-allow-ok/registry/exp-1/CHECKLIST.md"
+printf 'design-stage start\n'  > "$TMP/wt-allow-ok/registry/exp-1/START.md"
+printf 'design-stage audit\n'  > "$TMP/wt-allow-ok/registry/exp-1/DESIGN_AUDIT2.md"
+printf 'claude-1\n'            > "$TMP/wt-allow-ok/registry/exp-1/CLAIMED_BY"
+printf 'not-really-bytecode\n' > "$TMP/wt-allow-ok/pipelines/__pycache__/driver.cpython-311.pyc"
+# ...and a NON-.pyc file inside __pycache__, so the directory-COMPONENT rule is exercised on its own rather
+# than being masked by the `*.pyc` basename rule that would admit the file above anyway.
+printf '{}\n' > "$TMP/wt-allow-ok/pipelines/__pycache__/index.json"
+# Case B: the same allowlisted residue PLUS one ordinary file — one off-allowlist path is enough.
+mkdir -p "$TMP/wt-allow-nonmember/registry/exp-1"
+printf 'auditor transcript\n' > "$TMP/wt-allow-nonmember/registry/exp-1/AUDIT.md.run.log"
+printf 'hand-written notes that exist nowhere else\n' > "$TMP/wt-allow-nonmember/NOTES.md"
+# Case C: a SUPERSEDED-class basename at a path main does NOT carry — no main copy means nothing supersedes
+# it, so it is unique content however familiar the filename looks.
+mkdir -p "$TMP/wt-allow-unsuperseded/registry/exp-9"
+printf 'the only copy of this record\n' > "$TMP/wt-allow-unsuperseded/registry/exp-9/CHECKLIST.md"
+
+# CLAIMED_BY is the design-stage claim file; main carries none, so it must NOT be admitted on Case A above
+# unless main holds that exact path. Land it so Case A's own CLAIMED_BY has its warrant.
+printf 'closed\n' > "$A_REPO/registry/exp-1/CLAIMED_BY"
+g "$A_REPO" add registry/exp-1/CLAIMED_BY
+g "$A_REPO" commit -q -m "claim record landed"
+g "$A_REPO" push -q origin main
+# ...and the byte-identical duplicate, added after main carries it so the bytes really match.
+printf 'post-run results\n' > "$A_REPO/registry/exp-1/RESULTS.md"
+g "$A_REPO" add registry/exp-1/RESULTS.md
+g "$A_REPO" commit -q -m "results landed"
+g "$A_REPO" push -q origin main
+printf 'post-run results\n' > "$TMP/wt-allow-ok/registry/exp-1/RESULTS.md"
+
+J_A=$(python3 "$SWEEP" --json --repo "$A_REPO" 2>/dev/null)
+if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-ok"; then ok "residue-allowlist: merged worktree whose non-identical residue is all allowlisted reaches tier1"; else no "residue-allowlist: allowlisted-residue worktree NOT classified tier1 (#840 defect not fixed)"; fi
+if echo "$J_A" | reason_has "d['tier1']" "$TMP/wt-allow-ok" "reap allowlist"; then ok "residue-allowlist: tier1 reason names the allowlist basis"; else no "residue-allowlist: tier1 reason doesn't name the allowlist"; fi
+if echo "$J_A" | reason_has "d['tier1']" "$TMP/wt-allow-ok" "*.run.log"; then ok "residue-allowlist: tier1 reason spells the allowlist members out"; else no "residue-allowlist: tier1 reason doesn't spell out the allowlist members"; fi
+if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-nonmember"; then no "residue-allowlist: one off-allowlist file did NOT keep the worktree out of tier1 (unique content would be lost)"; else ok "residue-allowlist: a single off-allowlist file keeps the worktree out of tier1"; fi
+if echo "$J_A" | has_path_in "d['tier3']" "$TMP/wt-allow-nonmember"; then ok "residue-allowlist: off-allowlist residue reported in tier3"; else no "residue-allowlist: off-allowlist worktree reported in neither tier1 nor tier3"; fi
+if echo "$J_A" | has_path_in "d['tier1']" "$TMP/wt-allow-unsuperseded"; then no "residue-allowlist: a SUPERSEDED-class basename with no copy on main wrongly reached tier1 (its only copy would be lost)"; else ok "residue-allowlist: a superseded-class basename main does not carry is correctly excluded"; fi
+
+python3 "$SWEEP" --repo "$A_REPO" --reap-tier1 >/dev/null 2>&1 || true
+if [ -d "$TMP/wt-allow-ok" ]; then no "residue-allowlist: allowlisted-residue worktree NOT removed by --reap-tier1 (reap-time re-verification regressed)"; else ok "residue-allowlist: allowlisted-residue worktree removed by --reap-tier1"; fi
+if [ -d "$TMP/wt-allow-nonmember" ]; then ok "residue-allowlist: off-allowlist worktree preserved by --reap-tier1"; else no "residue-allowlist: off-allowlist worktree was WRONGLY removed (hand-written notes lost)"; fi
+if [ -d "$TMP/wt-allow-unsuperseded" ]; then ok "residue-allowlist: unsuperseded record worktree preserved by --reap-tier1"; else no "residue-allowlist: unsuperseded record worktree was WRONGLY removed (only copy lost)"; fi
+if [ -f "$A_REPO/registry/exp-1/CHECKLIST.md" ]; then ok "residue-allowlist: main's own post-run record copies are untouched"; else no "residue-allowlist: the swept checkout's own record file disappeared"; fi
+
+# 3f4. automated-researcher#840: the age bar is PER TIER — merged clears at --merged-min-age-days (default
+#      2), unmerged stays at --min-age-days (default 7). Measured cause: at ~10G of residue per closed
+#      experiment and roughly a close a day, the 7-day bar WAS the steady-state fill — the disk refilled
+#      before the bar expired. Both directions are asserted, since a bar that only ever loosens is not a
+#      bar: the flags must be able to move each class independently.
+MID_DATE=$(date -u -d '-3 days' +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo "2026-07-07T00:00:00")
+B_ORIGIN="$TMP/b-origin.git"; B_REPO="$TMP/b-repo"
+git init -q --bare -b main "$B_ORIGIN"
+git init -q -b main "$B_REPO"
+g "$B_REPO" config user.email t@example.com; g "$B_REPO" config user.name smoke
+echo hello > "$B_REPO/f.txt"; g "$B_REPO" add f.txt; g "$B_REPO" commit -q -m init
+g "$B_REPO" remote add origin "$B_ORIGIN"; g "$B_REPO" push -q origin main
+# merged + clean, 3 days old: inside the old 7-day bar, past the new 2-day merged one.
+g "$B_REPO" worktree add -q -b feat-mid-merged "$TMP/wt-mid-merged" main
+GIT_COMMITTER_DATE="$MID_DATE" git -C "$TMP/wt-mid-merged" commit -q --allow-empty -m mid --date="$MID_DATE"
+g "$B_REPO" merge -q --no-edit feat-mid-merged
+g "$B_REPO" push -q origin main
+# unmerged with unique committed content, same 3 days old: must stay SILENT — the shorter bar is the
+# merged one only, and for an unmerged tree the age IS the evidence nobody is continuing it.
+g "$B_REPO" worktree add -q -b mid-unmerged "$TMP/wt-mid-unmerged" main
+printf 'unique-unmerged\n' > "$TMP/wt-mid-unmerged/only-here.txt"
+git -C "$TMP/wt-mid-unmerged" add only-here.txt >/dev/null 2>&1
+GIT_COMMITTER_DATE="$MID_DATE" git -C "$TMP/wt-mid-unmerged" commit -q -m midunmerged --date="$MID_DATE"
+
+J_B=$(python3 "$SWEEP" --json --repo "$B_REPO" 2>/dev/null)
+if echo "$J_B" | has_path_in "d['tier1']" "$TMP/wt-mid-merged"; then ok "age-bar: a merged worktree 3d old reaches tier1 under the default 2-day merged bar"; else no "age-bar: merged 3d-old worktree did not reach tier1 (the per-tier bar isn't applied)"; fi
+if echo "$J_B" | all_paths | grep -qxF "$TMP/wt-mid-unmerged"; then no "age-bar: an UNMERGED 3d-old worktree was flagged (the 7-day bar must still hold for unmerged trees)"; else ok "age-bar: an unmerged 3d-old worktree stays silent under the unchanged 7-day bar"; fi
+
+J_B7=$(python3 "$SWEEP" --json --repo "$B_REPO" --merged-min-age-days 7 2>/dev/null)
+if echo "$J_B7" | all_paths | grep -qxF "$TMP/wt-mid-merged"; then no "age-bar: --merged-min-age-days 7 did not put the 3d-old merged worktree back inside its grace window"; else ok "age-bar: --merged-min-age-days 7 keeps the 3d-old merged worktree silent"; fi
+J_B2=$(python3 "$SWEEP" --json --repo "$B_REPO" --min-age-days 2 2>/dev/null)
+if echo "$J_B2" | has_path_in "d['tier3']" "$TMP/wt-mid-unmerged"; then ok "age-bar: --min-age-days 2 flags the 3d-old unmerged worktree (the unmerged bar is independently movable)"; else no "age-bar: --min-age-days 2 did not flag the 3d-old unmerged worktree"; fi
+python3 "$SWEEP" --repo "$B_REPO" --merged-min-age-days -1 >/dev/null 2>&1 && no "age-bar: negative --merged-min-age-days accepted" || ok "age-bar: negative --merged-min-age-days rejected"
+
+# 3f5. automated-researcher#840: --worktree-root is REPEATABLE, so the harness's own worktree root gets the
+#      same owner-liveness tier rules as the agent-workspace root. Measured cause: 5 harness worktrees
+#      (12.8G) were "seen but never reaped" — they derived NO owner, so the live-owner veto never applied
+#      to them in either direction. The nested-root case pins the most-specific-match rule, so the answer
+#      cannot depend on flag order.
+C_ORIGIN="$TMP/c-origin.git"; C_REPO="$TMP/c-repo"
+git init -q --bare -b main "$C_ORIGIN"
+git init -q -b main "$C_REPO"
+g "$C_REPO" config user.email t@example.com; g "$C_REPO" config user.name smoke
+echo hello > "$C_REPO/f.txt"; g "$C_REPO" add f.txt; g "$C_REPO" commit -q -m init
+g "$C_REPO" remote add origin "$C_ORIGIN"; g "$C_REPO" push -q origin main
+WS2="$TMP/ws2"; HARNESS="$TMP/ws2/harness-worktrees"; mkdir -p "$WS2" "$HARNESS"
+for spec in "$WS2/agent-x:ws-x" "$HARNESS/agent-y:hn-y"; do
+  d=${spec%%:*}; b=${spec##*:}
+  g "$C_REPO" worktree add -q -b "$b" "$d" main
+  GIT_COMMITTER_DATE="$OLD_DATE" git -C "$d" commit -q --allow-empty -m "old-$b" --date="$OLD_DATE"
+  g "$C_REPO" merge -q --no-edit "$b"
+done
+g "$C_REPO" push -q origin main
+
+# With only the workspace root named, the harness tree's owner id would be the nested-root-relative
+# "harness-worktrees" — the live seam names "agent-y", so the veto can only fire once the harness root is
+# named too. That contrast IS the fix.
+LIVEY="$TMP/live-y.sh"; printf '#!/bin/sh\necho agent-y\n' > "$LIVEY"; chmod +x "$LIVEY"
+J_C1=$(REPO_JANITOR_LIVE_SESSIONS_CMD="$LIVEY" python3 "$SWEEP" --json --repo "$C_REPO" --worktree-root "$WS2" 2>/dev/null)
+if echo "$J_C1" | has_path_in "d['tier1']" "$HARNESS/agent-y"; then ok "worktree-root: with only the workspace root named, the harness tree derives no live owner (the pre-#840 gap)"; else no "worktree-root: fixture did not reproduce the pre-#840 no-owner state for the harness tree"; fi
+J_C2=$(REPO_JANITOR_LIVE_SESSIONS_CMD="$LIVEY" python3 "$SWEEP" --json --repo "$C_REPO" --worktree-root "$WS2" --worktree-root "$HARNESS" 2>/dev/null)
+if echo "$J_C2" | has_path_in "d['tier2']" "$HARNESS/agent-y"; then ok "worktree-root: a second --worktree-root gives the harness tree the live-owner tier-2 veto"; else no "worktree-root: repeatable --worktree-root did not route the harness tree to tier2 for its live owner"; fi
+if echo "$J_C2" | has_path_in "d['tier1']" "$WS2/agent-x"; then ok "worktree-root: the workspace root's own not-live tree still reaches tier1"; else no "worktree-root: naming a second root broke the first root's classification"; fi
+OWNER_Y=$(echo "$J_C2" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(next((e['owner'] for v in d['tier2'].values() for e in v if e['path']=='$HARNESS/agent-y'), ''))
+")
+[ "$OWNER_Y" = "agent-y" ] && ok "worktree-root: the owner id comes from the MOST SPECIFIC (longest) matching root, not flag order" || no "worktree-root: owner id was '$OWNER_Y', expected 'agent-y' from the nested harness root"
+python3 "$SWEEP" --repo "$C_REPO" --worktree-root "   " >/dev/null 2>&1 && no "worktree-root: whitespace-only --worktree-root accepted (would realpath to the cwd)" || ok "worktree-root: whitespace-only --worktree-root rejected"
 
 # 3g. automated-researcher#533: submodule-fact per-path degradation. A single gitlink with no `.gitmodules`
 #     mapping makes `git submodule status` fail identically for EVERY worktree whose checkout contains that

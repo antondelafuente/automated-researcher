@@ -26,11 +26,23 @@ python3 scripts/worktree_sweep.py --repo <path> [--repo <path> ...] [options]
 By default this only **reports** — nothing is ever deleted. See "The three tiers" and "The reap action,
 and the one rule that matters" below before wiring anything that calls this on a schedule.
 
-Key flags: `--worktree-root <path>` (derive owner ids for tier-2 routing; omit and nothing routes to an
-owner — see below), `--owner-depth N` (default 1), `--min-age-days N` (default 7, the tier-1 age bar),
+Key flags: `--worktree-root <path>` (**repeatable** — derive owner ids for tier-2 routing; omit and nothing
+routes to an owner — see below), `--owner-depth N` (default 1), `--min-age-days N` (default 7, the tier-1 age
+bar for UNMERGED worktrees and scratch), `--merged-min-age-days N` (default 2, the tier-1 age bar for
+worktrees already merged into the default branch — see "The age bar is per tier" below),
 `--default-branch <name>` (default `main`), `--fetch` (do a read-only `git fetch origin` per repo before
 comparing — see "Freshness" below), `--json` (machine-readable; see "The report" below), `--reap-tier1`
 + `--dry-run` (see "The reap action"), `--scratch-glob <glob>` (repeatable; see "Non-git scratch" below).
+
+**`--worktree-root` is repeatable** (automated-researcher#840) because a box has more than one place
+per-session worktrees get created: the agent-workspace root, and the coding harness's own
+`<repo>/.claude/worktrees` trees. The harness trees were already *seen* by the sweep (they are worktrees of
+a repo passed with `--repo`, so `git worktree list` reports them) but derived **no owner**, so the
+live-owner tier-1 veto never applied to them in either direction — 5 such trees held 12.8G on the box that
+filed #840. Name every root an instance actually creates worktrees under and they all follow the same tier
+rules. Where roots nest, the **most specific (longest) match** supplies the owner id, so the answer never
+depends on the order the flags were passed. Which roots exist is an instance value; the product ships the
+mechanism and none of the paths.
 
 ## The three tiers
 
@@ -102,8 +114,28 @@ genuinely initialized submodule at such a path and silently let it through a for
    DIFFERS from the default branch, or that sits at a path the default branch doesn't carry at all (an
    UNKNOWN comparison, never a guessed "same"), keeps the worktree out of tier 1 exactly as before —
    reported with its own precise dirty/untracked reason rather than a generic "inspection needed", and
-   never deleted. **The reap itself
-   passes `--force`** whenever either identity bar (rather than plain
+   never deleted.
+   **...OR entirely on the bounded RESIDUE ALLOWLIST** (automated-researcher#840). Byte-identity is a bar no
+   experiment worktree that went through a design audit can ever clear: a week after #804 landed, four
+   merged worktrees (2.2–2.4G each, 9.3G total) still had to be removed by hand, and their only
+   non-identical paths were `*.run.log` auditor transcripts, `__pycache__`/`*.pyc`, and the design-stage
+   `CHECKLIST.md` / `START.md` / `CLAIMED_BY` / `DESIGN_AUDIT*.md` copies that main already holds in
+   post-run form. So a **merged** worktree also reaches tier 1 when every path that is *not* byte-identical
+   is an allowlist member, in one of two classes with deliberately different admission rules:
+   **regenerable** (`*.run.log`, `*.pyc`, anything under a `__pycache__/` component — matched on the file's
+   own basename at any depth, with **no** requirement that the default branch carry the path at all, because
+   these are reproducible from code that is on it or are a tool's transcript of a run whose findings file is
+   the durable record) and **superseded** (`CHECKLIST.md`, `START.md`, `CLAIMED_BY`, `DESIGN_AUDIT*.md` —
+   admitted **only when the default branch carries that exact path already**; main's copy *is* the warrant,
+   so the worktree's is a stale earlier revision of something durable rather than unique content). The
+   reason string names the allowlist in full, because this is the one tier-1 bar that deletes bytes the
+   default branch does not itself carry. **One off-allowlist path is enough to keep the whole worktree out**
+   — every other path still has to clear the full byte-and-mode identity bar — and a superseded-class
+   *basename* at a path main lacks is not superseded at all: it is the only copy, and it keeps the worktree
+   reported instead. This bar applies to ancestry-**merged** worktrees only; the squash-merge alternative
+   above still requires whole-tree identity, since there nothing has established that the commits themselves
+   are durable. **The reap itself
+   passes `--force`** whenever any of these residue bars (rather than plain
    mergedness) is what qualified the worktree: the dirty/untracked residue that makes the tree byte-identical
    to `default_ref` is exactly the "modified or untracked files" state a bare `git worktree remove`
    unconditionally refuses, regardless of whether that content is a byte-for-byte match — `--force` is
@@ -123,6 +155,20 @@ genuinely initialized submodule at such a path and silently let it through a for
 An in-progress branch (unmerged, recently touched) or a worktree that just merged and is still inside its
 grace window is **silent** — it appears in no tier. It isn't a problem, and if it's still sitting there
 next week the same recompute will flag it then.
+
+## The age bar is per tier
+
+`--min-age-days` (default 7) is the bar for **unmerged** worktrees and for `--scratch-glob` entries;
+`--merged-min-age-days` (default 2) is the bar for a worktree ancestry has already proven **merged**
+(automated-researcher#840). What the grace window buys differs between the two, which is why one number
+can't serve both: for an unmerged worktree the **age is the evidence** that nobody is continuing it, while
+for a merged one every committed byte already lives on the default branch and the only open question — "is
+someone still working in this checkout" — is answered directly by the live-owner veto, not by waiting.
+Measured: at ~10G of residue per closed experiment and roughly a close a day, a uniform 7-day bar *was* the
+steady-state fill — the disk refilled before the bar expired, so the sweep's deletions never caught up with
+its own backlog. Both flags move independently, so an instance that wants the old uniform behavior passes
+`--merged-min-age-days 7`. Neither bar overrides anything else: a live (or unverifiable) owner, ignored
+content, an initialized submodule, and every UNKNOWN fact all still keep a worktree out of tier 1 at any age.
 
 ## Non-git scratch (`--scratch-glob`)
 
@@ -174,6 +220,24 @@ below — a bare sweep reports and nothing else.
   something strictly below it, blocks.
 - **Every fact is recomputed immediately before the delete**, exactly like the worktree reap: a repro dir
   written to in the gap between classification and reaping is skipped, not deleted on a stale reading.
+
+**Close-audit checkouts: the backstop, and where it does and doesn't apply** (automated-researcher#840).
+Closing one experiment on 2026-09-06 left three clean-room checkouts in `/tmp` (10.7G) plus 3.6G of older
+siblings from experiments already closed. Two things had to change and only one of them is here:
+`experiment-lifecycle` now mints those trees at a **fixed, nameable shape** (`<temp root>/<exp>-audit.<random>`,
+via `audit_checkout.sh`) and reaps them when the audit verdict is written — a backstop can only catch what it
+can NAME, and ad-hoc names defeated this sweep as surely as the missing cleanup defeated the close. For the
+residue a *died-mid-close* run still leaves:
+
+- **A checkout made by `audit_checkout.sh` is a git WORKTREE, so `--repo` already sweeps it** — no glob
+  needed, and better: it is classified with git's own facts and removed with `git worktree remove` rather
+  than an `rm -rf`. This is the path to rely on.
+- **A `--scratch-glob '<temp root>/*-audit.*'` (and any `*-checkout*` shape an instance still produces) is
+  the second net**, for anything that is *not* a worktree of a swept repo. Be aware what it will and won't
+  do: the repository-like path guard above means a leftover **full clone** is **reported in tier 3, never
+  deleted** — deliberately, since an unrecoverable object database is not a fair trade for a disk win. So
+  the glob converts "invisible" into "reported", not into "reaped"; the reaping fix is upstream, at the
+  helper that stops the clone being made in the first place.
 
 ## The report
 
@@ -295,13 +359,15 @@ This plugin owns the classification + report format only. An instance wires:
 
   ```cron
   # daily worktree/scratch sweep. ONE line — crontab has no line continuation. Every angle-bracketed value
-  # is an INSTANCE value (checkout path, research repo, temp-dir layout, uid in a path, log path): fill in
-  # your own, and see "Non-git scratch" above for what a --scratch-glob may safely look like.
-  17 4 * * * python3 <checkout>/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep.py --repo <research repo> --fetch --reap-tier1 --scratch-glob '<absolute glob of repro dirs>' --scratch-glob '<absolute glob of per-session scratch>' >> <log path> 2>&1
+  # is an INSTANCE value (checkout path, research repo, worktree roots, temp-dir layout, uid in a path, log
+  # path): fill in your own, and see "Non-git scratch" above for what a --scratch-glob may safely look like.
+  17 4 * * * python3 <checkout>/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep.py --repo <research repo> --worktree-root '<agent workspace root>' --worktree-root '<research repo>/.claude/worktrees' --fetch --reap-tier1 --scratch-glob '<absolute glob of repro dirs>' --scratch-glob '<absolute glob of per-session scratch>' >> <log path> 2>&1
   ```
 
-  The default 7-day `--min-age-days` bar still applies (a daily sweep does not shorten it — it only means
-  an entry is reaped the day after it crosses the bar instead of up to a week later), and `--fetch` is what
+  The age bars apply as described in "The age bar is per tier" above — 2 days for merged worktrees, 7 for
+  unmerged ones and scratch (a daily sweep does not shorten either; it only means an entry is reaped the day
+  after it crosses its bar instead of up to a week later). Naming **every** worktree root the box creates
+  trees under, harness roots included, is what puts them all under the same tier rules. `--fetch` is what
   keeps the mergedness/identity comparisons against a live `origin/<default-branch>` rather than whatever
   the box last fetched. Roll the timer out with `--dry-run` for a cycle first, per the reap section above.
 
@@ -313,7 +379,13 @@ with/without `--dry-run`, the `--json` shape, CLI argument validation, ignored c
 1 (with a `status.showUntrackedFiles=no` config bypass attempt), the merged+identical-residue tier-1 bar
 (automated-researcher#804 — a merged-but-behind worktree whose untracked residue duplicates the default
 branch reaches tier 1 and is really removed, while residue that differs from it or sits at a path it lacks
-stays reported and survives a real `--reap-tier1`), the default branch's ref surviving a reap
+stays reported and survives a real `--reap-tier1`), the merged+allowlisted-residue tier-1 bar
+(automated-researcher#840 — allowlisted regenerable/superseded residue reaches tier 1 with the allowlist
+named in its reason and is really removed, while one off-allowlist file or a superseded-class basename the
+default branch doesn't carry keeps the worktree reported and alive), the per-tier age bar (a merged 3d-old
+worktree reaches tier 1 while an unmerged 3d-old one stays silent, each bar movable independently), the
+repeatable `--worktree-root` giving a nested harness worktree root the live-owner veto with the owner id
+taken from the most specific match, the default branch's ref surviving a reap
 of a linked worktree checked out on it, a locked (un-removable) tier-1 worktree failing without blocking
 other removals, the squash-merge content-identity alternative bar (including a real `--reap-tier1` pass, a
 fail-closed novel-content case, a chmod-only mode-mismatch case, and an untracked-symlink mode-mismatch
