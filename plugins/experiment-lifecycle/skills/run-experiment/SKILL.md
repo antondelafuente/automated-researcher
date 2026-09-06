@@ -669,6 +669,23 @@ upstream of everything in this ordering.
     number-regeneration check settles deterministically (#819).
   - Do **NOT** auto-iterate to zero findings (it never converges) — stop when only polish remains. A finding
     you dispute is a one-line DISPUTE with the reason, not another pass.
+  - **A clean-room checkout for the audit comes from `audit_checkout.sh`, never from a hand-made clone
+    (automated-researcher#840).** The reproducibility dimension often needs a fresh tree to answer "does the
+    committed code regenerate the headline numbers". Make it with
+    `scripts/audit_checkout.sh create <exp> --repo <repo> -- <committish> registry/<exp>` — which prints the
+    path, mints it as `<temp root>/<exp>-audit.<random>` (sparse, detached, a real linked worktree), and is
+    reapable — then hand that path to the audit so it is removed the moment the verdict is written:
+    `audit_experiment --reap-checkout <path> <exp>`. **Never a bare `git clone` at a name you invented.**
+    Closing ONE experiment on 2026-09-06 left three hand-made clones in `/tmp` (10.7G), plus 3.6G of older
+    siblings from experiments already closed: nothing owned their removal *and* their ad-hoc names could not
+    be matched by `repo-janitor`'s backstop globs either, so both the close-time cleanup and the sweep of
+    last resort missed them. A **failed** audit keeps its checkout for forensics (same disposition as a
+    parked run's scratch); reap that one by hand with `audit_checkout.sh reap <path>` once you're done with
+    it, or leave it for the sweep. **The verdict lands in the experiment's durable record, never inside the
+    checkout** — the removal is `git worktree remove --force`, so an `AUDIT.md` written into the clean room
+    would be deleted by the very step that was gated on it. Auditing the record copy *inside* the checkout is
+    fine; when you do, name the durable destination explicitly (`audit_experiment --reap-checkout <path>
+    <path>/registry/<exp> <exp>/AUDIT.md`). A co-located out-file is refused before the auditor runs.
 - **Then the publish chain, once and against the FINAL numbers. Run ONE real fresh-pull reproduction of the
   aggregation/rendering script(s) that produced the headline numbers/figures (#447):** commit every driver
   script whose output is reported, not just its CSV/PNG output; then from a clean state — remove local
@@ -968,6 +985,23 @@ upstream of everything in this ordering.
   that deletes nothing** (the same exit-3 + `SCRATCH-REAP-GAP:` line), since mount-freedom can't be
   established there. An *ancestor* mount is fine: a scratch root on its own volume is the normal layout.
 
+  **A local virtualenv is excluded from the archive and still deleted — with the reclaimed bytes on the
+  record (automated-researcher#840).** A week after #804 the disk hit 95% again with two `~/work` dirs
+  holding a 6G `venv/` each (12.7G total, 12.2G of it venv). The archive rightly excludes a venv — it is a
+  materialization of a lockfile the archive and the merged record already carry, and uploading 6G of
+  platform-specific wheels per run buys nothing — but excluding a path from the archive while the delete is
+  gated on "every source byte verified at the destination" is exactly what strands it locally forever. So
+  a `venv`/`.venv` **directory** at any depth is excluded from the `copy` *and* the `check` (asymmetry there
+  makes the verify abort on what the copy skipped) and deleted with the rest of the tree; each one is logged
+  with its byte count. **This is the one bounded carve-out from "no bytes are deleted without a verified
+  archive", and it is the directory name and nothing else** — `venv.md` and `venv-notes/` are ordinary
+  archived content — so **anything genuinely unique must not live inside a directory called `venv`/`.venv`**,
+  the same discipline `.gitignore`'d build output already follows. Every reap now also prints a one-line
+  **`SCRATCH-REAP-RECLAIMED: run=… bytes=… venv_bytes=… venv_dirs=… archived=… scratch=…`** marker on
+  stdout: **put it on the close report and the ledger line the same way as the gap marker.** Whether the
+  reaper is keeping up with the fill is only answerable from that number, and it was absent from the record
+  before — #840's own cost line ("today's by-hand pass reclaimed 28G") was a hand measurement.
+
   Fires **only on a clean close**, same as the two steps around it: a parked/blocked/crashed run keeps its
   scratch for forensics, and `repo-janitor`'s `--scratch-glob` sweep is the backstop for whatever this step
   never got to run on.
@@ -1254,7 +1288,9 @@ through env seams; see the "three seams" note at the top of this skill.
   creates no empty destination prefix to verify), so it is removed with that stated, not stranded forever. And the
   derived path bounds the delete only if nothing is MOUNTED inside it — a scratch dir that is, or contains, a mount
   point is refused (`rm -rf` destroys the mounted data before it fails), read from the mount table, with no readable
-  mount table the same recorded gap.
+  mount table the same recorded gap. A `venv`/`.venv` DIRECTORY is the one bounded carve-out (#840): excluded from
+  both the copy and the check (regenerable from archived inputs) and still deleted, so an excluded path can't strand
+  the tree — and every reap prints a `SCRATCH-REAP-RECLAIMED:` line with the reclaimed bytes for the close record.
 - **Reap your session at a clean close — mandatory, not a judgment call (#720).** Symmetric with pod-teardown: the
   finished executor frees its own process as the terminal action (`reap_session.sh`), only on a clean `close`, via the
   self-only instance seam. The pane is not the deliverable (the durable record is `RESULTS.md` + the landed record +

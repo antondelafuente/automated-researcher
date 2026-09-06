@@ -65,6 +65,30 @@
 #      still refuses for it (a live link whose bytes were silently skipped is data loss; a dangling link
 #      is not). The excludes go on `rclone check` identically — asymmetry there would leave the verify to
 #      list, and abort on, the exact entry the copy skipped (gate 4's own invariant, one argument over).
+#   4c. A LOCAL VIRTUALENV IS EXCLUDED FROM THE ARCHIVE AND STILL DELETED LOCALLY — with the reclaimed
+#      bytes ON THE RECORD.
+#      INCIDENT (automated-researcher#840, 2026-09-06): a week after #804 the disk hit 95% again. Two
+#      `~/work` dirs carried a 6G virtualenv EACH (12.7G total, 12.2G of it venv). The artifact archive
+#      RIGHTLY excludes `venv/` — it is a materialization of the lockfile/requirements that the archive and
+#      the merged record both already carry, and uploading 6G of platform-specific wheels per run buys
+#      nothing — but the local copy was then pure residue after the archive verified, and nothing removed
+#      it. The two halves have to move together: excluding a path from the archive while the delete is
+#      gated on "every source byte is verified at the destination" is exactly what strands it forever.
+#      So a `venv`/`.venv` DIRECTORY at any depth is excluded from the copy AND from the check (gate 4's
+#      symmetry, same as 4b's dangling links) and is deleted with the rest of the tree.
+#      THE NO-BYTES-DELETED-UNVERIFIED INVARIANT GAINS ONE NAMED, BOUNDED CARVE-OUT, and this is the whole
+#      of it: a directory whose own name is `venv` or `.venv`. Nothing else. That name is a declaration by
+#      the tooling that created it — it is not research data and it is regenerable from inputs that ARE
+#      archived — so anything genuinely unique must not live inside a directory called `venv`/`.venv`, the
+#      same discipline `.gitignore`'d build output already follows. The exclusion is reported per directory
+#      with its byte count, so a close report shows exactly what was skipped rather than a silent shrink.
+#      RECLAIMED BYTES ARE PRINTED, always, on the same STDOUT the gap marker uses: a single
+#      `SCRATCH-REAP-RECLAIMED:` line for the close report / ledger line. #840's own cost line ("today's
+#      by-hand pass reclaimed 28G") is a number nobody could get from this script's output before, so
+#      whether the reaper is keeping up with the fill was unmeasurable from the record it leaves.
+#      A tree whose ONLY content is an excluded venv reaches gate 5's no-bytes branch (#811's shape one
+#      class over): after the exclusions the copy would write zero bytes, so no destination prefix appears
+#      and the parent-listing probe could only ever report a false failure and strand it.
 #   5. THE VERIFY DESTINATION IS RE-DERIVED, NOT REUSED (#729): `rclone copy "$src" "$D"` followed by
 #      `rclone check "$src" "$D"` verifies the wrong destination against itself and passes green — it
 #      proves the copy happened, never that it happened to the INTENDED target. Here the destination is
@@ -105,6 +129,11 @@
 # Call it at close, AFTER artifact-store upload is verified and `log-experiment` has merged the record —
 # same sequencing responsibility as reap_worktree.sh gate 4: this script cannot re-check those itself.
 #
+# STDOUT MARKERS (both are single lines a close report / ledger line is written from):
+#   SCRATCH-REAP-RECLAIMED: ...  a reap happened — how many local bytes came back, and how many of them
+#                                were the excluded virtualenv(s) (#840).
+#   SCRATCH-REAP-GAP: ...        nothing was archived and nothing was deleted; a seam is unset (#804).
+#
 # EXIT CODES (all three are outcomes a close report states; none of them is "ignore me"):
 #   0  reaped (archived + verified + deleted), or an empty tree deleted with nothing to archive
 #   1  a REAL failure — a gate refused, or an archive/verify step failed. The scratch is still on disk and
@@ -119,8 +148,31 @@ REC="$SCRIPT_DIR/run_supervision_record.sh"
 
 GAP_EXIT=3
 
+# The ONE bounded carve-out from "no bytes are deleted without a verified archive" (gate 4c, #840): a
+# DIRECTORY whose own name is one of these, at any depth. Names, never path patterns — the name is the
+# creating tool's own declaration that the tree is a regenerable materialization of archived inputs.
+VENV_DIR_NAMES=(venv .venv)
+
 say(){ echo "reap_scratch: $*" >&2; }
 die(){ echo "reap_scratch: $*" >&2; exit 1; }
+# tree_bytes <path>... — total apparent bytes, or the empty string when it cannot be measured. `du -sb`
+# (GNU) first, `du -sk` x 1024 as the portable fallback; UNKNOWN is printed as "unknown" on the record
+# rather than as a made-up 0, which would read as "nothing was reclaimed".
+tree_bytes(){
+  local out
+  out=$(du -sb -- "$@" 2>/dev/null | awk '{t+=$1} END{if (NR) print t}') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  out=$(du -sk -- "$@" 2>/dev/null | awk '{t+=$1} END{if (NR) print t*1024}') && [ -n "$out" ] && { printf '%s' "$out"; return 0; }
+  return 1
+}
+# reclaimed <archived-word> — the #840 close-report line. Printed on EVERY path that actually deleted the
+# tree (including the nothing-to-archive branch), because "how many bytes came back" is the number that
+# says whether the reaper is keeping up with the fill, and it was absent from this script's record before.
+# Byte counts are captured BEFORE the rm -rf by the callers; this only formats them.
+reclaimed(){
+  printf 'SCRATCH-REAP-RECLAIMED: run=%s bytes=%s venv_bytes=%s venv_dirs=%s archived=%s scratch=%s\n' \
+    "${id:-unknown}" "${tree_total:-unknown}" "${venv_total:-0}" "${#venv_dirs[@]}" "$1" \
+    "${scratch_real:-${scratch:-unresolved}}"
+}
 # gap <cause-slug> <one-line detail> — the loud, on-the-record no-op (#804). The marker goes to STDOUT
 # because that is the stream a close report is written from; the human sentence goes to stderr with the
 # rest of the log; and the exit status is non-zero so an unattended close cannot silently skip a reap the
@@ -236,6 +288,31 @@ while [ "${dest_root%/}" != "$dest_root" ]; do dest_root=${dest_root%/}; done
 [ -n "$dest_root" ] || die "EXPERIMENT_SCRATCH_ARCHIVE_DEST resolved to an empty destination root"
 dest="$dest_root/$id"
 
+# Gate 4c SCAN — local virtualenvs (#840). Enumerated FIRST, because every scan below prunes them: a
+# `find -type l` that walked into a 6G venv would log its links and (worse) a LIVE link in there would make
+# an otherwise-venv-only tree look like it has bytes to archive, sending it in front of gate 5's probe
+# instead of onto the no-bytes branch. `-prune` also stops a venv nested inside a venv being counted twice.
+# A SHORT SCAN (an unreadable subdirectory) can only UNDER-report, which fails safe in the only direction
+# that matters: a venv this missed is archived and verified like any other content — the pre-#840 behavior,
+# 6G of pointless upload but never an unverified delete.
+prune_expr=()
+for n in "${VENV_DIR_NAMES[@]}"; do
+  if [ "${#prune_expr[@]}" -eq 0 ]; then prune_expr=( -name "$n" ); else prune_expr+=( -o -name "$n" ); fi
+done
+venv_scan_rc=0
+venv_list=$(mktemp) || die "mktemp failed — refusing to copy without a virtualenv pre-scan"
+find "$scratch_real" -mindepth 1 -type d \( "${prune_expr[@]}" \) -prune -print0 > "$venv_list" 2>/dev/null || venv_scan_rc=$?
+venv_dirs=()
+while IFS= read -r -d '' d; do venv_dirs+=("$d"); done < "$venv_list"
+rm -f "$venv_list"
+if [ "$venv_scan_rc" != 0 ]; then
+  say "NOTE: the virtualenv pre-scan short-read (find exited $venv_scan_rc — likely an unreadable subdirectory), so it can only UNDER-report. Any venv it missed is archived and verified like ordinary content: a pointless upload, never an unverified delete."
+fi
+venv_total=0
+if [ "${#venv_dirs[@]}" -gt 0 ]; then
+  venv_total=$(tree_bytes "${venv_dirs[@]}") || venv_total=unknown
+fi
+
 # Gate 4b PRE-SCAN — dangling symlinks (#811). Every symlink in the tree is classified BEFORE anything is
 # copied or deleted: a link whose target resolves is ordinary content the -L copy will carry, a link whose
 # target is gone carries no bytes and would fail the -L listing for the whole tree. `[ -e ]` follows the
@@ -249,7 +326,8 @@ dest="$dest_root/$id"
 # the scratch still on disk — the pre-#811 behavior, never a delete.
 link_scan_rc=0
 link_list=$(mktemp) || die "mktemp failed — refusing to copy without a dangling-symlink pre-scan"
-find "$scratch_real" -mindepth 1 -type l -print0 > "$link_list" 2>/dev/null || link_scan_rc=$?
+find "$scratch_real" -mindepth 1 \( -type d \( "${prune_expr[@]}" \) -prune \) -o \( -type l -print0 \) \
+  > "$link_list" 2>/dev/null || link_scan_rc=$?
 dangling=()
 live_symlink=0
 while IFS= read -r -d '' link; do
@@ -281,6 +359,16 @@ for link in ${dangling[@]+"${dangling[@]}"}; do
   say "DANGLING SYMLINK (excluded from the archive — it points at nothing, so it carries no bytes): '$link' -> '$(readlink -- "$link" 2>/dev/null)'"
   excludes+=( --exclude "/$(glob_escape "${link#"$scratch_real"/}")" )
 done
+# Gate 4c's excludes ride the SAME array for the same reason (gate 4's symmetry): an exclusion the copy
+# carries and the check does not leaves the verify listing bytes the copy was told to skip, which fails the
+# check and strands the tree — the exact defect 4b's excludes exist to avoid, one class over. Both rclone
+# filter forms are passed: `<dir>/**` covers the contents (rclone creates no empty destination dirs, so the
+# emptied directory itself never appears) and `<dir>/` covers the directory entry for the listing.
+for vd in ${venv_dirs[@]+"${venv_dirs[@]}"}; do
+  vrel=$(glob_escape "${vd#"$scratch_real"/}")
+  say "LOCAL VIRTUALENV (excluded from the archive, deleted locally — regenerable from archived inputs, #840): '$vd'"
+  excludes+=( --exclude "/$vrel/**" --exclude "/$vrel/" )
+done
 
 # Gate 4/5 PRECONDITION — does this tree hold anything the archive must carry? `rclone copy` creates no
 # empty directories at the destination, so for a scratch tree with no files there is nothing for the
@@ -296,8 +384,12 @@ done
 # pass. A find that fails (an unreadable subdirectory is a SHORT READ, never "no files down there") is
 # treated as NON-empty, so the full archive-and-verify path runs and can only refuse to delete; the same
 # goes for a short link scan, whose live/dangling split is then not trustworthy either.
+# Content inside an EXCLUDED virtualenv is not content for this purpose (#840): the copy will not carry it,
+# so a tree holding nothing else writes zero bytes and belongs on the no-bytes branch rather than in front
+# of a probe that cannot pass. Same prune as the two scans above, so the three answers can't disagree.
 find_rc=0
-tree_content=$(find "$scratch_real" -mindepth 1 ! -type d ! -type l -print -quit 2>/dev/null) || find_rc=$?
+tree_content=$(find "$scratch_real" -mindepth 1 \( -type d \( "${prune_expr[@]}" \) -prune \) -o \
+  \( ! -type d ! -type l -print -quit \) 2>/dev/null) || find_rc=$?
 if [ "$find_rc" != 0 ]; then
   tree_content="unreadable-tree-assume-content"
 elif [ -z "$tree_content" ] && [ "$live_symlink" = 1 ]; then
@@ -311,8 +403,11 @@ if [ -z "$tree_content" ]; then
   else
     say "scratch '$scratch_real' holds no files — nothing to archive (and rclone copy would create no destination prefix to verify). Deleting the empty tree."
   fi
+  # Measured BEFORE the delete — afterwards there is nothing left to measure (#840).
+  tree_total=$(tree_bytes "$scratch_real") || tree_total=unknown
   rm -rf -- "$scratch_real" || die "empty scratch delete failed ('rm -rf $scratch_real') — delete it by hand"
-  say "done — empty scratch removed; nothing was archived because there was nothing to archive"
+  reclaimed nothing-to-archive
+  say "done — empty scratch removed; nothing was archived because there was nothing to archive. Put the SCRATCH-REAP-RECLAIMED line on the close report."
   exit 0
 fi
 
@@ -355,5 +450,8 @@ if ! rclone lsf "$dest_root/" 2>/dev/null | grep -qxF "$id/"; then
 fi
 
 say "archive VERIFIED at '$dest' — deleting local scratch '$scratch_real'"
+# Measured BEFORE the delete — afterwards there is nothing left to measure (#840).
+tree_total=$(tree_bytes "$scratch_real") || tree_total=unknown
 rm -rf -- "$scratch_real" || die "archive verified but 'rm -rf $scratch_real' failed — delete it by hand"
-say "done — scratch archived and removed (recover with: rclone copy '$dest' '$scratch_real')"
+reclaimed verified
+say "done — scratch archived and removed (recover with: rclone copy '$dest' '$scratch_real'). The ${#venv_dirs[@]} excluded virtualenv(s) are NOT in the archive and are gone locally — regenerate from the archived lockfile/requirements. Put the SCRATCH-REAP-RECLAIMED line on the close report."

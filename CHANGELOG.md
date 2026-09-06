@@ -1,3 +1,69 @@
+- experiment-lifecycle 0.9.0, repo-janitor 0.4.0, verify-claims 0.9.0 (2026-09-06): reaper follow-up 2
+  (#840) — a week after #804 the disk hit 95% again (12 GB free of 225 GB), and each of the five measured
+  residue classes had its own reason for surviving the daily sweep. **repo-janitor: tier 1 admits merged
+  worktrees whose non-identical residue is entirely on a bounded ALLOWLIST.** #804's byte-identity bar can
+  never admit an experiment worktree that went through a design audit — four merged worktrees (2.2-2.4 GB
+  each, 9.3 GB) were removed by hand whose only non-identical paths were `*.run.log` auditor transcripts,
+  `__pycache__`/`*.pyc`, and the design-stage `CHECKLIST.md`/`START.md`/`CLAIMED_BY`/`DESIGN_AUDIT*.md`
+  copies main already holds in post-run form. The allowlist has two classes with deliberately different
+  admission rules: REGENERABLE (basename or `__pycache__` component match, no main copy required — these
+  reproduce from code that is on main, or are a transcript of a run whose findings file is the durable
+  record) and SUPERSEDED (admitted only when main carries that EXACT path, because main's copy IS the
+  warrant that the worktree's is a stale earlier revision rather than the only copy). One off-allowlist path
+  keeps the whole worktree out; a superseded-class *basename* at a path main lacks is not superseded at all.
+  The reason string names the allowlist in full, since this is the one tier-1 bar that deletes bytes main
+  does not itself carry. The allowlist spans all THREE residue categories — dirty, untracked AND **ignored**
+  — because a tier-1 reap deletes all three identically, so the set of paths the safety bar adjudicates has
+  to be the set the reap destroys. The ignored category is the main event, not a refinement: a normal
+  `.gitignore` (this repo's own included) already ignores `__pycache__/`, `*.pyc` and `*.run.log`, so on a
+  real box those paths arrive as ignored rather than untracked, and an allowlist consulted only against
+  dirty/untracked residue would be inert against exactly the worktrees it was written for. What does not
+  carry over is the byte-identity fallback: for ignored paths, allowlist membership is the only way through
+  and any other ignored path vetoes tier 1 outright, which keeps the widening bounded to the named
+  allowlist and preserves the veto's original purpose (a stray `.env`, unstaged secrets and a 6 GB venv are
+  none of the allowlisted classes). Ignored paths that cleared the bar are named explicitly in the tier-1
+  reason rather than folded into "clean". **The age bar is now per tier:** `--merged-min-age-days` (default 2) for
+  ancestry-merged worktrees, `--min-age-days` (default 7, unchanged) for unmerged ones and scratch — for an
+  unmerged tree the age IS the evidence nobody is continuing it, while for a merged one every committed byte
+  is already on main and "is someone still working here" is answered by the live-owner veto, not by waiting;
+  at ~10 GB per closed experiment and roughly a close a day, the uniform 7-day bar WAS the steady-state fill.
+  **`--worktree-root` is repeatable**, so the harness's own `.claude/worktrees` trees (5 trees, 12.8 GB, seen
+  by every sweep but deriving no owner, so the live-owner veto never applied in either direction) follow the
+  same tier rules as the agent-workspace root; where roots nest, the most specific match supplies the owner
+  id. **experiment-lifecycle: `reap_scratch.sh` excludes a local virtualenv from the archive and still
+  deletes it, with the reclaimed bytes on the record.** Two `~/work` dirs carried a 6 GB `venv/` each (12.7
+  GB, 12.2 GB of it venv): the archive rightly excludes a venv, but excluding a path from the archive while
+  the delete is gated on "every source byte verified at the destination" is exactly what strands it locally
+  forever. A `venv`/`.venv` DIRECTORY at any depth is now excluded from the copy AND the check (asymmetry
+  there makes the verify abort on what the copy skipped) and deleted with the tree — the one bounded
+  carve-out from the no-bytes-deleted-unverified invariant, and it is the directory name and nothing else
+  (`venv.md`, `venv-notes/` stay ordinary archived content). A tree holding only a venv takes the no-bytes
+  branch. Every reap now prints a `SCRATCH-REAP-RECLAIMED: run=… bytes=… venv_bytes=…` line on stdout for
+  the close report: whether the reaper is keeping up with the fill was unanswerable from the record before.
+  **experiment-lifecycle + verify-claims: close-audit clean-room checkouts get a lifecycle.** Closing ONE
+  experiment left three hand-made clones in `/tmp` (10.7 GB) plus 3.6 GB of older siblings from experiments
+  already closed — nothing owned their removal, AND their ad-hoc names could not be matched by any backstop
+  glob, so both the close-time cleanup and the sweep of last resort missed them. New
+  `run-experiment/scripts/audit_checkout.sh` mints them at one fixed, nameable, reapable shape
+  (`<temp root>/<exp>-audit.<random>`) via `sparse_worktree.sh` — sparse (#805), detached (so
+  `create <exp> main` is never refused for "branch already checked out" and the verdict names a fixed
+  commit), and a real linked worktree, which is what lets repo-janitor's `--repo` sweep reach a leaked one
+  with git's own refusals behind the removal. `audit_experiment.sh --reap-checkout <path>` removes it the
+  moment `AUDIT.md` is atomically written — the checkout's natural end of life — and only then: a
+  failed/blocked audit keeps its tree for forensics. The removal is DELEGATED to `audit_checkout.sh`, which
+  owns the statically-bounded delete (direct child of the audit temp root, the `-audit.` name shape, a
+  linked worktree, `git worktree remove --force`); verify-claims installs independently, so an unresolvable
+  helper prints a loud reap-by-hand line and deletes nothing rather than deriving an `rm -rf` of its own.
+  That delete takes the tree's tracked, untracked AND ignored content alike, so the reap is licensed by the
+  verdict being durable somewhere the reap does not reach — and that is CHECKED, not assumed: an out-file
+  inside the checkout (the DEFAULT when the audited dir is the checkout's own record copy) is BLOCKED before
+  the auditor runs, so the mistake costs an error message rather than a cross-family audit run whose verdict
+  the next line deletes. Auditing the record copy inside the clean room stays allowed — it is the point —
+  with the verdict named explicitly in the durable record. One predicate, asserted at both the pre-run gate
+  and immediately before the delete (plus a non-empty verdict at `$OUT` as the delete's own precondition),
+  because a check that licenses a delete and the delete itself must never be able to disagree.
+  Not claimed here: #840's own non-claim about the session janitor killing executors mid-archive stays
+  unverified and out of scope.
 - experiment-lifecycle 0.8.0 (2026-09-06): sparse worktrees, part 2 — the creation paths #805 could not
   intercept (#807). #805 made worktrees a scaffold SCRIPT creates sparse by default; 7 days later the
   instance disk hit 95% again, and the measurement said why: of 36 live worktrees of the research repo, 16

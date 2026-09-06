@@ -165,6 +165,33 @@ final findings path only after the verifier exits successfully. While the verifi
 absent or empty final findings file is not evidence of a hang; inspect the process/log state instead of killing
 or retrying solely because the findings file has not appeared.
 
+**`--reap-checkout <path>` — the clean-room checkout dies when the verdict is written (#840).** The
+reproducibility dimension often needs a fresh tree to answer "does the committed code regenerate the
+headline numbers". Create it with `experiment-lifecycle`'s `audit_checkout.sh create <exp> --repo <repo> --
+<committish> registry/<exp>` (sparse, detached, at the fixed reapable path `<temp root>/<exp>-audit.<random>`)
+and pass that path here: the audit removes it **immediately after `AUDIT.md` is atomically written**, which
+is the checkout's natural end of life and the one moment a script can act on it. Closing ONE experiment on
+2026-09-06 left three hand-made clones in `/tmp` (10.7G) that nothing owned and whose ad-hoc names no
+backstop glob could match. A **failed or blocked** audit exits before this step, so it keeps its checkout for
+forensics. The removal is **delegated** to `audit_checkout.sh`, which owns the statically-bounded delete
+(direct child of the audit temp root, the `-audit.` name shape it mints, a linked git worktree, `git worktree
+remove --force`); this plugin installs independently, so when that helper can't be resolved
+(`AUDIT_CHECKOUT_HELPER`, else a lookup beside this script and at the sibling plugin's path) the audit prints
+a loud reap-by-hand line and deletes **nothing** rather than deriving an `rm -rf` of its own. A set-but-wrong
+`AUDIT_CHECKOUT_HELPER` is that same loud no-op, never a silent substitution of some other copy.
+
+**The verdict must land OUTSIDE the checkout, and that is checked rather than assumed.** The removal is
+`git worktree remove --force`, which takes the tree's tracked, untracked **and** ignored content alike — so
+an out-file inside the checkout would turn "removed the moment the verdict is written" into "deleted the
+verdict it was gated on", with `findings -> …` printed and exit 0 all the same. Auditing the record *copy*
+inside the clean room is exactly the point and stays allowed; **writing the verdict there is not.** So when
+the experiment dir you pass is itself inside the checkout, name the durable destination explicitly —
+`audit_experiment.sh --reap-checkout "$WT" "$WT/registry/<exp>" ~/orchestrator/<exp>/AUDIT.md` — because a
+co-located out-file is **BLOCKED before the auditor runs**, so the mistake costs an error message instead of
+a whole cross-family audit run. The same predicate is re-asserted immediately before the delete (and the
+delete additionally requires a non-empty verdict at `$OUT`): the check that licenses a delete and the delete
+itself must never be able to disagree.
+
 **Cross-family selection (required `AAR_SUBSTRATE`).** Set `AAR_SUBSTRATE` to the family that RAN the work
 (`claude` or `codex`) — it is REQUIRED and the script fails closed if unset/unknown, so a wrong default can
 never make the audit same-family (matching `log-experiment`). The auditor is ALWAYS the opposite family and
