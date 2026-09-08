@@ -1,3 +1,24 @@
+- experiment-lifecycle 0.11.0 (2026-09-08): both supervision layers stop resting on a scheduled job nobody
+  ever saw fire (#849). In a **bridge** session — the kind the Remote-Control host spawns (`claude rc --spawn
+  worktree`), running as `claude --print --sdk-url … --session-id cse_…` — `CronCreate` is advertised and
+  silently no-ops: print/SDK mode has no long-lived REPL runtime to fire it (anthropics/claude-code#59864).
+  The harness still returns a job id and `CronList` still lists the job, so #658's "supervision armed" check —
+  presence in the listing — passed while nothing would ever fire: three heartbeat crons across ~30 job-hours
+  plus a one-shot test, zero ticks, all listed; downstream, executors sat 9.5 h on a permission prompt and 7 h
+  on a budget question until the researcher looked. Crons are NOT globally dead (interactive executors took 57
+  and 5 ticks the same days), so the fix is to know which kind of session you are in and to stop trusting the
+  listing. **New `launch-experiment/scripts/session_kind.sh`** (`detect` off the process ancestry, with the
+  transcript's `entrypoint` as the harness's own second signal; `classify` as the pure predicate) answers
+  terminal-vs-bridge mechanically and prints `unknown` rather than guessing — which both skills treat as
+  `bridge`, since the fallback works in either kind and a cron does not. `launch-experiment` Step 7 now
+  branches on it (terminal → the loop skill's standing cron; bridge → the SAME heartbeat prompt as a
+  persistent unconditional-timer `Monitor`, verified to wake a bridge session with full context) and gates
+  "supervision armed" on a **first-tick receipt** — one observed firing, with the receipt deadline armed as a
+  one-shot `Monitor` so a dead primitive surfaces instead of waiting for a wake that never comes. The same
+  receipt gates `run-experiment`'s `CHECKLIST.md` self-wake gate, which also now states plainly that an
+  executor mid-turn (blocking poll, permission prompt) is not idle and cannot be woken by its own tick — the
+  #292 case the launcher layer exists for. Step 9 / close reap both primitives. No new supervision layer.
+
 - experiment-lifecycle 0.10.0 (2026-09-06): the close leg stops holding a run's artifacts THREE times
   (#843, follow-up to #840/#842). Measured on the instance while one experiment was in its close leg: 13
   unique 0.35 GB adapter tars were present 39 times — the run's own `target_probes/`, a second copy staged

@@ -41,11 +41,15 @@
       already owns the dir; wrote the claim marker — e.g. a `CLAIMED_BY` naming who/date/scope — and committed
       it path-scoped). The claim guardrail must fire BEFORE the first billable action, not at close.  ev: git log <claim-marker>
 - ☐ [BLOCK] Self-wake / idle-cost backstop armed PER SUBSTRATE before any detached run or billable background work.
-      Autonomous detached runs MUST name the independent waker id/handle; billable background compute MUST name the
+      Autonomous detached runs MUST name the independent waker id/handle AND its FIRST-TICK RECEIPT — one tick
+      actually observed within one period; a returned job id that `CronList` happily lists is not a wake (#849);
+      billable background compute MUST name the
       idle-cost teardown backstop; controller-supervised detached probes MUST name the supervising watcher/driver.
       Parking with only an in-process monitor is FAIL for autonomous detached runs; a blocking watcher that keeps the
       executor turn alive is controller-supervised, not autonomous detached.
-      (Claude: heartbeat cron + LOOK_AGAIN; Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).
+      (Claude, terminal session: heartbeat cron + LOOK_AGAIN; Claude, bridge/print-SDK session, where `CronCreate`
+      silently no-ops: the same tick as an unconditional-timer `Monitor`, whose first tick is its own receipt;
+      Codex: blocking watcher + the gpu-job lease as idle-teardown backstop).
       Same tick also owns the pod-lease refresh heartbeat for every live pod, gated on POSITIVE-PROGRESS
       evidence (or an active operator-declared `QUIET_PHASE.md`) — never raw busy/liveness alone, or a wedged
       hot-loop refreshes forever — with no-progress-and-no-marker surfaced loudly on the next wake rather than
