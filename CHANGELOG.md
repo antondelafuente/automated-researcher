@@ -9,8 +9,12 @@
   and 5 ticks the same days), so the fix is to know which kind of session you are in and to stop trusting the
   listing. **New `session_kind.sh`** (`detect` off the process ancestry, with the
   transcript's `entrypoint` as the harness's own second signal; `classify` as the pure predicate) answers
-  terminal-vs-bridge mechanically and prints `unknown` rather than guessing — which both skills treat as
-  `bridge`, since the fallback works in either kind and a cron does not. Both layers arm a periodic wake and
+  terminal-vs-bridge mechanically, resolving its two signals by cost-of-being-wrong rather than by
+  precedence: a recognized print/SDK marker from either signal wins (so the ancestry walk does not stop at the
+  nearest claude), `terminal` needs a recognized interactive marker and no print/SDK marker anywhere, and an
+  unrecognized signal value — a new `entrypoint` spelling, a new `--sdk…`/`--print…` flag — counts as no
+  evidence instead of standing in for "terminal". It prints `unknown` rather than guessing — which both skills
+  treat as `bridge`, since the fallback works in either kind and a cron does not. Both layers arm a periodic wake and
   each skill installs independently, so it ships as a byte-identical copy in `launch-experiment/scripts/` and
   `run-experiment/scripts/` rather than one skill reaching into the other's dir (same per-skill-copy
   precedent as `sparse_worktree.sh` / `aar_profile_snapshot.sh`); `session_kind_smoke.sh` asserts the copies

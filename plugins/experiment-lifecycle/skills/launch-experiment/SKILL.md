@@ -345,9 +345,13 @@ For the session-wedge duty, arm at launch, in this order:
    > (automated-researcher#658, #849).** Two primitives can carry this duty. Which one actually fires is a
    > property of the session you are launching FROM, so settle it mechanically before you arm anything:
    > `scripts/session_kind.sh detect` (ships with this skill) prints `terminal` or `bridge` off your own
-   > process ancestry, with `--transcript <path>` as the harness's own second signal (`entrypoint: sdk-cli`).
-   > It prints `unknown` (exit 3) rather than guessing — **treat `unknown` as `bridge`**, because the
-   > timer-`Monitor` below works in BOTH kinds and a cron does not.
+   > process ancestry, with `--transcript <path>` as the harness's own second signal (`entrypoint`). It
+   > resolves the two signals asymmetrically, because the two answers are not equally costly when wrong: a
+   > recognized print/SDK marker from EITHER signal wins, `terminal` needs a recognized interactive marker and
+   > no print/SDK marker anywhere, and a signal value it has never been taught (a new `entrypoint` spelling)
+   > counts as nothing rather than as "not SDK, therefore terminal". So it prints `unknown` (exit 3) rather
+   > than guessing — **treat `unknown` as `bridge`**, because the timer-`Monitor` below works in BOTH kinds
+   > and a cron does not.
    >
    > - **`terminal`** → invoke the loop skill (`/loop 45m <heartbeat prompt>`), which registers a **standing
    >   cron** (`CronCreate`): it fires until deleted or expired, with no per-tick re-arm step to lose.

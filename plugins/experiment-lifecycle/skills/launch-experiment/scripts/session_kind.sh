@@ -17,21 +17,37 @@
 # "stop using crons", it is "know which kind of session you are in", and that is a mechanical check, not a
 # judgment call. Hence a script, so neither skill re-derives it by eye.
 #
+# THE INVARIANT THIS SCRIPT IS BUILT AROUND (the asymmetry that decides every ambiguous case): the two answers
+# are NOT equally costly when wrong. `terminal` selects the cron path, which in the wrong session silently
+# never fires — the incident above. `bridge` selects the timer-`Monitor` path, which works in BOTH kinds. So
+# `terminal` may be printed ONLY from a positively recognized interactive marker, `bridge` short-circuits
+# everything the moment any positively recognized print/SDK marker is seen, and a signal this script does not
+# recognize is NOT EVIDENCE — it neither decides nor preempts a later signal. Exhausting every signal without
+# recognizing one prints `unknown` (exit 3), which both skills route to the bridge path. "Not the value I know
+# about, therefore terminal" is the shape of the original fail-open and must not reappear anywhere here.
+#
 # VERBS
 #   detect [--pid <pid>] [--transcript <path>] [--max-depth <n>]
-#       Print the session kind of the process ancestry this script is running under:
-#         terminal  a claude process with no print/SDK-mode flags — scheduled jobs fire here (when idle)
-#         bridge    print/SDK mode (`--print` / `-p` / `--sdk-url`) — scheduled jobs silently no-op
-#         unknown   no claude ancestor reachable (exit 3) — the CALLER decides, and the skills say: take the
-#                   bridge path, because the timer-`Monitor` fallback works in BOTH kinds and a cron does not.
-#       `--transcript` is the second signal named on #849: the harness transcript's `entrypoint` field
-#       (`sdk-cli` = bridge). When given and it yields a value it WINS — it is the harness's own statement
-#       about itself, where the ancestry walk is an inference from a command line.
+#       Print the session kind, resolved over ALL available signals (not first-signal-wins):
+#         bridge    any recognized print/SDK marker — the transcript's `entrypoint` being SDK-family, or a
+#                   `--print` / `-p` / `--sdk…` flag on ANY claude process in the ancestry. Decisive: it wins
+#                   over a terminal signal from the other source, because a print/SDK process between this one
+#                   and the terminal means no REPL runtime will fire a scheduled job.
+#         terminal  a recognized interactive marker (`entrypoint: cli`, or a claude ancestor carrying no
+#                   print/SDK flag) AND no bridge marker anywhere in reach.
+#         unknown   nothing recognized (exit 3) — the CALLER decides, and the skills say: take the bridge
+#                   path, because the timer-`Monitor` fallback works in BOTH kinds and a cron does not.
+#       `--transcript` is the second signal named on #849: the harness transcript's `entrypoint` field. It is
+#       the harness's own statement about itself, so an SDK-family value there ends the question — but it is a
+#       harness-internal enum whose members change, so it is read through an ALLOWLIST in both directions and
+#       an unrecognized value falls through to the ancestry walk instead of standing in for one.
 #   classify --cmdline <text>
 #       The pure classifier over one command line: prints `bridge` / `terminal` / `unknown` (exit 3) without
 #       touching the process table. This is what the ancestry walk applies per candidate; exposed as its own
 #       verb so the behavior smoke pins it directly, and so a caller holding a command line from elsewhere
-#       (a `ps` line for another session's pane) can ask the same question.
+#       (a `ps` line for another session's pane) can ask the same question. Its `bridge` is decisive, but its
+#       `terminal` is only a CANDIDATE — `detect` promotes it to the answer solely after every other signal
+#       has been read without a print/SDK marker turning up.
 #
 # NOT THIS SCRIPT'S JOB: arming anything, or deciding what to arm. It reports a fact. The first-tick receipt —
 # "listed is not fired" — is the gate that consumes it, and that lives in the two SKILL.md files.
@@ -59,23 +75,30 @@ EOF
 }
 
 # ── the two predicates, over one command line ──────────────────────────────────────────────────────────────
-# Padded with spaces so a flag at either end still matches on a word boundary; `--sdk-url=` covers the
-# joined-value spelling. `-p` is claude's own short form of `--print`.
+# Padded with spaces so a flag at either end still matches on a word boundary. Matched by FAMILY PREFIX, not by
+# exact spelling: `--print…` covers `--print` and any later variant, `--sdk…` covers `--sdk-url`, its
+# `--sdk-url=` joined spelling, and any sibling SDK-transport flag. `-p` is claude's own short form of
+# `--print` and is matched exactly, since no other flag family starts there. Widening this way is the same
+# fail-closed reasoning as the entrypoint allowlist, applied in the direction each surface allows: an
+# unrecognized value on a CLOSED, documented flag surface (print mode has had one canonical spelling since it
+# shipped — changing it would break every user's scripts) is safely read as interactive, while an unrecognized
+# value in the harness's OPEN internal entrypoint enum is not read as anything at all.
 is_print_mode(){
   case " $1 " in
-    *" --sdk-url "*|*" --sdk-url="*|*" --print "*|*" -p "*) return 0 ;;
+    *" --sdk"*|*" --print"*|*" -p "*) return 0 ;;
   esac
   return 1
 }
 
 # A candidate counts as the claude process only by its EXECUTABLE name, never by "claude" appearing anywhere in
 # the line: an ancestor shell whose command text merely mentions a `~/.claude/...` path (which any shell in this
-# product routinely does) must not be read as the harness. The one exception is `--sdk-url`, which nothing but
-# an SDK-mode harness carries and which is decisive on its own.
+# product routinely does) must not be read as the harness. The one exception is the `--sdk…` flag family
+# (`--sdk-url` today), which nothing but an SDK-mode harness carries and which is decisive on its own — a
+# wrapper/`node cli.js` spelling of the harness is still a harness.
 is_claude_proc(){
   local exe=${1%% *}
   case "${exe##*/}" in claude|claude-code) return 0 ;; esac
-  case " $1 " in *" --sdk-url "*|*" --sdk-url="*) return 0 ;; esac
+  case " $1 " in *" --sdk"*) return 0 ;; esac
   return 1
 }
 
@@ -135,22 +158,37 @@ case "$cmd" in
     case "$MAX_DEPTH" in ''|*[!0-9]*) die "--max-depth must be a positive integer (got '$MAX_DEPTH')" ;; esac
     [ "$MAX_DEPTH" -ge 1 ] || die "--max-depth must be >= 1"
 
-    # 1. The harness's own statement about itself, when the caller can point at it.
+    # Collected, not raced: a recognized bridge marker from EITHER source ends the question immediately, and a
+    # recognized interactive marker only answers once the other source has been exhausted without one.
+    terminal_evidence=""
+
+    # 1. The harness's own statement about itself, when the caller can point at it. Read through an allowlist
+    #    in BOTH directions — SDK-family (`sdk-cli` and any sibling/successor spelling) is decisive for bridge,
+    #    exactly `cli` is the interactive REPL, and anything else is a value this script has never been taught,
+    #    so it says nothing. Mapping "not sdk-cli" onto terminal is what let an unrecognized future value
+    #    override a decisive `--sdk-url` ancestor and pick the dead-cron path (#855 review round 2).
     if [ -n "$TRANSCRIPT" ]; then
       if ep=$(transcript_entrypoint "$TRANSCRIPT"); then
-        if [ "$ep" = "sdk-cli" ]; then
-          note "transcript entrypoint=$ep -> bridge (print/SDK mode: scheduled jobs silently no-op)"
-          echo bridge; exit 0
-        fi
-        note "transcript entrypoint=$ep -> terminal"
-        echo terminal; exit 0
+        case "$ep" in
+          *sdk*)
+            note "transcript entrypoint=$ep -> bridge (SDK-family: no REPL runtime, scheduled jobs no-op)"
+            echo bridge; exit 0 ;;
+          cli)
+            note "transcript entrypoint=$ep -> interactive REPL; still walking the ancestry for a print/SDK parent"
+            terminal_evidence="transcript entrypoint=$ep" ;;
+          *)
+            note "transcript entrypoint=$ep is not a value this script recognizes — not evidence either way" ;;
+        esac
+      else
+        note "transcript carried no entrypoint field ($TRANSCRIPT) — falling back to the ancestry walk"
       fi
-      note "transcript carried no entrypoint field ($TRANSCRIPT) — falling back to the ancestry walk"
     fi
 
     # 2. The ancestry walk. `ps -o ppid=,args=` is POSIX, so this reads the same on Linux and macOS without a
     #    /proc dependency. Bounded by depth AND by a seen-set: a pid whose ppid loops (or is reparented to
-    #    itself) must not spin here.
+    #    itself) must not spin here. It does NOT stop at the nearest claude process: a print/SDK ancestor above
+    #    an interactive-looking one still means this process's harness is print/SDK, so the walk keeps going
+    #    past a terminal candidate and only a bridge match short-circuits.
     pid=$START_PID
     depth=0
     seen=" "
@@ -164,14 +202,24 @@ case "$cmd" in
       ppid=$(printf '%s\n' "$line" | awk '{print $1; exit}')
       args=$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]*//')
       if kind=$(classify_cmdline "$args"); then
-        note "pid $pid -> $kind: $args"
-        echo "$kind"; exit 0
+        if [ "$kind" = bridge ]; then
+          note "pid $pid -> bridge: $args"
+          echo bridge; exit 0
+        fi
+        note "pid $pid -> interactive candidate: $args (walk continues — a print/SDK ancestor would override)"
+        [ -n "$terminal_evidence" ] || terminal_evidence="pid $pid: $args"
       fi
       pid=$ppid
       depth=$((depth + 1))
     done
 
-    note "no claude process in the ancestry of pid $START_PID (depth<=$MAX_DEPTH) — kind undetermined"
+    if [ -n "$terminal_evidence" ]; then
+      note "no print/SDK marker in reach -> terminal ($terminal_evidence)"
+      echo terminal
+      exit 0
+    fi
+
+    note "nothing recognized in the ancestry of pid $START_PID (depth<=$MAX_DEPTH) — kind undetermined"
     echo unknown
     exit 3
     ;;

@@ -191,7 +191,10 @@ arm the idle-cost teardown backstop.
 >
 > - **Determine your session kind at arm time**, mechanically — `scripts/session_kind.sh detect` in **this
 >   skill's** `scripts/` ships the check (`terminal` / `bridge`, or `unknown` on exit 3; it reads your own
->   process ancestry, with `--transcript <path>` as the harness's own second signal, `entrypoint: sdk-cli`).
+>   process ancestry, with `--transcript <path>` as the harness's own second signal, `entrypoint`). It
+>   resolves those two signals asymmetrically: a recognized print/SDK marker from either one wins, `terminal`
+>   requires a recognized interactive marker and no print/SDK marker anywhere, and an `entrypoint` value it
+>   has never been taught counts as nothing rather than as "not SDK, therefore terminal".
 >   It is a byte-identical copy of the one `launch-experiment` Step 7 consults — both layers arm a periodic
 >   wake, each skill installs independently, so each ships its own. **Treat `unknown` as `bridge`** — the
 >   timer-`Monitor` works in both kinds and a cron does not.
