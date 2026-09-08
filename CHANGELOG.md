@@ -7,10 +7,14 @@
   plus a one-shot test, zero ticks, all listed; downstream, executors sat 9.5 h on a permission prompt and 7 h
   on a budget question until the researcher looked. Crons are NOT globally dead (interactive executors took 57
   and 5 ticks the same days), so the fix is to know which kind of session you are in and to stop trusting the
-  listing. **New `launch-experiment/scripts/session_kind.sh`** (`detect` off the process ancestry, with the
+  listing. **New `session_kind.sh`** (`detect` off the process ancestry, with the
   transcript's `entrypoint` as the harness's own second signal; `classify` as the pure predicate) answers
   terminal-vs-bridge mechanically and prints `unknown` rather than guessing — which both skills treat as
-  `bridge`, since the fallback works in either kind and a cron does not. `launch-experiment` Step 7 now
+  `bridge`, since the fallback works in either kind and a cron does not. Both layers arm a periodic wake and
+  each skill installs independently, so it ships as a byte-identical copy in `launch-experiment/scripts/` and
+  `run-experiment/scripts/` rather than one skill reaching into the other's dir (same per-skill-copy
+  precedent as `sparse_worktree.sh` / `aar_profile_snapshot.sh`); `session_kind_smoke.sh` asserts the copies
+  match and re-runs its whole suite against the sibling. `launch-experiment` Step 7 now
   branches on it (terminal → the loop skill's standing cron; bridge → the SAME heartbeat prompt as a
   persistent unconditional-timer `Monitor`, verified to wake a bridge session with full context) and gates
   "supervision armed" on a **first-tick receipt** — one observed firing, with the receipt deadline armed as a

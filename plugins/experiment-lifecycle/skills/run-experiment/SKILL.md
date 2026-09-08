@@ -189,12 +189,12 @@ arm the idle-cost teardown backstop.
 > (anthropics/claude-code#59864, closed not-planned). Measured: ~30 job-hours of heartbeat crons plus a
 > one-shot test in one bridge session, zero firings, all of them listed the whole time. So:
 >
-> - **Determine your session kind at arm time**, mechanically — `launch-experiment`'s
->   `scripts/session_kind.sh detect` ships this check (`terminal` / `bridge`, or `unknown` on exit 3). Without
->   that skill dir on hand the check itself is two signals you can read directly: your own process ancestry
->   carrying a `claude` process in print/SDK mode (`--print` / `-p` / `--sdk-url`), and the harness
->   transcript's `entrypoint` field. **Treat `unknown` as `bridge`** — the timer-`Monitor` works in both kinds
->   and a cron does not.
+> - **Determine your session kind at arm time**, mechanically — `scripts/session_kind.sh detect` in **this
+>   skill's** `scripts/` ships the check (`terminal` / `bridge`, or `unknown` on exit 3; it reads your own
+>   process ancestry, with `--transcript <path>` as the harness's own second signal, `entrypoint: sdk-cli`).
+>   It is a byte-identical copy of the one `launch-experiment` Step 7 consults — both layers arm a periodic
+>   wake, each skill installs independently, so each ships its own. **Treat `unknown` as `bridge`** — the
+>   timer-`Monitor` works in both kinds and a cron does not.
 > - **`terminal`** → the `CronCreate` above, then **observe one tick within one period** before you mark the
 >   gate PASS, and record that receipt next to the job id in `CHECKLIST.md`. No tick by then means this
 >   session cannot arm an independent wake on that primitive, whatever `CronList` says: that is the

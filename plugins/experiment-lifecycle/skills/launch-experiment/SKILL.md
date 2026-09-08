@@ -488,8 +488,11 @@ deliberate stop):
 ## Reference
 
 - **Scripts** ship with this skill under `scripts/`: `launch_record.sh` (`preflight` + `bind-designer`) and
-  `session_kind.sh` (`detect` + `classify` — Step 7's terminal-vs-bridge check, also consulted by
-  `run-experiment`'s self-wake gate), each with a `*_smoke.sh` beside it as its behavior test.
+  `session_kind.sh` (`detect` + `classify` — Step 7's terminal-vs-bridge check), each with a `*_smoke.sh`
+  beside it as its behavior test. `run-experiment`'s self-wake gate needs the same check and ships its own
+  byte-identical copy of `session_kind.sh` (same per-skill-copy precedent as `sparse_worktree.sh`) — each
+  skill installs independently, so neither reaches into the other's dir; `session_kind_smoke.sh` here
+  asserts the two copies haven't drifted and re-runs its whole suite against the sibling copy.
 - **The brief this skill launches:** `design-experiment` (`DESIGN.md` + `START.md` + `CHECKLIST.md`, merged
   as a design-stage record).
 - **What the executor then runs:** `run-experiment` — also the home of `run_supervision_record.sh`,

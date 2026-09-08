@@ -11,12 +11,20 @@
 #                with exit 3 (never a defaulted `terminal`, which is the fail-open the incident was made of),
 #                and the walk is bounded by BOTH --max-depth and a seen-set so a looping ppid cannot hang the
 #                arming step it gates.
+#   packaging  — the run-experiment copy (its self-wake gate calls its own co-located one, same
+#                per-skill-copy precedent as sparse_worktree.sh / aar_profile_snapshot.sh) has not drifted,
+#                and the whole suite re-runs green against THAT copy — matching bytes is not the same claim
+#                as the copy a standalone run-experiment install actually executes behaving correctly.
 # `ps` is stubbed on PATH against a synthetic process table — offline, no real process inspected.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-S="$HERE/session_kind.sh"
+# SESSION_KIND_UNDER_TEST lets this file re-run itself against the sibling copy (see the tail); unset = the
+# canonical copy beside this smoke.
+S=${SESSION_KIND_UNDER_TEST:-$HERE/session_kind.sh}
 [ -f "$S" ] || { echo "FAIL: missing $S"; exit 1; }
+# Skipped when that skill dir isn't present (a single-skill symlink install of launch-experiment alone).
+RE_COPY="$HERE/../../run-experiment/scripts/session_kind.sh"
 
 TMP=$(mktemp -d) || { echo "FAIL: mktemp"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
@@ -141,5 +149,21 @@ for bad in "detect --pid" "detect --pid abc" "detect --max-depth 0" "detect --no
   if [ "$rc" = 2 ] && [ -z "$out" ]; then ok "usage-fail-closed [$bad]"
   else no "usage-fail-closed [$bad] (rc=$rc out='$out')"; fi
 done
+
+# ── packaging: the run-experiment copy must not drift, and must pass this same suite ───────────────────────
+# Only from the canonical pass (SESSION_KIND_UNDER_TEST unset), so the re-run below cannot recurse.
+if [ -z "${SESSION_KIND_UNDER_TEST:-}" ]; then
+  if [ ! -f "$RE_COPY" ]; then
+    ok "run-experiment copy absent (single-skill install) — packaging checks skipped"
+  else
+    cmp -s "$S" "$RE_COPY" && ok "launch-experiment and run-experiment copies are byte-identical" \
+      || no "launch-experiment and run-experiment copies have drifted (edit one, mirror the other)"
+    if SESSION_KIND_UNDER_TEST="$RE_COPY" bash "$0" >/dev/null 2>&1; then
+      ok "run-experiment copy passes the same suite"
+    else
+      no "run-experiment copy FAILED the suite (re-run: SESSION_KIND_UNDER_TEST=$RE_COPY bash $0)"
+    fi
+  fi
+fi
 
 [ "$fails" = 0 ] && { echo "session_kind smoke PASS"; exit 0; } || { echo "session_kind smoke FAIL"; exit 1; }
