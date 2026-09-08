@@ -176,7 +176,50 @@ arm the idle-cost teardown backstop.
 > and honors a `LOOK_AGAIN.md` marker (`last_looked` / `look_again_by`, generous). Session-scoped (wakes only its
 > creating session; auto-expires ~7 days — re-arm for longer runs). A tool-spawned Agent subagent cannot use this
 > independent wake path, so it is not a valid autonomous detached executor. A `run_in_background` Bash/Monitor
-> waiter is not a substitute for this either — see "Long-running process discipline" below.
+> *completion waiter* is not a substitute for this either — see "Long-running process discipline" below (the
+> unconditional-timer `Monitor` in the next paragraph is a different animal: a periodic wake with no condition
+> to be wrong about, armed as the tick itself rather than layered under it).
+>
+> **A job id is not a wake — the `CHECKLIST.md` self-wake gate passes on a FIRST-TICK RECEIPT, never on a
+> listing (automated-researcher#849).** `CronCreate` returns a job id, and `CronList` goes on listing the job,
+> in sessions where it will never fire. The kind that never fires is a **bridge** session — the ones the
+> Remote-Control host spawns (`claude rc --spawn worktree` and siblings), running as
+> `claude --print --sdk-url … --session-id cse_…`, transcript `entrypoint: sdk-cli`: print/SDK mode has no
+> long-lived REPL runtime to fire a scheduled job, so the schedule tools are advertised and silently no-op
+> (anthropics/claude-code#59864, closed not-planned). Measured: ~30 job-hours of heartbeat crons plus a
+> one-shot test in one bridge session, zero firings, all of them listed the whole time. So:
+>
+> - **Determine your session kind at arm time**, mechanically — `scripts/session_kind.sh detect` in **this
+>   skill's** `scripts/` ships the check (`terminal` / `bridge`, or `unknown` on exit 3; it reads your own
+>   process ancestry, with `--transcript <path>` as the harness's own second signal, `entrypoint`). It
+>   resolves those two signals asymmetrically: a recognized print/SDK marker from either one wins, `terminal`
+>   requires a recognized interactive marker and no print/SDK marker anywhere, and an `entrypoint` value it
+>   has never been taught counts as nothing rather than as "not SDK, therefore terminal".
+>   It is a byte-identical copy of the one `launch-experiment` Step 7 consults — both layers arm a periodic
+>   wake, each skill installs independently, so each ships its own. **Treat `unknown` as `bridge`** — the
+>   timer-`Monitor` works in both kinds and a cron does not.
+> - **`terminal`** → the `CronCreate` above, then **observe one tick within one period** before you mark the
+>   gate PASS, and record that receipt next to the job id in `CHECKLIST.md`. No tick by then means this
+>   session cannot arm an independent wake on that primitive, whatever `CronList` says: that is the
+>   substrate-can't-arm-one case above, so fall to the `bridge` form below and record which one you are
+>   actually running — do not let a listed-but-dead job stand as the gate's evidence.
+> - **`bridge`** → arm the same three-part tick as a persistent unconditional-timer `Monitor`
+>   (`while true; do sleep 720; echo "SELF-WAKE TICK"; done`), the tick's duties carried in its event text, and
+>   record its task id in `CHECKLIST.md` where the cron id would have gone. Its first tick is its own receipt
+>   (same primitive), so nothing further is needed to verify it. Reap it at close exactly like the cron.
+> - Either way it must stay an **unconditional periodic wake**, not a condition-triggered detector: a
+>   condition only fires for the failure someone anticipated, and the whole point of the tick is the ones
+>   nobody did.
+>
+> **Your own wake cannot cure a stuck turn — that is the launcher's layer, not yours.** A cron tick (or a
+> timer-`Monitor` tick) is delivered to *your* session, so it queues behind whatever turn you are in: mid
+> tool-call on a blocking poll, or sitting on a harness permission prompt, you are not idle and nothing you
+> armed will surface you. That is the #292 session-wedge case `launch-experiment` Step 7 exists to cover, and
+> it is why an executor showing zero ticks is not automatically a dead primitive — the same days the bridge
+> crons were silent, interactive executors took 57 and 5 ticks. It is also what the two long parks cost when
+> the launcher's own heartbeat was the dead one: 9.5 h on a permission prompt at a close commit, 7 h on a
+> budget question, each ended by a human looking. Never widen your own tick to compensate for that gap, and
+> never treat your self-wake as covering it.
 >
 > **Codex implementation (automated-researcher#223):** Codex has no independent recurring wake today — do NOT
 > substitute an in-process monitor and call it autonomous detached. Record `--supervision-mode
@@ -330,8 +373,13 @@ situational judgment call.
   backoff (`base * (0.5 + random())`) so retries don't re-synchronize. If a work unit spans several dependent
   API calls (e.g. a multi-step judge sequence), hold the permit for that whole unit's forward progress, not for
   any single call's failure-recovery path.
-- **A `run_in_background` Bash/Monitor waiter is a convenience layer, never the thing you rely on for
-  re-invocation (#461).** These waiters are not guaranteed to survive across turns or context events — a real
+- **A `run_in_background` Bash/Monitor *completion waiter* is a convenience layer, never the thing you rely on
+  for re-invocation (#461).** (Scope note, #849: this is about a waiter layered UNDER your standing waker to
+  poll some job's condition faster than the tick. It is not about the unconditional-timer `Monitor` that IS
+  your standing waker in a bridge session — there the `Monitor` is the tick, armed and receipted as the
+  self-wake section above requires, and the rule below applies to it the same way it applies to a cron: a tick
+  that goes quiet is a signal to re-verify the remote job directly and re-arm, never evidence the job died.)
+  These waiters are not guaranteed to survive across turns or context events — a real
   run saw ALL currently-running background waiters, including unrelated ones from long-finished earlier phases,
   killed in a single sweep with no explicit `TaskStop` and no visible trigger, twice in one session. The remote
   job itself was unaffected both times — only the local poller died — so treat a killed waiter as a signal to
@@ -928,7 +976,8 @@ upstream of everything in this ordering.
   from the research repo cannot ride this PR — land it its own way and pass `--page-source-external <url>` so
   the gate records where it went instead of blocking.
 - **Clear the self-wake.** Once the record exists, is landed via `log-experiment`, and compute is torn down: delete this
-  experiment's recurring waker and its look-again marker. A finished run with a still-firing waker is a stale-waker
+  experiment's recurring waker and its look-again marker — the cron (`CronList`) or the timer-`Monitor` task
+  (`TaskList`), whichever form you armed and recorded. A finished run with a still-firing waker is a stale-waker
   footgun.
 - **Close the run-supervision record — the post-audit FINALIZER (ordering is load-bearing).** Clearing
   desired-active is **not** an early Close step and **not** the audited gate — the checklist gate verifies *close

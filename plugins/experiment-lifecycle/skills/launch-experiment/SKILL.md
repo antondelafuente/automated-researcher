@@ -186,7 +186,8 @@ whole point: it tests the brief's self-sufficiency on every real run, and it sep
 execution. *How* you spawn it is the instance's implementation of the contract:
 
 - **Autonomous detached run requirement:** the executor substrate must be able to arm its **own independent
-  recurring self-wake** and record the waker/backstop id in `CHECKLIST.md`. A controller-held wake, or a
+  recurring self-wake** and record the waker/backstop id — plus its first-tick receipt, since a returned id is
+  not a wake (#849) — in `CHECKLIST.md`. A controller-held wake, or a
   monitor used after the executor parks, does not satisfy the autonomous detached-run contract. A blocking
   watcher that keeps the executor turn alive is controller-supervised, not autonomous detached; pair it with
   the idle-cost teardown backstop if compute bills.
@@ -340,11 +341,37 @@ For the session-wedge duty, arm at launch, in this order:
    through pane text, so this cadence check should also poll that. See `references/CODEX_SUPERVISION.md` in
    `run-experiment` for the full contract, #223.)
 
-   > **Claude Code implementation — invoke the loop skill; never a `ScheduleWakeup` chain
-   > (automated-researcher#658).** Arm this layer by explicitly invoking the loop skill (`/loop 45m
-   > <heartbeat prompt>`), which registers a **standing cron** (`CronCreate`): it fires until deleted or
-   > expired, with no per-tick re-arm step to lose. **Record the returned cron job id** with your launch
-   > notes, and delete the job when the run is reaped. Do **NOT** implement this duty as a `ScheduleWakeup`
+   > **Claude Code implementation — a STANDING schedule, and WHICH primitive depends on your session kind
+   > (automated-researcher#658, #849).** Two primitives can carry this duty. Which one actually fires is a
+   > property of the session you are launching FROM, so settle it mechanically before you arm anything:
+   > `scripts/session_kind.sh detect` (ships with this skill) prints `terminal` or `bridge` off your own
+   > process ancestry, with `--transcript <path>` as the harness's own second signal (`entrypoint`). It
+   > resolves the two signals asymmetrically, because the two answers are not equally costly when wrong: a
+   > recognized print/SDK marker from EITHER signal wins, `terminal` needs a recognized interactive marker and
+   > no print/SDK marker anywhere, and a signal value it has never been taught (a new `entrypoint` spelling)
+   > counts as nothing rather than as "not SDK, therefore terminal". So it prints `unknown` (exit 3) rather
+   > than guessing — **treat `unknown` as `bridge`**, because the timer-`Monitor` below works in BOTH kinds
+   > and a cron does not.
+   >
+   > - **`terminal`** → invoke the loop skill (`/loop 45m <heartbeat prompt>`), which registers a **standing
+   >   cron** (`CronCreate`): it fires until deleted or expired, with no per-tick re-arm step to lose.
+   >   **Record the returned cron job id** with your launch notes, and delete the job when the run is reaped.
+   > - **`bridge`** → the sessions the Remote-Control host spawns on demand (`claude rc --spawn worktree` and
+   >   its siblings), which run as `claude --print --sdk-url … --session-id cse_…`. **`CronCreate` silently
+   >   no-ops there**: print/SDK mode has no long-lived REPL runtime to fire a scheduled job
+   >   (anthropics/claude-code#59864, closed not-planned). The harness still returns a job id and `CronList`
+   >   still lists it, so *a job id is not a heartbeat*. Arm the SAME heartbeat prompt as a persistent
+   >   unconditional-timer `Monitor` instead — `while true; do sleep 2700; echo "HEARTBEAT TICK"; done`, the
+   >   heartbeat prompt carried in its description/event text so the woken session knows what to do — and
+   >   **record its task id** where the cron id would have gone. Functionally this IS the loop skill: same
+   >   session, same cadence, same prompt, same full context; only the primitive differs. (Verified
+   >   2026-09-08: two ticks landed in a bridge session where three heartbeat crons and a one-shot test had
+   >   been silent for ~30 job-hours.)
+   > - Either way it stays an **unconditional periodic wake** — "take a peek", not a condition-triggered
+   >   detector. A conditional monitor only fires on the condition someone thought of; the periodic peek is
+   >   what catches the rest, which is why (1) is the second layer and never a substitute for this one.
+   >
+   > Do **NOT** implement this duty as a `ScheduleWakeup`
    > dynamic wakeup: those are self-re-arming chains where each firing must schedule the next, so one broken
    > link — an interrupted turn, a user message consuming the turn before the re-arm — ends supervision
    > **silently**. That is a measured incident, not a hypothetical (2026-08-02, the
@@ -364,15 +391,37 @@ For the session-wedge duty, arm at launch, in this order:
 
 **"Supervision armed" is a checkable state, not a claim (automated-researcher#658).** On a substrate with a
 scheduling primitive, launch is not complete until BOTH layers demonstrably exist and both ids are recorded
-with the launch notes: the per-pane monitor (1) and the heartbeat cron (2). Verify against the substrate's
-own listing rather than your memory of having armed them — Claude Code: `CronList` for the heartbeat job id,
-`TaskList` for the monitor — so a retro can check supervision mechanically instead of trusting prose. Either
+with the launch notes: the per-pane monitor (1) and the periodic heartbeat (2). Verify against the substrate's
+own listing rather than your memory of having armed them — Claude Code: `CronList` for a heartbeat cron job
+id, `TaskList` for the monitor and for a timer-`Monitor` heartbeat — so a retro can check supervision
+mechanically instead of trusting prose. Either
 one missing = go arm it before calling launch done. If you delegated the heartbeat to a separate watchdog
-session (3), that session owns the cron and reports its id back to you (a cron wakes only its creating
-session, so it is that session's `CronList` the id lives in) — what you record is unchanged. A substrate with
+session (3), that session owns the periodic layer and reports its id back to you (a cron wakes only its
+creating session, so it is that session's `CronList` the id lives in) — including the kind check and the
+receipt below, run in ITS session rather than yours, since that is the session the tick has to fire in; what
+you record is unchanged. A substrate with
 no scheduling primitive (Codex today) has no cron id to record: say so explicitly at launch and fall back to
 its documented manual cadence above, rather than reporting supervision armed on the strength of the monitor
 alone.
+
+**And on the periodic layer, LISTED is not the check — one observed FIRING is (automated-researcher#849).**
+`CronList` presence proves the job was accepted, not that this session's runtime will ever run it: the #849
+incident is exactly a `CronList` that kept listing three heartbeat jobs across ~30 job-hours in a bridge
+session while zero ticks fired, with two executors parked 9.5 h and 7 h downstream. So the periodic layer
+counts as armed only on a **first-tick receipt** — one tick actually observed within one period:
+
+- At arm time, record the **receipt deadline** (arm time + one period + slack) with the job/task id in your
+  launch notes. An id with no deadline beside it is the old, falsely-passing check.
+- Make the deadline observable instead of hoping to be woken by the thing you are testing: arm the receipt as
+  a **one-shot** on the same `Monitor` primitive the pane watcher in (1) already uses (`sleep <period+slack>;
+  echo "NO FIRST TICK — heartbeat unverified"`). This is an *arming check* that ends at the first
+  observation, not a third supervision layer — nothing watches it, and it stops either way.
+- **First tick observed by the deadline** → note the receipt, stop the one-shot, supervision armed.
+- **Receipt one-shot fires first** → the scheduling primitive is dead in this session whatever `CronList`
+  says. Re-arm the heartbeat as the timer-`Monitor` above, record *that* task id and *what was missing*, and
+  only then call supervision armed.
+- A `bridge` heartbeat needs no separate one-shot: the timer-`Monitor`'s own first `HEARTBEAT TICK` is its
+  receipt, on the same primitive, so a second one-shot would only re-test what just answered.
 
 ## Step 8 — You are now designer-of-record (until the run closes)
 
@@ -427,10 +476,12 @@ future turn of this session, including every heartbeat tick.
 What you armed, you tear down. When the run reaches its terminal state (the executor's DONE/BLOCKED, or a
 deliberate stop):
 
-- **Stop the pane monitor** you recorded in Step 7 (1) and **delete the heartbeat cron** you recorded in
-  Step 7 (2) — a cron nobody deleted keeps waking a session about a finished run, and a monitor nobody
+- **Stop the pane monitor** you recorded in Step 7 (1) and **tear down the periodic heartbeat** you recorded
+  in Step 7 (2) — delete the cron, or stop the timer-`Monitor` task, whichever you actually armed, plus any
+  first-tick receipt one-shot still pending. A cron nobody deleted keeps waking a session about a finished
+  run, an unstopped timer-`Monitor` does the same on the other primitive, and a monitor nobody
   stopped is the "supervision armed" state lying in the other direction. Verify against the substrate's own
-  listing, same bar as arming them.
+  listing (`CronList` **and** `TaskList`), same bar as arming them.
 - **The executor's own close finalizers stay the executor's** — the run-supervision record `close`/`stop`,
   `reap_worktree.sh` on the run worktree, the pod-lease teardown: all are `CHECKLIST.md` gates it resolves
   with evidence. Your reap is the supervision machinery, plus any launch-side scratch of your own.
@@ -440,8 +491,12 @@ deliberate stop):
 
 ## Reference
 
-- **Scripts** ship with this skill under `scripts/`: `launch_record.sh` (`preflight` + `bind-designer`), with
-  `launch_record_smoke.sh` as its behavior test.
+- **Scripts** ship with this skill under `scripts/`: `launch_record.sh` (`preflight` + `bind-designer`) and
+  `session_kind.sh` (`detect` + `classify` — Step 7's terminal-vs-bridge check), each with a `*_smoke.sh`
+  beside it as its behavior test. `run-experiment`'s self-wake gate needs the same check and ships its own
+  byte-identical copy of `session_kind.sh` (same per-skill-copy precedent as `sparse_worktree.sh`) — each
+  skill installs independently, so neither reaches into the other's dir; `session_kind_smoke.sh` here
+  asserts the two copies haven't drifted and re-runs its whole suite against the sibling copy.
 - **The brief this skill launches:** `design-experiment` (`DESIGN.md` + `START.md` + `CHECKLIST.md`, merged
   as a design-stage record).
 - **What the executor then runs:** `run-experiment` — also the home of `run_supervision_record.sh`,
