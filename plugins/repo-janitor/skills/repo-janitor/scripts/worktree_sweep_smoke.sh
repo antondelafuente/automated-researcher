@@ -50,6 +50,18 @@
 #     rejected up front so the delete scope stays statically bounded
 #   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
 #     report's section both name what was actually removed, and a tier-3 entry never appears there
+#   - --evict-verified, the CONTENT-keyed eviction leg (automated-researcher#856): bytes proven at the
+#     artifact store reach tier1 and are really unlinked (under a store layout that does NOT mirror the
+#     local path), a store-exposed hash that matches says so while a DISAGREEING hash on the same
+#     name+size is kept, and a size disagreement / absent object / failed listing / file directly under
+#     the root / live owner's file are all kept and survive a real --reap-tier1; a sub---min-size file, a
+#     symlink and everything under `registry/` of a git tree are never even classified while a plain
+#     `registry/` dir outside a checkout still evicts; a hardlinked pair is ONE entry that unlinks every
+#     link and counts its bytes once while an out-of-scope link keeps the group; --dry-run evicts nothing;
+#     the `reaped`/`## Reclaimed` accounting splits verified-on-store from tier-1 bytes; and every
+#     incomplete/unsafe invocation is rejected up front. The store is stood in for through the
+#     REPO_JANITOR_STORE_LIST_CMD seam (rclone is not reachable on a CI runner, and the contract under
+#     test is what the sweep does with the LISTING)
 # -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
 # `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
 # vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
@@ -1093,6 +1105,199 @@ for bad in "relative/*-repro.*" "/tmp/*/inner-*" "/*" "$SCRATCH/repro/"; do
     no "scratch: unsafe --scratch-glob '$bad' was accepted"
   else
     ok "scratch: unsafe --scratch-glob '$bad' rejected"
+  fi
+done
+
+# --- content-verified eviction (--evict-verified, automated-researcher#856) ---------------------------
+# The artifact store is stood in for through the REPO_JANITOR_STORE_LIST_CMD seam, which is exactly why
+# that seam exists: `rclone` is neither installed nor reachable on a CI runner, and this leg's whole
+# contract is what the sweep does with the LISTING — a match, a size disagreement, a hash disagreement, an
+# absent object, a failed listing. The fake prints `rclone lsjson --recursive --files-only --hash`-shaped
+# JSON for the prefix it is handed, so every assertion below exercises the real parser and the real bar.
+#
+# A DEDICATED repo: every eviction run below passes --reap-tier1 for real, and $REPO's worktree/scratch
+# fixtures are consumed by the assertions above — reaping them here would make those tests order-dependent.
+EVREPO="$TMP/evrepo"
+git init -q -b main "$EVREPO"
+g "$EVREPO" config user.email t@example.com
+g "$EVREPO" config user.name "smoke"
+echo hi > "$EVREPO/f.txt"; g "$EVREPO" add f.txt; g "$EVREPO" commit -q -m init
+
+EV="$TMP/evict"; STORE_DB="$TMP/storedb"; mkdir -p "$EV" "$STORE_DB"
+export STORE_DB
+STORE_CMD="$TMP/fake-store.sh"
+cat > "$STORE_CMD" <<'EOS'
+#!/usr/bin/env bash
+# stands in for `rclone lsjson --recursive --files-only --hash <prefix>`: prints the fixture listing for
+# the prefix it is handed, or fails loudly for a prefix marked as a listing failure. An unknown prefix is
+# an empty array — the store genuinely holding nothing there, which must NOT read the same as a failure.
+prefix=$1
+f="$STORE_DB/$(printf '%s' "$prefix" | tr '/:' '__')"
+if [ -f "$f.fail" ]; then echo "fake store: listing refused" >&2; exit 7; fi
+if [ -f "$f.json" ]; then cat "$f.json"; else echo '[]'; fi
+EOS
+chmod +x "$STORE_CMD"
+STORE="r2:mats/experiments"
+# store_put <top-level dir> <object path under the prefix> <size> [hash-json]
+store_put(){
+  local key hashes=${4:-}
+  key=$(printf '%s' "$STORE/$1" | tr '/:' '__')
+  [ -n "$hashes" ] || hashes='{}'
+  printf '[{"Path":"%s","Name":"%s","Size":%s,"IsDir":false,"Hashes":%s}]' \
+    "$2" "${2##*/}" "$3" "$hashes" > "$STORE_DB/$key.json"
+}
+mkbig(){ mkdir -p "$(dirname "$1")"; head -c "${2:-2000000}" /dev/urandom > "$1"; }
+md5of(){ python3 -c "
+import hashlib, sys
+h = hashlib.md5()
+with open(sys.argv[1], 'rb') as fh:
+    for chunk in iter(lambda: fh.read(1 << 20), b''):
+        h.update(chunk)
+print(h.hexdigest())
+" "$1"; }
+sweep_evict(){ # extra args -> stdout is the JSON report
+  REPO_JANITOR_STORE_LIST_CMD="$STORE_CMD" python3 "$SWEEP" --repo "$EVREPO" \
+    --evict-verified "$EV" --store "$STORE" --min-size 1M "$@" 2>/dev/null
+}
+
+# 1. the #856 case itself: bytes already at the store, under a store layout that does NOT mirror the local
+#    path (`adapters/probe.tar` locally, `target_probes/probe.tar` at the store) — a path-shaped lookup
+#    would have found nothing while the bytes were demonstrably there.
+mkbig "$EV/exp-match/adapters/probe.tar"
+store_put exp-match "target_probes/probe.tar" "$(stat -c%s "$EV/exp-match/adapters/probe.tar")"
+# 2. same basename at the store, DIFFERENT size -> not these bytes
+mkbig "$EV/exp-size/big.tar"
+store_put exp-size "x/big.tar" "$(( $(stat -c%s "$EV/exp-size/big.tar") + 1 ))"
+# 3. nothing at the store under that prefix at all
+mkbig "$EV/exp-none/orphan.tar"
+# 4. the store exposes a hash, and it MATCHES
+mkbig "$EV/exp-hash/hashed.tar"
+store_put exp-hash "y/hashed.tar" "$(stat -c%s "$EV/exp-hash/hashed.tar")" \
+  "{\"md5\":\"$(md5of "$EV/exp-hash/hashed.tar")\"}"
+# 5. the store exposes a hash and it DISAGREES while name+size match — the collision case name+size alone
+#    would wave through. A hash the store offers makes a hash match REQUIRED.
+mkbig "$EV/exp-badhash/collide.tar"
+store_put exp-badhash "z/collide.tar" "$(stat -c%s "$EV/exp-badhash/collide.tar")" \
+  '{"md5":"00000000000000000000000000000000"}'
+# 6. the listing itself fails -> UNKNOWN, never "the store does not have this"
+mkbig "$EV/exp-fail/unlisted.tar"
+touch "$STORE_DB/$(printf '%s' "$STORE/exp-fail" | tr '/:' '__').fail"
+# 7. below --min-size, even with a perfectly matching object: not the leak, never considered
+mkbig "$EV/exp-match/small.bin" 1024
+# 8. `registry/` of a GIT TREE is the durable record and is never touched; the same directory NAME outside
+#    a git tree is not the record and is fair game — the veto is git-tree-keyed, not name-keyed.
+mkbig "$EV/exp-reg/tree/registry/e1/rec.tar"
+git init -q "$EV/exp-reg/tree"
+mkdir -p "$EV/exp-reg/plain/registry"
+cp "$EV/exp-reg/tree/registry/e1/rec.tar" "$EV/exp-reg/plain/registry/rec.tar"
+store_put exp-reg "recs/rec.tar" "$(stat -c%s "$EV/exp-reg/tree/registry/e1/rec.tar")"
+# 9. a live owner vetoes eviction outright, whatever the store says
+mkbig "$EV/exp-live/adapters/probe.tar"
+store_put exp-live "target_probes/probe.tar" "$(stat -c%s "$EV/exp-live/adapters/probe.tar")"
+# 10. a hardlinked pair, both links in scope and both verifiable -> ONE tier-1 entry, both links unlinked,
+#     the bytes counted ONCE (unlinking one of two links frees nothing at all).
+mkbig "$EV/exp-hl/a/big.tar"
+mkdir -p "$EV/exp-hl/b"; ln "$EV/exp-hl/a/big.tar" "$EV/exp-hl/b/big.tar"
+store_put exp-hl "hl/big.tar" "$(stat -c%s "$EV/exp-hl/a/big.tar")"
+# 11. a link this sweep CANNOT see (outside every scanned root) -> kept: the unlink would free nothing
+#     while destroying a path whose sibling is unaccounted for.
+mkbig "$EV/exp-hlout/big.tar"
+ln "$EV/exp-hlout/big.tar" "$TMP/outside-link.tar"
+store_put exp-hlout "hl/big.tar" "$(stat -c%s "$EV/exp-hlout/big.tar")"
+# 12. a symlink is never a candidate, however verifiable its target looks
+ln -s "adapters/probe.tar" "$EV/exp-match/probe-link.tar"
+# 13. a file directly under the root has no top-level dir to key the store prefix on -> kept
+mkbig "$EV/loose.tar"
+
+REPO_JANITOR_STORE_LIST_CMD="$STORE_CMD" REPO_JANITOR_LIVE_SESSIONS_CMD="echo exp-live" python3 "$SWEEP" \
+  --repo "$EVREPO" --worktree-root "$EV" --evict-verified "$EV" --store "$STORE" --min-size 1M --json \
+  2>/dev/null > "$TMP/evict-live.json"
+has_path_in "d['tier3']" "$EV/exp-live/adapters/probe.tar" < "$TMP/evict-live.json" && ok "evict: a live owner's tree is never evicted from (tier3)" || no "evict: live-owner veto must route to tier3"
+has_path_in "d['tier1']" "$EV/exp-live/adapters/probe.tar" < "$TMP/evict-live.json" && no "evict: a live owner's file must never reach tier1" || ok "evict: a live owner's file never reaches tier1"
+reason_has "d['tier3']" "$EV/exp-live/adapters/probe.tar" "nothing inside a live" < "$TMP/evict-live.json" && ok "evict: the live-owner reason names the liveness" || no "evict: live-owner reason must name the liveness"
+
+sweep_evict --json > "$TMP/evict.json"
+has_path_in "d['tier1']" "$EV/exp-match/adapters/probe.tar" < "$TMP/evict.json" && ok "evict: bytes proven at the store reach tier1 (store layout need not mirror the local path)" || no "evict: a store-verified file must reach tier1"
+reason_has "d['tier1']" "$EV/exp-match/adapters/probe.tar" "$STORE/exp-match/target_probes/probe.tar" < "$TMP/evict.json" && ok "evict: the tier-1 reason names the store object that proves the bytes" || no "evict: tier-1 reason must name the store object"
+has_path_in "d['tier1']" "$EV/exp-hash/hashed.tar" < "$TMP/evict.json" && ok "evict: a store-exposed hash that matches reaches tier1" || no "evict: a matching hash must reach tier1"
+reason_has "d['tier1']" "$EV/exp-hash/hashed.tar" "md5-verified" < "$TMP/evict.json" && ok "evict: the reason states the verification was hash-based when the store exposed one" || no "evict: reason must state md5-verified"
+for keep in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar"; do
+  has_path_in "d['tier3']" "$keep" < "$TMP/evict.json" && ok "evict: unverified '$(basename "$(dirname "$keep")")/$(basename "$keep")' is kept and reported (tier3)" || no "evict: unverified $keep must be reported in tier3"
+  has_path_in "d['tier1']" "$keep" < "$TMP/evict.json" && no "evict: unverified $keep must never reach tier1" || ok "evict: unverified '$(basename "$(dirname "$keep")")/$(basename "$keep")' never reaches tier1"
+done
+reason_has "d['tier3']" "$EV/exp-badhash/collide.tar" "every hash the store exposes for it disagrees" < "$TMP/evict.json" && ok "evict: a name+size collision whose hash disagrees is kept, and the reason says why" || no "evict: hash-disagreement reason missing"
+reason_has "d['tier3']" "$EV/exp-fail/unlisted.tar" "store prefix could not be listed" < "$TMP/evict.json" && ok "evict: a failed store listing is UNKNOWN, not an empty store" || no "evict: failed-listing reason missing"
+# the sub-threshold file and everything under `registry/` of a git tree are not just un-reaped, they are
+# never CONSIDERED — silent, in no tier at all
+all_paths < "$TMP/evict.json" | grep -qxF "$EV/exp-match/small.bin" && no "evict: a file below --min-size must not be classified at all" || ok "evict: a file below --min-size is silent"
+all_paths < "$TMP/evict.json" | grep -qxF "$EV/exp-reg/tree/registry/e1/rec.tar" && no "evict: registry/ of a git tree must never be classified" || ok "evict: registry/ of a git tree is never even considered"
+all_paths < "$TMP/evict.json" | grep -qxF "$EV/exp-match/probe-link.tar" && no "evict: a symlink must never be a candidate" || ok "evict: a symlink is never a candidate"
+has_path_in "d['tier1']" "$EV/exp-reg/plain/registry/rec.tar" < "$TMP/evict.json" && ok "evict: the registry veto is git-tree-keyed, not name-keyed (a plain registry/ dir is still evictable)" || no "evict: a non-git registry/ dir must still be evictable"
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+hl = [e for e in d['tier1'] if e['path'].startswith('$EV/exp-hl/')]
+assert len(hl) == 1, hl                                    # ONE entry per inode, not one per link
+assert len(hl[0]['action']['commands']) == 2, hl           # ...planning BOTH links for the unlink
+assert 'hardlink sibling' in hl[0]['reason'], hl
+assert d['reclaimed']['evictable_bytes'] > 0, d['reclaimed']
+" < "$TMP/evict.json" && ok "evict: a hardlinked pair is one tier-1 entry that unlinks every link to the inode" || no "evict: hardlink grouping is wrong"
+reason_has "d['tier3']" "$EV/exp-hlout/big.tar" "were found under the scanned root(s)" < "$TMP/evict.json" && ok "evict: an inode with a link outside the scanned roots is kept (the unlink would free nothing)" || no "evict: out-of-scope hardlink must be kept with that reason"
+# report-only says what a reap WOULD reclaim — the sensor half of #856
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['reaped'] == [], d['reaped']
+assert d['reclaimed']['verified_on_store_bytes'] == 0, d['reclaimed']
+assert d['reclaimed']['evictable_bytes'] >= 6_000_000, d['reclaimed']
+" < "$TMP/evict.json" && ok "evict: report-only deletes nothing and states the evictable total" || no "evict: report-only accounting is wrong"
+sweep_evict | grep -q "verified-on-store is evictable now" && ok "evict: the human report states the evictable total in report-only mode" || no "evict: human report must state the evictable total"
+
+# --dry-run touches nothing
+sweep_evict --reap-tier1 --dry-run > /dev/null
+[ -f "$EV/exp-match/adapters/probe.tar" ] && ok "evict: --dry-run evicts nothing" || no "evict: --dry-run deleted a file"
+
+# the real thing
+sweep_evict --reap-tier1 --json > "$TMP/evict-reaped.json"
+[ -f "$EV/exp-match/adapters/probe.tar" ] && no "evict: a store-verified file was NOT evicted by --reap-tier1" || ok "evict: --reap-tier1 really evicts a store-verified file"
+[ -f "$EV/exp-hash/hashed.tar" ]           && no "evict: a hash-verified file was NOT evicted" || ok "evict: --reap-tier1 really evicts a hash-verified file"
+[ -f "$EV/exp-hl/a/big.tar" ] || [ -f "$EV/exp-hl/b/big.tar" ] && no "evict: a hardlink sibling survived its inode's eviction (frees nothing)" || ok "evict: every link to an evicted inode is unlinked"
+for survivor in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar" "$EV/exp-match/small.bin" "$EV/exp-reg/tree/registry/e1/rec.tar"; do
+  [ -f "$survivor" ] && ok "evict: '$(basename "$(dirname "$survivor")")/$(basename "$survivor")' survives a real --reap-tier1" || no "evict: $survivor was DELETED without being verified at the store"
+done
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+ev = [r for r in d['reaped'] if r['outcome'] == 'evicted']
+assert ev, d['reaped']
+assert all(r['kind'] == 'evict' and r['bytes'] > 0 and 'r2:mats/experiments/' in r['detail'] for r in ev), ev
+# the inode's bytes are credited ONCE, not once per link
+hl = [r for r in ev if r['path'].startswith('$EV/exp-hl/')]
+assert len(hl) == 1 and hl[0]['bytes'] == 2000000, hl
+assert d['reclaimed']['verified_on_store_bytes'] == sum(r['bytes'] for r in ev), d['reclaimed']
+assert d['reclaimed']['tier1_bytes'] == 0, d['reclaimed']
+" < "$TMP/evict-reaped.json" && ok "evict: the 'reaped' records name each eviction, its store object and its reclaimed bytes" || no "evict: eviction reap records are wrong"
+sweep_evict --reap-tier1 2>/dev/null | grep -q "verified-on-store, .* tier-1" && no "evict: nothing is left to evict on a second pass, so no reclaimed line is expected" || ok "evict: a second pass finds nothing left to evict"
+
+# tier-1 worktree/scratch reaps carry their own byte figure, so the summary can split the two legs
+SC2="$TMP/scratch2"; mkdir -p "$SC2"
+mkbig "$SC2/leftover-repro.zzz/blob.bin"
+touch -d "$OLD_DATE" "$SC2/leftover-repro.zzz/blob.bin"; touch -d "$OLD_DATE" "$SC2/leftover-repro.zzz"
+python3 "$SWEEP" --repo "$EVREPO" --scratch-glob "$SC2/*-repro.*" --reap-tier1 --json 2>/dev/null > "$TMP/evict-tier1bytes.json"
+python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['reclaimed']['tier1_bytes'] >= 2_000_000, d['reclaimed']
+assert d['reclaimed']['verified_on_store_bytes'] == 0, d['reclaimed']
+" < "$TMP/evict-tier1bytes.json" && ok "evict: the summary splits reclaimed bytes into verified-on-store and tier-1 legs" || no "evict: tier-1 reclaimed bytes are not accounted"
+
+# argument validation — --store is the whole safety argument, so the mode may never run without one
+for bad in "--evict-verified $EV" "--store $STORE" "--evict-verified relative/dir --store $STORE" "--evict-verified / --store $STORE" "--evict-verified $EV/../evict --store $STORE" "--evict-verified $EV --store $STORE --min-size bogus" "--evict-verified '' --store $STORE"; do
+  # shellcheck disable=SC2086
+  if python3 "$SWEEP" --repo "$EVREPO" $bad >/dev/null 2>&1; then
+    no "evict: unsafe/incomplete invocation '$bad' was accepted"
+  else
+    ok "evict: unsafe/incomplete invocation '$bad' rejected"
   fi
 done
 

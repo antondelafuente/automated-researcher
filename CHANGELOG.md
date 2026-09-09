@@ -1,3 +1,30 @@
+- repo-janitor 0.5.0 (2026-09-09): the box is a CACHE of the artifact store, so the janitor now has one
+  **content-keyed** leg that needs no lifecycle knowledge at all (#856). Every reaper so far (#792/#793,
+  #804, #842) is lifecycle-keyed — it deletes what a known close path registered, at a known step, under a
+  known path shape — and that cannot converge: the population of workflow variants grows faster than the
+  rule set. Third disk-full incident in four days (2026-09-06 95%, 09-06 evening 92%, 09-09 94%), each from
+  a class no existing rule reached; measured 2026-09-09, **41.5 GB** of Tinker adapter tars in six *closed*
+  exploratory runs, every byte already on R2 under `experiments/<exp>/target_probes/` — verified by
+  name+size and then deleted **by hand**, because the exploratory path registers no close so nothing on the
+  box considered them finished. New `worktree_sweep.py --evict-verified <root> --store <rclone path>
+  [--min-size 50M]` asks the content question instead: for every regular file at/above `--min-size` under a
+  scratch root, is there an object under `<store>/<its top-level dir>/**` with the same basename and exact
+  size — and the same **hash** when the backend exposes one this sweep can recompute (S3's ETag md5, or the
+  `X-Amz-Meta-Md5chksum` rclone writes for a multipart upload), in which case a hash match becomes
+  *required* rather than optional. A match is tier 1 with `kind: evict`, and `--reap-tier1` unlinks it,
+  logging `EVICTED <path> -> <store object>`; no match, a disagreeing hash, an unreadable file, or a failed
+  store listing keeps and reports it. **Age bar 0** — a file whose bytes are proven durable is a cache
+  entry at any age, and the recovery is `rclone copy` of the object named in the report — with the
+  **live-owner veto the only hold**, reused verbatim from the worktree tiers. `registry/` of a git tree and
+  every `.git` dir are pruned from the walk (git-tree-keyed, not name-keyed); symlinks are never
+  candidates; **hardlinks resolve per inode** (unlinking one of N links frees nothing, so an inode goes
+  only when every link was found *and* verified, and its bytes count once). The store listing goes through
+  a new `REPO_JANITOR_STORE_LIST_CMD` seam defaulting to `rclone lsjson --recursive --files-only --hash`,
+  listed once per prefix per sweep, failures included. The sweep also gained byte accounting: a
+  `## Reclaimed` line / `reclaimed` JSON key reading "reclaimed X GB verified-on-store, Y GB tier-1", split
+  by leg on purpose — the tier-1 figure is what the lifecycle reapers still find, the verified-on-store
+  figure is what they missed. Backstop, not replacement: it makes their coverage gaps a delay, not a leak.
+
 - experiment-lifecycle 0.11.0 (2026-09-08): both supervision layers stop resting on a scheduled job nobody
   ever saw fire (#849). In a **bridge** session — the kind the Remote-Control host spawns (`claude rc --spawn
   worktree`), running as `claude --print --sdk-url … --session-id cse_…` — `CronCreate` is advertised and
