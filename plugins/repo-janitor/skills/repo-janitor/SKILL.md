@@ -303,7 +303,11 @@ reclaimed bytes. **No match, a hash that disagrees, an unreadable local file, or
   so nothing beneath them is even stat'd. The veto is keyed on the git marker's *name* being present
   (never on whether it resolves — same discipline as the scratch guards), and it is **git-tree-keyed, not
   name-keyed**: a directory that merely happens to be called `registry/` outside any checkout is ordinary
-  scratch.
+  scratch. That is the whole git-side veto, deliberately: a *tracked* file elsewhere in a checkout could in
+  principle be evicted (leaving the worktree dirty until `git restore`), but a file whose bytes are proven
+  at the store and also committed to a branch is durable twice over, so widening the veto to whole
+  checkouts would cost the leg most of what it was written to reach — executor scratch lives inside
+  worktrees.
 - **Symlinks are never candidates** and the walk never follows one, so a link into a live tree can neither
   be evicted nor drag its target's bytes into the scan. Only regular files are considered.
 - **Hardlinks are resolved per inode, not per path.** Unlinking one of N links frees *nothing*, so an inode
