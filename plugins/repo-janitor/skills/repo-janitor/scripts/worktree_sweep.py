@@ -30,7 +30,8 @@ knowledge at all: every rule above is LIFECYCLE-KEYED (it deletes what a known c
 known step, under a known path shape), and the population of workflow variants grows faster than that rule
 set can. The box is a CACHE of the artifact store, so this leg asks one content question per file — "are
 these exact bytes already at the store?" — and treats a file that is proven there as a cache entry: age bar
-0, live-owner veto the only hold, everything else fail-closed to "keep, report".
+0, live-owner veto the only hold (so that veto must hold BY CONSTRUCTION — no derivable owner, or no wired
+liveness seam, keeps the file), everything else fail-closed to "keep, report".
 
 STATE: none. Every sweep recomputes every fact from scratch — the git state IS the state (#364 pinned
 out-of-scope: no database of past reports). DELETION: `--reap-tier1` performs it, but this flag is a
@@ -46,6 +47,9 @@ Seams (mirroring gpu-job's GPU_JOB_*_CMD provider-seam pattern — instance-supp
   REPO_JANITOR_LIVE_SESSIONS_CMD   "<cmd>" -> prints one LIVE session id per line. Unset -> empty set ->
                                     every owner reads as not-live (fail-safe: nothing is silently routed to
                                     tier 2 without a wired seam; it all surfaces to the researcher instead).
+                                    The --evict-verified leg is the deliberate exception (#859): the veto is
+                                    its ONLY hold, so an unset seam — or a candidate with no derivable owner
+                                    — KEEPS the file instead of evicting it unheld (see evict_live_veto).
   REPO_JANITOR_STORE_LIST_CMD      "<cmd>" -> `<cmd> <store prefix>` prints `rclone lsjson`-shaped JSON for
                                     that prefix (used by --evict-verified; unset -> the rclone default in
                                     EVICT_STORE_LIST_CMD_DEFAULT). A listing that fails, times out, or
@@ -163,6 +167,10 @@ EVICT_REGISTRY_DIR = "registry"
 # different inode behind it between the identity check and the unlink. A stage this sweep cannot finish is
 # always renamed back; the prefix is recognizable so a crash-orphaned entry is identifiable by hand.
 EVICT_STAGE_PREFIX = ".repo-janitor-evicting."
+# The kernel's own view of who has the inode open, scanned by evict_writable_holder before and after the
+# re-read (automated-researcher#859 round 3). Linux-only on purpose: evict_unlink already refuses to run
+# anywhere dir-fd ops are unsupported, so a platform without /proc simply never evicts.
+EVICT_PROC_ROOT = "/proc"
 
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
@@ -210,23 +218,33 @@ def run_git_bytes(args, cwd, timeout=30):
 
 
 def load_live_sessions():
-    """Returns (live_set, seam_failed). seam_failed distinguishes "no seam configured" (empty set is the
-    deliberate fail-safe default) from "a configured seam errored" (liveness is UNKNOWN this sweep, not
-    "nobody's live" — code-review Finding 1: silently folding a provider failure into the empty set would
-    let a live owner's worktree read as ownerless and reach tier 1)."""
+    """Returns (live_set, seam_failed, seam_configured).
+
+    `seam_failed` distinguishes "no seam configured" (empty set is the deliberate fail-safe default) from
+    "a configured seam errored" (liveness is UNKNOWN this sweep, not "nobody's live" — code-review Finding
+    1: silently folding a provider failure into the empty set would let a live owner's worktree read as
+    ownerless and reach tier 1).
+
+    `seam_configured` is reported SEPARATELY rather than collapsed into the empty set (automated-researcher
+    #859 round 3): "the seam is unset" and "the seam ran and named nobody" are the same `(set(), False)` to
+    the worktree tiers ON PURPOSE — there, an unset seam means nothing is silently routed to tier 2 and it
+    all surfaces to the researcher instead, which is the fail-SAFE direction. For the eviction leg it is the
+    fail-DANGEROUS direction: the live-owner veto is that leg's ONLY hold, so an unset seam makes every
+    owner read `not_live` and the veto inert exactly when nothing else is holding. Only `evict_live_veto`
+    consumes this third value; the worktree tiers' documented behaviour is untouched."""
     cmd = os.environ.get("REPO_JANITOR_LIVE_SESSIONS_CMD", "").strip()
     if not cmd:
-        return set(), False
+        return set(), False, False
     try:
         parts = shlex.split(cmd)
         p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
         if p.returncode != 0:
             log(f"REPO_JANITOR_LIVE_SESSIONS_CMD failed (rc={p.returncode}) — liveness UNKNOWN this sweep")
-            return set(), True
-        return {line.strip() for line in p.stdout.splitlines() if line.strip()}, False
+            return set(), True, True
+        return {line.strip() for line in p.stdout.splitlines() if line.strip()}, False, True
     except Exception as e:  # noqa: BLE001 - any seam failure is UNKNOWN, never fatal
         log(f"REPO_JANITOR_LIVE_SESSIONS_CMD errored ({e}) — liveness UNKNOWN this sweep")
-        return set(), True
+        return set(), True, True
 
 
 def owner_live_status(owner, live, seam_failed):
@@ -238,6 +256,39 @@ def owner_live_status(owner, live, seam_failed):
     if seam_failed:
         return "unknown"
     return "live" if owner in live else "not_live"
+
+
+def evict_live_veto(owner, live, seam_failed, seam_configured):
+    """The reason this leg's live-owner veto does NOT positively hold for `owner`, or None when it does.
+
+    The eviction leg's age bar is 0, so this veto is its ONLY hold — and a hold that is only present when
+    the box happens to be configured for it is not a hold (automated-researcher#859 round 3). Two
+    configurations made it inert without saying so, both of them silent pass-throughs to "evict":
+
+      - `owner is None` — a candidate under an `--evict-verified` root that is not also named
+        `--worktree-root`. `owner_live_status` answers "not_live" for it because for the WORKTREE tiers
+        that is right (no owner question applies to the shared checkout's own drift); here it means the
+        veto has nothing to fire on at all, for every file under that root.
+      - no `REPO_JANITOR_LIVE_SESSIONS_CMD` — every owner reads "not_live" because nobody is known live,
+        which for the worktree tiers is the fail-safe default (flagged entries surface to the researcher
+        instead of being routed to a session) and here is the fail-dangerous one.
+
+    Both now KEEP at classification and SKIP at reap, with the reason naming the cause, so this leg's
+    boundary text ("what covers the realistic writer is the live-owner veto") is true by construction. A
+    seam that is wired and FAILED is unchanged — that was already "unknown", already a veto.
+    """
+    if owner is None:
+        return ("no owner derivable — this --evict-verified root is not covered by --worktree-root, so the "
+                "live-owner veto cannot protect it")
+    if not seam_configured:
+        return (f"no liveness seam is configured (REPO_JANITOR_LIVE_SESSIONS_CMD is unset), so owner "
+                f"'{owner}' cannot be shown to be idle and the live-owner veto — this leg's only hold — "
+                "cannot protect it")
+    status = owner_live_status(owner, live, seam_failed)
+    if status != "not_live":
+        return (f"owner '{owner}' reads as '{status}' — nothing inside a live (or unverifiable) owner's "
+                "tree is ever evicted")
+    return None
 
 
 def resolve_default_ref(repo, default_branch):
@@ -1256,6 +1307,96 @@ def fd_hashes(fd, algos):
         return None
 
 
+def evict_writable_holder(stat_key, proc_root=EVICT_PROC_ROOT):
+    """`(veto, blind)` for one inode: `veto` is a reason a WRITABLE descriptor is open on it (or that this
+    platform cannot answer the question at all), else None; `blind` counts the same-uid processes whose
+    descriptor tables this scan was not permitted to inspect.
+
+    WHY THIS EXISTS (automated-researcher#859 round 3). Re-reading the bytes before the unlink closes every
+    writer that goes through a NAME, but not one holding an already-open writable descriptor: it can rewrite
+    an offset the digest has ALREADY consumed while the read is still running, then restore `mtime_ns` with
+    `utime`, leaving `(dev, ino, size, mtime_ns)` bit-identical. So the exposed window is the whole multi-GB
+    read, not the microseconds after it. This scan asks the question the other way round — not "did a write
+    happen?" but "could one have?" — and staging is what makes it sufficient rather than merely suggestive:
+    by the time it runs, every public name for the inode is gone, so a writer that could have opened one
+    must PREDATE staging and is visible here. The step-5 re-scan catches one that opened the (still
+    readdir-visible) staged name during the read.
+
+    WHAT IT CANNOT SEE, measured rather than assumed. Resolving `/proc/<pid>/fd/<n>` needs ptrace-read
+    permission on that process, and Linux's default `kernel.yama.ptrace_scope = 1` grants it only for the
+    scanner's own DESCENDANTS. So on a stock box a same-uid sibling — precisely the agent session this leg's
+    measured 41.5 GB came from — lists as a pid, lists its `fd/` directory, and then refuses every entry
+    with EPERM. Verified on this repo's own CI runner (`ptrace_scope=1`; the user `systemd`'s `fd/` lists
+    and every entry stats EPERM), which is why an uninspectable process is COUNTED here and not treated as a
+    veto: failing closed on it would make the leg evict nothing at all on any default-configured Linux box,
+    and a gate that never passes has removed a feature rather than secured one. What covers that blind spot
+    is the ctime binding in evict_unlink, which observes the write instead of the writer — see there. A
+    process under a DIFFERENT uid is invisible for the same reason and is the same accepted residual.
+
+    `os.getpid()` is skipped: this process's own descriptor on the inode is the `O_RDONLY` one step 4 just
+    opened. A pid or a descriptor that vanishes mid-scan was closed and holds nothing.
+    """
+    try:
+        uid = os.getuid()
+        pids = [n for n in os.listdir(proc_root) if n.isdigit()]
+    except (OSError, AttributeError) as e:  # no /proc (or no getuid) -> this platform cannot answer at all
+        return (f"the open-descriptor view this delete needs ('{proc_root}') is unavailable "
+                f"({e.__class__.__name__}: {e}), so a writer on this inode cannot be ruled out"), 0
+    dev, ino = stat_key[0], stat_key[1]
+    me = os.getpid()
+    blind = 0
+    for spid in pids:
+        if int(spid) == me:
+            continue
+        pdir = os.path.join(proc_root, spid)
+        try:
+            # A process `/proc` does not attribute to this janitor's uid cannot be inspected here at all
+            # (its `fd/` is root-owned); a non-dumpable same-uid process lands here for the same reason.
+            if os.stat(pdir).st_uid != uid:
+                continue
+            fds = os.listdir(os.path.join(pdir, "fd"))
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited mid-scan: a dead process holds no descriptor
+        except OSError:
+            blind += 1
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(os.path.join(pdir, "fd", fd))
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # closed mid-scan (or the process exited): not a holder
+            except OSError:
+                blind += 1
+                break     # ptrace-denied for this process: every one of its entries will refuse alike
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                continue
+            try:
+                with open(os.path.join(pdir, "fdinfo", fd)) as fh:
+                    info = fh.read()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError as e:
+                # It holds a descriptor on THIS inode and the access mode is unreadable — unlike the
+                # blind cases above this is a positive hit with an unknown mode, so it vetoes.
+                return (f"process {spid} holds a descriptor (fd {fd}) on this inode and its access mode "
+                        f"could not be read ({e.__class__.__name__}: {e})"), blind
+            flags = None
+            for line in info.splitlines():
+                if line.startswith("flags:"):
+                    try:
+                        flags = int(line.split(":", 1)[1].strip(), 8)  # /proc prints these in OCTAL
+                    except ValueError:
+                        flags = None
+                    break
+            if flags is None:
+                return (f"process {spid} holds a descriptor (fd {fd}) on this inode and '{proc_root}' "
+                        "reported no parseable access mode for it"), blind
+            if (flags & os.O_ACCMODE) in (os.O_WRONLY, os.O_RDWR):
+                return (f"process {spid} holds a WRITABLE descriptor (fd {fd}) on this inode, so its bytes "
+                        "could be rewritten unobserved while they are being re-read"), blind
+    return None, blind
+
+
 EVICT_DIR_FD_OPS = (os.stat, os.rename, os.unlink, os.open)
 
 
@@ -1265,9 +1406,10 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
     on-disk state no longer matches what was verified, or ("failed", reason) on an OS error.
 
     THE INVARIANT THIS WHOLE FUNCTION EXISTS FOR: nothing is unlinked unless the bytes being removed are,
-    at the moment of removal, bytes this sweep has positively established are also at the store. Everything
-    below is that one sentence; the two review rounds on #859 are the two distinct ways a *proxy* for it was
-    substituted for the thing itself.
+    at the moment of removal, bytes this sweep has positively established are also at the store — and
+    nothing is unlinked while any descriptor that could rewrite those bytes UNOBSERVED is open on the inode.
+    Everything below is that one sentence; the three review rounds on #859 are the three distinct ways a
+    *proxy* for it was substituted for the thing itself.
 
     WHY THIS IS NOT `lstat(p)` THEN `os.unlink(p)` (round 1): those are two lookups of the same NAME, and a
     name is not an inode. A concurrent rename between them makes the janitor delete a file it never
@@ -1290,22 +1432,46 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
          what makes the link count trustworthy: once all `st_nlink` links carry private names, no outside
          actor can reach the inode by path to add another.
       3. `lstat` each staged entry through its dirfd and require a regular file, the exact
-         `(dev, ino, size, mtime_ns)` whose bytes were verified, and `st_nlink == len(paths)`. This is now
-         the CHEAP GATE, not the proof: it costs one stat per link and skips a stale group without paying
-         for the read in step 4.
+         `(dev, ino, size, mtime_ns)` whose bytes were verified, and `st_nlink == len(paths)` — the CHEAP
+         GATE, not the proof: one stat per link, skipping a stale group without paying for the read in step
+         4. ANCHOR the inode's `st_ctime_ns` here, and scan the kernel's own open-descriptor view
+         (evict_writable_holder) for a WRITABLE descriptor on the inode.
       4. Open the staged inode `O_RDONLY|O_NOFOLLOW` through its dirfd, re-read every byte through THAT
          descriptor, and require each digest to equal the one that matched the store. `fstat` the same
-         descriptor to confirm the bytes just read came from the verified inode.
-      5. Re-run step 3 — after the read, so a write that landed during it (size/mtime) or a link added
-         during it (`st_nlink`) is caught, and so every staged name is re-tied to the inode just hashed.
+         descriptor to confirm the bytes just read came from the verified inode AND that its ctime is still
+         the anchored one.
+      5. Re-run step 3 — every part, after the read: a write that landed during it (ctime, and size/mtime
+         when they weren't forged back), a link added during it (`st_nlink`), and a writable descriptor
+         opened during it are all caught, and every staged name is re-tied to the inode just hashed.
       6. Only then unlink the staged entries.
 
-    THE BOUNDARY THIS LEAVES, stated rather than papered over: POSIX offers no atomic
-    "unlink-if-contents-still-equal", so a writer holding an open descriptor could in principle write into
-    the inode in the window between step 4's last read and step 6's `unlink` — microseconds, containing no
-    I/O of ours. That residual is irreducible here; what actually covers the realistic writer is the
-    live-owner veto (nothing inside a live, or liveness-unverifiable, owner's tree is ever a candidate),
-    checked at classification and re-checked fresh per item immediately before this call.
+    WHY THE DIGEST ALONE IS NOT ENOUGH (round 3): a writer holding an already-open writable descriptor can
+    rewrite an offset the digest has ALREADY consumed while the read is still running and then restore
+    `mtime_ns` with `utime`, so the exposed window is the WHOLE read, not the microseconds after it — and
+    `(dev, ino, size, mtime_ns)` comes back bit-identical. POSIX has no atomic
+    "unlink-if-contents-still-equal" to close that with, so it is closed from two sides:
+
+      - THE WRITER: step 3/5's `/proc` scan refuses to unlink while any writable descriptor is open on the
+        inode, which staging makes sufficient rather than suggestive (every public name is already gone, so
+        such a writer must predate staging). This is the positive detection, and it is exact when `/proc`
+        lets this janitor look.
+      - THE WRITE: the ctime anchor (see ctime_moved) catches the rewrite itself. `utime` restores mtime but
+        moves ctime to *now*, and no unprivileged process can set ctime at all — so the one forgery that
+        defeats the mtime gate is exactly what this observes. It needs no permission over the writer, which
+        matters because Linux's default `ptrace_scope=1` hides a same-uid SIBLING's descriptors from the
+        scan (measured — see evict_writable_holder), and a same-uid sibling is the realistic writer here.
+
+    Neither is sufficient alone; together they cover writer-visible and writer-invisible alike.
+
+    THE BOUNDARY THIS LEAVES, stated rather than papered over: a writer that opens the (readdir-visible)
+    staged name after step 5 and wins the microseconds before step 6's `unlink` is still unobserved, and a
+    filesystem whose timestamp granularity is coarse enough to hide a write inside the same granule as the
+    staging rename would hide it from the ctime anchor too. Both are adversarial rather than accidental —
+    an accidental writer holds its descriptor from before staging, and its write moves ctime by more than a
+    granule — and both are accepted residual at this repo's stated scale. The other hold is the live-owner
+    veto, which this leg now requires to hold BY CONSTRUCTION rather than by configuration (see
+    evict_live_veto): a candidate with no derivable owner, or a sweep with no liveness seam wired, is never
+    evicted at all.
 
     Any failure in 1-5 puts every staged entry back under its original name, and a restore that cannot
     complete is logged loudly with the staged path — which is why EVICT_STAGE_PREFIX is recognizable rather
@@ -1328,11 +1494,33 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                            "removed cannot be re-verified against the store")
     fds = []      # every fd opened (directory fds + the read fd), closed exactly once in the finally
     staged = []   # (dirfd, original basename, staged basename, original full path) still needing a restore
+    bound = []    # the inode's st_ctime_ns at the FIRST post-staging look — the anchor for the whole window
+    blind = [0]   # same-uid processes evict_writable_holder was not permitted to inspect (reported below)
     outcome, detail = None, None
 
+    def ctime_moved(st, p):
+        """None while `st` carries the ctime this window was anchored to, else the reason it doesn't. The
+        FIRST call anchors (every link is the same inode, so they share one value).
+
+        THIS IS WHAT ACTUALLY CLOSES THE ROUND-3 WINDOW, and it observes the WRITE rather than the writer:
+        an in-place rewrite through an already-open descriptor bumps the inode's change time, and unlike
+        `mtime` no unprivileged process can put it back — `utimensat` sets atime/mtime and moves ctime to
+        *now* as a side effect; there is no syscall to set ctime at all. Reads do not touch it (a read
+        updates atime, which does not itself move ctime), so the sweep's own multi-GB re-read cannot trip
+        this. Anchored AFTER staging because the staging `rename` moves ctime itself, and the anchor has to
+        be a value taken inside the window it is protecting."""
+        if not bound:
+            bound.append(st.st_ctime_ns)
+            return None
+        if st.st_ctime_ns != bound[0]:
+            return (f"'{p}' has been written to since it was staged for eviction (its inode change time "
+                    "moved, and no unprivileged writer can put that back)")
+        return None
+
     def staged_state():
-        """The first reason the staged group no longer describes the exact verified inode, or None. Run
-        BEFORE the re-read as a cheap gate and AGAIN after it (see steps 3 and 5)."""
+        """The first reason the staged group no longer describes the exact verified inode — or no longer
+        provably excludes a writer on it — or None. Run BEFORE the re-read as a cheap gate and AGAIN after
+        it (see steps 3 and 5)."""
         for dirfd, _name, tmp, p in staged:
             try:
                 st = os.lstat(tmp, dir_fd=dirfd)
@@ -1345,6 +1533,14 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
             if st.st_nlink != len(paths):
                 return (f"'{p}' now has {st.st_nlink} link(s), not the {len(paths)} this eviction "
                         "accounted for")
+            moved = ctime_moved(st, p)
+            if moved:
+                return moved
+        # One scan per call, not one per link: the links are one inode, which the loop above just asserted.
+        holder, unseen = evict_writable_holder(stat_key)
+        if holder:
+            return f"'{paths[0]}' cannot be evicted: {holder}"
+        blind[0] = max(blind[0], unseen)
         return None
 
     try:
@@ -1372,7 +1568,7 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                 break
             staged.append((dirfd, name, tmp, p))
         if outcome is None:
-            reason = staged_state()          # step 3: the cheap gate
+            reason = staged_state()          # step 3: the cheap gate + the writable-descriptor scan
             if reason:
                 outcome, detail = "skipped", reason
         if outcome is None:
@@ -1390,6 +1586,7 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                     fst = os.fstat(filefd)
                 except OSError:
                     fst = None
+                fd_moved = ctime_moved(fst, p0) if fst is not None else None
                 if digests is None:
                     outcome, detail = "skipped", (f"'{p0}' could not be re-read, so the bytes about to be "
                                                   "removed could not be re-verified against the store")
@@ -1397,15 +1594,25 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                         fst.st_dev, fst.st_ino, fst.st_size, fst.st_mtime_ns) != tuple(stat_key):
                     outcome, detail = "skipped", (f"'{p0}' is not the inode whose bytes were verified (the "
                                                   "descriptor they were re-read from disagrees)")
+                # Asked of the READ DESCRIPTOR, not of a name: the bytes just digested came from this fd, so
+                # this is the tightest place to ask whether anything wrote to them during the read.
+                elif fd_moved:
+                    outcome, detail = "skipped", fd_moved
                 else:
                     stale = [a for a in algos if digests[a] != verified_hashes[a]]
                     if stale:
                         outcome, detail = "skipped", (f"'{p0}' no longer holds the bytes that were verified "
                                                       f"against the store ({'+'.join(stale)} disagrees now)")
         if outcome is None:
-            reason = staged_state()          # step 5: re-asserted AFTER the read
+            reason = staged_state()          # step 5: both halves re-asserted AFTER the read
             if reason:
                 outcome, detail = "skipped", reason
+        if outcome is None and blind[0]:
+            # Never a silent cap: the descriptor scan's coverage is stated whenever it was incomplete, so a
+            # report never reads as "no writer was open on this" when it means "none that I could see".
+            log(f"EVICT NOTE: {blind[0]} same-uid process(es) would not let this sweep inspect their open "
+                f"descriptors while evicting '{paths[0]}' (ptrace_scope); a write by one of them is caught "
+                "by the inode's change time, which is what the delete actually rests on here")
         if outcome is None:
             done = 0
             for dirfd, _name, tmp, p in staged:
@@ -1442,7 +1649,7 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                 pass
 
 
-def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
+def evict_verdict(path, root, size, store, cache, args, live, seam_failed, seam_configured):
     """(store_object, note, verified_hashes) for one candidate file: store_object is the object that PROVES
     these bytes are already at the store (evict), or None (keep — `note` is then the tier-3 reason).
 
@@ -1451,9 +1658,12 @@ def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
     compared against it — a stat tuple is not the bytes (Codex review, automated-researcher#859 round 2).
 
     The bar, in order, every step fail-closed:
-      1. the live-owner veto, reused verbatim from the worktree tiers — nothing inside a live (or
-         unverifiable) owner's tree is ever evicted, whatever the store says. Checked FIRST because it is
-         free and it makes the store listing/hash work unnecessary for a vetoed file.
+      1. the live-owner veto, and it must hold BY CONSTRUCTION rather than by configuration
+         (evict_live_veto, automated-researcher#859 round 3): nothing is evicted while its owner reads live
+         or unverifiable, AND nothing is evicted whose owner cannot be derived at all, AND nothing is
+         evicted by a sweep with no liveness seam wired — since with an age bar of 0 this veto is the leg's
+         only hold, and a hold that silently disappears with the configuration is not one. Checked FIRST
+         because it is free and it makes the store listing/hash work unnecessary for a vetoed file.
       2. a top-level directory name under the root, which is what keys the store prefix
          (`<store>/<top-level dir>/**`). A file sitting directly under the root has none, so it is kept.
       3. an object at that prefix with the SAME BASENAME AND SIZE — a cheap prefilter, never the proof.
@@ -1476,10 +1686,9 @@ def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
          actually compares.
     """
     owner = owner_of(path, args.worktree_root, args.owner_depth)
-    liveness = owner_live_status(owner, live, seam_failed)
-    if liveness != "not_live":
-        return None, (f"verified-eviction candidate kept: owner '{owner}' reads as '{liveness}' — nothing "
-                      "inside a live (or unverifiable) owner's tree is ever evicted"), None
+    veto = evict_live_veto(owner, live, seam_failed, seam_configured)
+    if veto:
+        return None, f"verified-eviction candidate kept: {veto}", None
     rel_parts = os.path.relpath(path, root).split(os.sep)
     if len(rel_parts) < 2:
         return None, ("verified-eviction candidate kept: it sits directly under the --evict-verified root, "
@@ -1520,7 +1729,7 @@ def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
                   f"'{cands[0]['path']}' if these bytes really are durable"), None
 
 
-def scan_evict(args, live, seam_failed, results, reap_plan):
+def scan_evict(args, live, seam_failed, seam_configured, results, reap_plan):
     """Classify every regular file >= --min-size under an --evict-verified root: proven at the store ->
     tier 1 (+ eviction plan), anything else -> tier 3 (kept, reported). Never tier 2 — a live owner is a
     VETO here, not a routing target: there is nothing for a session to disposition about its own cache.
@@ -1604,7 +1813,8 @@ def scan_evict(args, live, seam_failed, results, reap_plan):
                              "scope would free no bytes while destroying a path whose siblings this sweep "
                              "cannot see")
             continue
-        verdicts = [(full, *evict_verdict(full, root, size, store, cache, args, live, seam_failed))
+        verdicts = [(full, *evict_verdict(full, root, size, store, cache, args, live, seam_failed,
+                                          seam_configured))
                     for full, root in entries]
         if any(obj is None for _full, obj, _note, _hashes in verdicts):
             for full, obj, note, _hashes in verdicts:
@@ -1998,7 +2208,7 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
         # between this item's removal and an earlier item's in the same run, and a once-per-batch poll
         # would never see it.
         repo, path, branch, owner = item["repo"], item["path"], item["branch"], item.get("owner")
-        fresh_live, fresh_seam_failed = load_live_sessions()
+        fresh_live, fresh_seam_failed, _fresh_seam_configured = load_live_sessions()
         liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
@@ -2145,10 +2355,12 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
     # Re-verified immediately before the unlink, same defense-in-depth as the two loops above — but note
     # WHICH facts are recomputed, why the STORE side is not, and where the check actually binds.
     #
-    # Everything mutable is local, so every local fact is re-read from scratch: the owner's liveness (fresh,
-    # per item), the file still being a regular file, its (dev, ino, size, mtime_ns) identity, and — the
-    # part a stat tuple cannot answer (Codex review, automated-researcher#859 round 2) — ITS BYTES, re-read
-    # and re-digested inside evict_unlink against the checksum that matched the store. Round 1's fix took
+    # Everything mutable is local, so every local fact is re-read from scratch: the live-owner veto (fresh,
+    # per item, and the by-construction form — an ownerless candidate or an unwired seam is refused here
+    # exactly as at classification, #859 round 3), the file still being a regular file, its
+    # (dev, ino, size, mtime_ns) identity, whether any WRITABLE descriptor is open on the inode (round 3),
+    # and — the part a stat tuple cannot answer (Codex review, automated-researcher#859 round 2) — ITS
+    # BYTES, re-read and re-digested inside evict_unlink against the checksum that matched. Round 1's fix took
     # name+size out of the verdict because it is not exact-byte equivalence; leaving `mtime` to stand for
     # the content at the delete was the same substitution one step later, so the second read is the price of
     # the invariant rather than a cost to optimize away. It is paid only on the files a --reap-tier1 run is
@@ -2162,17 +2374,21 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
     # not one decision about an inode — the state can change in between. The check below is therefore only
     # an advisory prefilter for good skip messages; the delete itself goes through evict_unlink, which
     # stages every link under a private name first, so the identity and the bytes it verifies are the
-    # identity and the bytes it removes. Nothing here deletes on the strength of the prefilter alone.
+    # identity and the bytes it removes — and so the descriptor scan it runs is asked about an inode whose
+    # public names are already gone. Nothing here deletes on the strength of the prefilter alone.
     for item in reap_plan:
         if item["kind"] != "evict":
             continue
         paths = item["paths"]
         primary, size, obj = item["path"], item["size"], item["store_object"]
-        fresh_live, fresh_seam_failed = load_live_sessions()
-        liveness_now = owner_live_status(item.get("owner"), fresh_live, fresh_seam_failed)
-        if liveness_now != "not_live":
-            log(f"SKIPPED (owner '{item.get('owner')}' liveness is now '{liveness_now}'): {primary}")
-            record(item, "skipped", f"owner '{item.get('owner')}' liveness is now '{liveness_now}'")
+        # The SAME by-construction veto classification applied (evict_live_veto, #859 round 3), not just a
+        # fresh liveness poll: a plan built under a wired seam must not be executed by a reap that can no
+        # longer see one, and an ownerless candidate is refused here exactly as it was refused there.
+        fresh_live, fresh_seam_failed, fresh_seam_configured = load_live_sessions()
+        veto_now = evict_live_veto(item.get("owner"), fresh_live, fresh_seam_failed, fresh_seam_configured)
+        if veto_now:
+            log(f"SKIPPED (the live-owner veto does not hold at reap time: {veto_now}): {primary}")
+            record(item, "skipped", f"the live-owner veto does not hold at reap time: {veto_now}")
             continue
         # An ADVISORY prefilter: it produces a precise skip reason for the ordinary cases (the file was
         # already taken by a worktree/scratch reap above, or something rewrote it since classification)
@@ -2458,7 +2674,7 @@ def main(argv=None):
     elif (args.store or "").strip():
         die("--store only applies to --evict-verified; pass at least one --evict-verified root")
 
-    live, seam_failed = load_live_sessions()
+    live, seam_failed, seam_configured = load_live_sessions()
     now_ts = int(time.time())
     results = {"tier1": [], "tier2": {}, "tier3": [], "reaped": []}
     reap_plan = []
@@ -2487,7 +2703,7 @@ def main(argv=None):
         scan_scratch(args, now_ts, protected, results, reap_plan)
 
     if args.evict_verified:
-        scan_evict(args, live, seam_failed, results, reap_plan)
+        scan_evict(args, live, seam_failed, seam_configured, results, reap_plan)
 
     fails = 0
     if args.reap_tier1:

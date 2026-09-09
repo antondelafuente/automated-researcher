@@ -20,7 +20,14 @@
   match, no comparable checksum, a disagreeing one, an unreadable file, or a failed
   store listing keeps and reports it. **Age bar 0** — a file whose bytes are proven durable is a cache
   entry at any age, and the recovery is `rclone copy` of the object named in the report — with the
-  **live-owner veto the only hold**, reused verbatim from the worktree tiers. `registry/` of a git tree and
+  **live-owner veto the only hold**, which is why this leg demands that veto hold BY CONSTRUCTION rather
+  than by configuration: it reuses the worktree tiers' `--worktree-root`-derived owner and
+  `REPO_JANITOR_LIVE_SESSIONS_CMD` seam, but an eviction root not covered by `--worktree-root` (no owner
+  derivable) and an unwired seam (nobody's liveness confirmable) each left that hold firing on nothing while
+  the leg went on evicting, so both now KEEP every candidate with the cause named in its tier-3 reason. The
+  worktree tiers' documented unset-is-the-fail-safe-default behaviour is deliberately untouched — there an
+  unset seam surfaces everything to the researcher, which is the safe direction; here nothing else is
+  holding. `registry/` of a git tree and
   every `.git` dir are pruned from the walk (git-tree-keyed, not name-keyed); symlinks are never
   candidates; **hardlinks resolve per inode** (unlinking one of N links frees nothing, so an inode goes
   only when every link was found *and* verified, and its bytes count once). **The inode that was verified
@@ -34,7 +41,22 @@
   through an `O_RDONLY|O_NOFOLLOW` descriptor and re-digests it against the checksum that matched the store —
   a second full read of exactly the files a reap is about to delete, which is the only thing that
   establishes what this leg claims. The stat checks survive as the cheap gate that skips a stale group
-  without paying for that read. Any disagreement aborts and restores every staged link. The store listing goes through
+  without paying for that read. **And a digest is not the whole read window:** a writer holding an
+  already-open writable descriptor can rewrite an offset the digest has *already consumed* while the read
+  is still running and then restore `mtime_ns` with `utime`, so the stat tuple comes back bit-identical and
+  the exposed window is the whole multi-GB read rather than the microseconds after it. POSIX has no atomic
+  unlink-if-contents-still-equal, so that is closed from two sides: the kernel's own open-descriptor view
+  (`/proc`) is scanned before and after the read and a WRITABLE descriptor on the inode is a refusal
+  (staging is what makes that exact — every public name is already gone, so such a writer must predate it);
+  and the inode's **change time** is anchored right after staging and re-checked against the read
+  descriptor and again afterwards, because `utime` restores `mtime` but moves `ctime` to *now* and no
+  unprivileged process can set `ctime` at all. The second is what covers the first's measured limit —
+  resolving another process's descriptors needs ptrace-read permission, and Linux's default
+  `kernel.yama.ptrace_scope = 1` grants it only over the scanner's own descendants, so a same-uid *sibling*
+  (exactly the agent session whose adapter tars this leg exists for) lists as a pid and then refuses every
+  descriptor. Those processes are counted and reported rather than treated as a veto: failing closed on
+  them would make the leg evict nothing at all on a stock Linux box, which removes the feature instead of
+  securing it. Any disagreement aborts and restores every staged link. The store listing goes through
   a new `REPO_JANITOR_STORE_LIST_CMD` seam defaulting to `rclone lsjson --recursive --files-only --hash`,
   listed once per prefix per sweep, failures included. The sweep also gained byte accounting: a
   `## Reclaimed` line / `reclaimed` JSON key reading "reclaimed X GB verified-on-store, Y GB tier-1", split

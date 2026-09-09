@@ -306,8 +306,21 @@ report** (tier 3), never a guess.
   question that matters for a cache entry: a file whose bytes are proven durable is not
   work-in-progress at any age. **The live-owner veto is the only hold** — nothing inside a live (or
   liveness-unverifiable) owner's tree is ever evicted, reusing the same `--worktree-root`-derived owner and
-  the same `REPO_JANITOR_LIVE_SESSIONS_CMD` seam as the worktree tiers. Name the eviction roots as
-  `--worktree-root` too, or no owner is derived for them and that veto has nothing to fire on.
+  the same `REPO_JANITOR_LIVE_SESSIONS_CMD` seam as the worktree tiers.
+- **Because that veto is the only hold, this leg requires it to hold BY CONSTRUCTION, not by
+  configuration.** Two ordinary configurations used to leave it firing on nothing while the leg went on
+  evicting, and both now **keep** the file with the cause named in its tier-3 reason:
+  - an `--evict-verified` root **not also named `--worktree-root`** derives no owner at all, so there is
+    nobody whose liveness could veto anything. (For the worktree tiers "no owner" rightly means "no owner
+    question applies" — the shared checkout's own drift; here it means the hold is absent.) Name the
+    eviction roots as `--worktree-root` too, or this leg evicts nothing under them.
+  - **no `REPO_JANITOR_LIVE_SESSIONS_CMD` wired** makes every owner read not-live. For the worktree tiers
+    an unset seam is the documented *fail-safe* default (nothing is silently routed to a session; it all
+    surfaces to the researcher) and that behaviour is unchanged. For this leg it is the fail-*dangerous*
+    direction, since nothing else is holding — so an unwired seam keeps every eviction candidate.
+
+  Both are re-checked fresh per item immediately before the unlink as well, so a plan built under a wired
+  seam is never executed by a reap that can no longer see one.
 - **`registry/` of a git tree is never touched**, and neither is a `.git` directory: the walk prunes both,
   so nothing beneath them is even stat'd. The veto is keyed on the git marker's *name* being present
   (never on whether it resolves — same discipline as the scratch guards), and it is **git-tree-keyed, not
@@ -329,8 +342,9 @@ report** (tier 3), never a guess.
   nothing. Every fact is re-verified immediately before the unlink — the owner's liveness fresh per item,
   the file's `(device, inode, size, mtime)` identity, and **its bytes**, re-read and re-digested against
   the checksum that matched the store.
-- **The inode that was verified is the inode that is removed — and it still holds the verified bytes.**
-  Two distinct substitutions have to be refused here, and the delete refuses both:
+- **The inode that was verified is the inode that is removed — it still holds the verified bytes, and
+  nothing could have rewritten them unobserved.** Three distinct substitutions have to be refused here,
+  and the delete refuses all three:
   - *A name is not an inode.* Checking a *path* and then unlinking that path is two lookups of a name: a
     concurrent rename in between would have the janitor delete a file it never verified, and a link added
     after the count was read would make the accounting claim bytes it no longer frees. So before anything
@@ -350,11 +364,33 @@ report** (tier 3), never a guess.
     cheap gate that skips a stale group without paying for the read; nothing deletes on their strength
     alone. This is a **second full read of each file a reap is about to delete** — deliberately paid, since
     it is the only thing that establishes what the leg claims, and it is never paid on the tier-3 majority.
-  - **The boundary this leaves**, stated rather than papered over: POSIX has no atomic
-    "unlink-if-contents-still-equal", so a writer holding an open descriptor could in principle write into
-    the inode in the microsecond window between that last read and the `unlink`. What covers the realistic
-    writer is the live-owner veto, not the window; the digest closes everything a stat tuple silently
-    waved through.
+  - *A digest is not the whole read window.* A writer holding an **already-open writable descriptor** can
+    rewrite an offset the digest has *already consumed* while the read is still running, then restore
+    `mtime_ns` with `utime` — so `(device, inode, size, mtime)` comes back bit-identical, the digest saw
+    the old bytes, and the exposed window is the *whole multi-GB read*, not the microseconds after it.
+    POSIX has no atomic "unlink-if-contents-still-equal" to close that with, so it is closed from two
+    sides, and neither side is sufficient alone:
+    - **the writer** — before and after the read, the kernel's own open-descriptor view (`/proc`) is
+      scanned for any writable descriptor on the inode, and one found is a refusal. Staging is what makes
+      this exact rather than suggestive: every public name is already gone, so such a writer must predate
+      staging. Its limit is measured, not assumed — resolving another process's descriptors needs
+      ptrace-read permission, and Linux's default `kernel.yama.ptrace_scope = 1` grants that only over the
+      scanner's own *descendants*, so a same-uid **sibling** (exactly the agent session this leg's measured
+      41.5 GB came from) lists as a pid and then refuses every descriptor. Those processes are counted and
+      reported, never treated as a veto: failing closed on them would make the leg evict nothing at all on
+      a stock Linux box, which removes the feature rather than securing it.
+    - **the write** — the inode's **change time** is anchored right after staging and re-checked against
+      the read descriptor and again after the read. `utime` restores `mtime` but moves `ctime` to *now*,
+      and no unprivileged process can set `ctime` at all, so the one forgery that defeats the `mtime` gate
+      is precisely what this observes — and it needs no permission over the writer, which is what covers
+      the scan's blind spot. Reads move `atime`, never `ctime`, so the sweep's own re-read cannot trip it.
+  - **The boundary this leaves**, stated rather than papered over: a writer that opens the (readdir-visible)
+    staged name after the last check and wins the microseconds before the `unlink`, and a filesystem whose
+    timestamp granularity is coarse enough to hide a write inside the same granule as the staging rename.
+    Both are adversarial rather than accidental — an accidental writer holds its descriptor from before
+    staging and its write moves `ctime` by more than a granule — and both are accepted residual at this
+    repo's stated scale. The other hold is the live-owner veto, which is why this leg now requires that
+    veto to be present by construction (see the two bullets above) rather than leaning on a configuration.
 
   Any disagreement aborts and renames every staged link back (refusing to overwrite a name something
   re-created meanwhile); a restore that can't complete is logged loudly with the staged path, and a
@@ -509,8 +545,10 @@ This plugin owns the classification + report format only. An instance wires:
 - **`REPO_JANITOR_LIVE_SESSIONS_CMD`** — a command that prints one live session id per line (mirroring
   `gpu-job`'s `GPU_JOB_*_CMD` provider-seam pattern). **Unset ⇒ every owner reads as not-live** — the
   fail-safe default: nothing is silently routed to tier 2 without this wired, everything instead surfaces
-  to the researcher. It is also the eviction leg's only hold, so name the eviction roots as
-  `--worktree-root` too (see "Content-verified eviction" above).
+  to the researcher. **`--evict-verified` is the exception, and it is a hard requirement there:** that veto
+  is the eviction leg's only hold, so without this seam wired — or without the eviction roots also named as
+  `--worktree-root`, so an owner is derivable — that leg **evicts nothing at all** and reports every
+  candidate as kept (see "Content-verified eviction" above). Wire both, or the leg is a report-only sensor.
 - **`REPO_JANITOR_STORE_LIST_CMD`** — optional; only if the box's store isn't reachable through plain
   `rclone lsjson` (see "Content-verified eviction" above for the shape it must print). A listing that
   fails, times out, or won't parse means nothing under that prefix is ever evicted.
@@ -579,8 +617,14 @@ the reason naming the checksum that proved them; rclone's `MD5` and `SHA-1` key 
 the lowercase ones do; while name+exact-size with *no* comparable checksum, an incomparable-only algorithm
 (crc32/quickxor), a *disagreeing* checksum, a record contradicting itself across two spellings of one
 algorithm, a size disagreement, an absent object, a failed listing, a file directly under
-the root, and a live owner's file are all kept and survive a real `--reap-tier1`; `evict_unlink` is driven
-directly as a unit — it removes only the verified inode, and a stat-key or link-count disagreement aborts
+the root, and a live owner's file are all kept and survive a real `--reap-tier1`; the two configurations
+that left the live-owner veto inert — an eviction root not covered by `--worktree-root`, and an unwired
+`REPO_JANITOR_LIVE_SESSIONS_CMD` — keep every candidate with the cause named, in a run that also asserts
+the worktree tiers' unset-seam behaviour is unchanged; `evict_unlink` is driven
+directly as a unit — it removes only the verified inode, a process holding an `O_RDWR` descriptor across
+the call blocks the delete while an `O_RDONLY` holder does not, a write made *mid-read* through an
+already-open descriptor with `mtime` forged back is caught by the inode's change time, and a stat-key or
+link-count disagreement aborts
 and restores every staged link, leaving no `.repo-janitor-evicting.*` entry behind; a file below `--min-size`,
 a symlink, and everything under `registry/` of a git tree are never even classified, while a plain
 `registry/` directory outside any checkout still evicts (the veto is git-tree-keyed, not name-keyed); a
