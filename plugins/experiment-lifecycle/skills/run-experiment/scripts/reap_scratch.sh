@@ -16,6 +16,23 @@
 #   1. CLEAN-CLOSE GUARD: only reap if the run-supervision record is a clean close
 #      (`run_supervision_record.sh is-closed` = closed AND NOT stopped) — a parked/blocked/crashed run
 #      keeps its scratch in place for forensics (repo-janitor's sweep is the backstop for that residue).
+#   1b. THE NOTE PATH HAS ITS OWN CLEAN-CLOSE SIGNAL — NOT A BYPASS OF GATE 1 (#857).
+#      INCIDENT (automated-researcher#857, 2026-09-09): `log-exploratory` (work in `<scratch root>/<name>`,
+#      land a `NOTE.md` via `log-experiment`) is now the lab's VOLUME path — 27 work dirs created in two
+#      days, 15 of them exploratory — and it had no close hygiene at all. Six closed Codex explores held
+#      41.5 GB of Tinker LoRA adapter tars (already durable on R2) 10-34 h after their NOTE landed, because
+#      nothing in that path ever reaps. An exploratory run has no run-supervision record, so gate 1 can only
+#      ever refuse it — and WEAKENING gate 1 to let it through would take the experiment path's fail-closed
+#      delete guard with it. So the note path gets its own ENTRY POINT and its own clean-close evidence,
+#      with gates 2-6 (derived target, path sanity, mount-freedom, archive-before-delete, re-derived verify
+#      destination, loud-on-the-record gaps) applying UNCHANGED: for a note, THE LANDING IS THE CLOSE, so
+#      the evidence is the record's own merge — `<note-record>/NOTE.md` present at <merged-ref> in the
+#      research repo the record dir itself lives in. That is CHECKED here, never taken on the caller's word:
+#      no merged NOTE.md at that ref, no reap. The record's directory NAME is additionally required to equal
+#      <note-name>, which is what keeps gate 2's derivation honest on this path — the delete target is
+#      "<EXPERIMENT_SCRATCH_ROOT>/<note-name>", so evidence for record A could otherwise authorize deleting
+#      record B's scratch. The work dir is bound to the record by NAME and by nothing else: a dir named
+#      inside NOTE.md's prose is a document-supplied delete target, which is exactly what gate 2 refuses.
 #   2. THE DELETE TARGET IS DERIVED, NOT SUPPLIED — and the deletable set is statically bounded to ONE
 #      path per run: "<EXPERIMENT_SCRATCH_ROOT>/<run-id>". A basename check alone is NOT a binding (round-1
 #      code-review Finding 2): it makes every directory anywhere on the box named <run-id> deletable, so a
@@ -125,9 +142,13 @@
 #   "<remote>:<bucket>/archive/work"). Per-run archives land at "<root>/<run-id>". Unset -> recorded gap,
 #   exit 3 (6).
 #
-# USAGE: reap_scratch.sh <run-id> <scratch-dir>
+# USAGE:
+#   reap_scratch.sh <run-id> <scratch-dir>                                              # experiment path
+#   reap_scratch.sh --note-record <dir> --merged-ref <ref> <note-name> <scratch-dir>    # note path (#857)
 # Call it at close, AFTER artifact-store upload is verified and `log-experiment` has merged the record —
 # same sequencing responsibility as reap_worktree.sh gate 4: this script cannot re-check those itself.
+# On the NOTE path the sequencing is not the caller's to promise: `log-experiment` invokes this itself right
+# after the merge, and gate 1b re-checks that merge against the git ref before anything is copied or deleted.
 #
 #   4d. THE CLOSE'S PEAK LOCAL FOOTPRINT IS REPORTED, not just the bytes this reap gave back.
 #      INCIDENT (automated-researcher#843, 2026-09-06): the close leg held the run's artifacts on the box
@@ -218,15 +239,56 @@ gap(){
   exit "$GAP_EXIT"
 }
 
-[ $# -eq 2 ] || die "usage: reap_scratch.sh <run-id> <scratch-dir>"
+# The note path's two flags (gate 1b, #857) are parsed BEFORE the positionals, so the experiment-path
+# invocation — `reap_scratch.sh <run-id> <scratch-dir>` — is byte-for-byte the call it always was.
+note_record=""
+merged_ref=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --note-record) [ -n "${2:-}" ] || die "--note-record requires a non-empty value"; note_record=$2; shift 2 ;;
+    --merged-ref)  [ -n "${2:-}" ] || die "--merged-ref requires a non-empty value";  merged_ref=$2;  shift 2 ;;
+    --) shift; break ;;
+    -*) die "unknown option '$1' (usage: reap_scratch.sh [--note-record <dir> --merged-ref <ref>] <id> <scratch-dir>)" ;;
+    *) break ;;
+  esac
+done
+
+[ $# -eq 2 ] || die "usage: reap_scratch.sh [--note-record <merged-registry-dir> --merged-ref <git-ref>] <run-id> <scratch-dir>"
 id=$1
 scratch=$2
 [ -n "$id" ] || die "run-id must not be empty"
-[ -f "$REC" ] || die "run_supervision_record.sh not found next to reap_scratch.sh"
 
-# Gate 1 — clean-close guard (identical predicate to reap_session.sh / reap_worktree.sh).
-if ! bash "$REC" is-closed "$id"; then
-  die "refusing to reap scratch for '$id': not a clean close (parked/blocked/stopped/active/unknown are never reaped)"
+if [ -n "$note_record" ] || [ -n "$merged_ref" ]; then
+  # Gate 1b — THE NOTE PATH's clean-close signal (#857): the record's own merge, CHECKED, never trusted.
+  [ -n "$note_record" ] && [ -n "$merged_ref" ] \
+    || die "the note path needs BOTH --note-record <merged-registry-dir> and --merged-ref <git-ref>: the merged NOTE.md at that ref IS this path's clean-close evidence, and half of it proves nothing"
+  # On the experiment path run_supervision_record.sh's own validate_id has already rejected a run-id that
+  # isn't filename-safe before `is-closed` can answer. Nothing does that here, and <id> is a path component
+  # of BOTH the derived delete target and the derived archive prefix — so apply the same charset.
+  case "$id" in
+    *[!A-Za-z0-9._-]*) die "invalid note name '$id' (allowed: A-Za-z0-9._-) — it is a path component of the derived delete target and the derived archive prefix" ;;
+    .|..)              die "invalid note name '$id'" ;;
+  esac
+  [ -d "$note_record" ] || die "--note-record '$note_record' is not a directory — pass the merged registry record dir (the one holding NOTE.md)"
+  record_real=$(cd "$note_record" && pwd -P) || die "could not resolve --note-record '$note_record'"
+  [ "${record_real##*/}" = "$id" ] \
+    || die "refusing to reap scratch for note '$id': --note-record resolves to '$record_real', whose name is not '$id' — the record name IS the binding to the scratch dir on this path (gate 2 derives the delete target from it), so evidence for one record must never authorize deleting another's scratch"
+  record_repo=$(git -C "$record_real" rev-parse --show-toplevel 2>/dev/null) \
+    || die "refusing to reap scratch for note '$id': '$record_real' is not inside a git repository, so the merge that is this path's clean-close evidence cannot be checked"
+  record_repo=$(cd "$record_repo" && pwd -P) || die "could not resolve the repository holding '$record_real'"
+  case "$record_real" in
+    "$record_repo"/*) record_rel=${record_real#"$record_repo"/} ;;
+    *) die "refusing to reap scratch for note '$id': '$record_real' does not sit under its own repository root '$record_repo'" ;;
+  esac
+  git -C "$record_repo" cat-file -e "$merged_ref:$record_rel/NOTE.md" 2>/dev/null \
+    || die "refusing to reap scratch for note '$id': '$record_rel/NOTE.md' is NOT present at '$merged_ref' in '$record_repo' — for a note the LANDING is the close, so until the record is actually merged there this is an in-flight exploratory run and its scratch is forensics, not residue"
+  say "note path (#857): '$record_rel/NOTE.md' is present at '$merged_ref' — the landing IS the close"
+else
+  [ -f "$REC" ] || die "run_supervision_record.sh not found next to reap_scratch.sh"
+  # Gate 1 — clean-close guard (identical predicate to reap_session.sh / reap_worktree.sh).
+  if ! bash "$REC" is-closed "$id"; then
+    die "refusing to reap scratch for '$id': not a clean close (parked/blocked/stopped/active/unknown are never reaped)"
+  fi
 fi
 
 # Gate 3a — the path must be a real directory, not a symlink to one. `rm -rf` through a symlink removes
@@ -268,7 +330,10 @@ case "${pwd_real:-/dev/null}" in
 esac
 # Never reap the run's own WORKTREE through this path — that is reap_worktree.sh's job, behind its own
 # binding + `git worktree remove`. A worktree deleted with `rm -rf` leaves a stale administrative record.
-recorded_wt=$(bash "$REC" worktree-path "$id" 2>/dev/null || true)
+# The binding is read off the run-supervision record, so it exists only on the experiment path; a note has
+# no such record and no bound worktree (its work dir is plain scratch), so there is nothing to look up.
+recorded_wt=""
+[ -z "$note_record" ] && recorded_wt=$(bash "$REC" worktree-path "$id" 2>/dev/null || true)
 if [ -n "$recorded_wt" ]; then
   recorded_real=$(cd "$recorded_wt" 2>/dev/null && pwd -P) || recorded_real=""
   [ -n "$recorded_real" ] && [ "$scratch_real" = "$recorded_real" ] && \
