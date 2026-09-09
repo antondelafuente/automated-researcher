@@ -31,7 +31,12 @@ not the audited pipeline — say so plainly rather than implying more rigor than
 (figures, small derived CSVs) vs. what stays in the store (raw JSONL, full logs). A MANIFEST of store paths,
 not a copied/hardlinked second tree: one artifact, one object in the store.>
 
-**scratch reaped:** <the `bytes=` figure from `log-experiment`'s `[scratch: SCRATCH-REAP-RECLAIMED: …]` line;
-or `n/a` if nothing was staged on the box; or the verbatim `SCRATCH-REAP-GAP:`/failure line if the work dir
-is still on disk and why. Never blank — an unfilled line means the close is unfinished, which is exactly
-what it is there to show.>
+**scratch:** <the exploratory work dir this note is ACCOUNTABLE for — `<EXPERIMENT_SCRATCH_ROOT>/<name>`,
+which the landing reaps (archive → verify → delete) — or `none` if nothing was staged on the box. This is a
+commit-time DECLARATION, not the reap's outcome: the reap runs *after* this file is merged, because the
+merge is the clean-close evidence it gates on, so its `bytes=`/gap figure cannot exist yet when you write
+this and belongs on the landing report instead (`log-experiment`'s `[scratch: …]` line — the note path's
+close report, exactly where an audited close puts its own `SCRATCH-REAP-RECLAIMED:` line). What the
+declaration buys is auditability with no guessing: the dir named here is the one the landing must have
+reclaimed, so residue on the box is attributable to this note and a note that declares nothing is visibly
+unfinished. Never blank, and never a number you didn't read.>

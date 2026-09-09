@@ -12,13 +12,21 @@
   record's own merge, re-checked (`<record>/NOTE.md` present at the given git ref) rather than taken on the
   caller's word, and bound to the record NAME so one note's landing can never authorize deleting another's
   scratch. It is reported, never enforced: the record is already merged when it runs, so the outcome rides
-  the final `OK:` line as `[scratch: …]` and a bad reap never fails a landing. The `NOTE.md` skeleton gains a
-  **`scratch reaped:`** line written from it, so a note whose scratch is still on the box is visibly
-  unfinished. Plus the staging habit behind the doubled uploads (R2 held 104 objects for 50 unique tars):
-  `log-exploratory` now states the artifact rule — producer → store directly, the box holds pointers, nothing
-  >1 GB under the work dir that isn't on its way to the store or deleted by the same script, archive by
-  MANIFEST not by copy — and ships **`stream_tar_census.sh`**, which reads a remote tar's member list from
-  the stream (`curl … | tar -t`) so a checkpoint census never materializes the archive locally at all.
+  the final `OK:` line as `[scratch: …]` and a bad reap never fails a landing. **The note DECLARES, the
+  landing REPORTS:** the reap's evidence *is* the merge, so its `bytes=` figure cannot exist while the
+  `NOTE.md` is still writable — the skeleton therefore gains a commit-time **`scratch:`** declaration (the
+  work dir the note is accountable for, or `none`) that the landing's outcome is read against, the same
+  split an audited close already lives with (`SCRATCH-REAP-RECLAIMED:` goes on the close report, not into
+  the record). A note that declares nothing is visibly unfinished; one that declares a dir makes leftover
+  bytes attributable. Plus the staging habit behind the doubled uploads (R2 held 104 objects for 50 unique
+  tars): `log-exploratory` now states the artifact rule — producer → store directly, the box holds pointers,
+  nothing >1 GB under the work dir that isn't on its way to the store or deleted by the same script, archive
+  by MANIFEST not by copy — and ships **`stream_tar_census.sh`**, which reads a remote tar's member list from
+  the stream (`curl … | tar -t`) so a checkpoint census never materializes the archive locally at all. That
+  helper treats a URL and a label as DATA on both edges: the label is emitted with `printf`, never
+  interpolated into a `sed` program (GNU sed's `e` flag made that arbitrary command execution), and no
+  diagnostic ever emits a live URL — a presigned store URL's credentials live in its query string, so every
+  refusal, failure line, summary, derived label, and replayed `curl` error is redacted first.
 
 - experiment-lifecycle 0.11.0 (2026-09-08): both supervision layers stop resting on a scheduled job nobody
   ever saw fire (#849). In a **bridge** session — the kind the Remote-Control host spawns (`claude rc --spawn

@@ -217,9 +217,17 @@ nothing in the path ever reaps. This is the one place that knows the record actu
 **It is not a gate.** The record is merged before it runs, so a reap that refuses, gaps, or fails never turns
 a successful landing into a failure: the outcome is appended to the final `OK:` line as `[scratch: …]` (the
 reclaimed/gap marker verbatim, or `none` / `not-wired` / `reap-FAILED` / `reaper-not-found`), and the
-reaper's own output is passed through on stderr. `log-exploratory`'s `NOTE.md` skeleton carries a
-`scratch reaped:` line written from it, so a note whose scratch was never reaped is visibly unfinished.
-Non-note kinds are untouched by this leg.
+reaper's own output is passed through on stderr.
+
+**The outcome rides the landing report, and is never back-written into the merged note.** It cannot be: the
+reap's clean-close evidence is this merge, so the `bytes=` figure does not exist until the `NOTE.md` that
+would carry it is already merged and immutable, and this driver does not open a second PR to amend it. That
+is the same split an audited close already lives with — `run-experiment` reaps after this driver has merged
+the record too, and its `SCRATCH-REAP-RECLAIMED:` line goes on the **close report**, not into the record. So
+`log-exploratory`'s `NOTE.md` skeleton carries a commit-time **`scratch:` declaration** (the work dir the
+note is accountable for, or `none`) rather than a post-merge figure it would have to guess: a note that
+declares nothing is visibly unfinished, and a note that declares a dir makes leftover bytes on the box
+attributable. Non-note kinds are untouched by this leg.
 
 ## Identity / auth
 
@@ -248,7 +256,7 @@ For an **experiment** or **design-stage** PR, the already-run audit is **surface
   gate verifies). It also owns `reap_scratch.sh`, whose note-path entry point this driver calls after a note
   merges (see Close hygiene above) — one archive-verify-delete implementation, two entry points.
 - **`log-exploratory`** — the recipe that produces most notes; its `NOTE.md` skeleton carries the
-  `scratch reaped:` line written from this driver's `[scratch: …]` outcome.
+  commit-time `scratch:` declaration this driver's `[scratch: …]` outcome is read against.
 - **`design-experiment`** — writes the `START.md` instance-profile snapshot (`scripts/aar_profile_snapshot.sh
   snapshot`) the design-stage gate verifies; this skill ships a byte-identical copy of that helper (`check`
   verb only) so the gate has no cross-plugin path dependency.

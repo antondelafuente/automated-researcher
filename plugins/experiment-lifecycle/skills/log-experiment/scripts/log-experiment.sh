@@ -1315,8 +1315,15 @@ fi
 #
 # It is deliberately NOT a gate: the record is already merged by the time this runs, so a reap that refuses,
 # gaps, or fails must never turn a successful landing into a non-zero exit. Every outcome is instead stated
-# on the final OK line (and the reaper's own SCRATCH-REAP-* marker is passed through), which is what the
-# NOTE skeleton's "scratch reaped:" line is written from — a note without one is visibly unfinished.
+# on the final OK line (and the reaper's own SCRATCH-REAP-* marker is passed through).
+#
+# That OK line is also the ONLY place the outcome is recorded, and deliberately so (#858 round-1 review):
+# the reap's clean-close evidence is the merge above, so the figure does not exist until the NOTE.md that
+# would carry it is already merged and immutable, and this driver does not open a second PR to amend it.
+# It is the same split an audited close lives with — `run-experiment` also reaps after this driver merged
+# its record, and puts SCRATCH-REAP-RECLAIMED on the CLOSE REPORT, not in the record. The NOTE skeleton
+# therefore carries a commit-time "scratch:" DECLARATION (the work dir the note is accountable for, or
+# `none`) that this outcome is read against, rather than a post-merge number it would have to guess.
 SCRATCH_OUTCOME=""
 reap_note_scratch() {
   local root="${EXPERIMENT_SCRATCH_ROOT:-}" helper="" cand dir out rc=0
@@ -1354,7 +1361,7 @@ reap_note_scratch() {
   case "$rc" in
     0) SCRATCH_OUTCOME="$(printf '%s\n' "$out" | grep -m1 '^SCRATCH-REAP-RECLAIMED:' || echo 'reaped')" ;;
     3) SCRATCH_OUTCOME="$(printf '%s\n' "$out" | grep -m1 '^SCRATCH-REAP-GAP:' || echo 'gap')"
-       note "close hygiene: the reap was a WIRING GAP — nothing was archived and nothing was deleted, and '$dir' is exactly where it was. Put the SCRATCH-REAP-GAP line on the note." ;;
+       note "close hygiene: the reap was a WIRING GAP — nothing was archived and nothing was deleted, and '$dir' is exactly where it was. Keep the SCRATCH-REAP-GAP line with this landing report, wire the instance seam, and re-reap by hand: the merged note declared '$dir', so the residue is attributable to it until it is gone." ;;
     *) SCRATCH_OUTCOME="reap-FAILED"
        note "close hygiene: the reap FAILED (exit $rc) — '$dir' is STILL ON DISK. The record itself is merged and durable; re-run by hand once the cause above is fixed: reap_scratch.sh --note-record '$DIR' --merged-ref 'origin/$BASE_BRANCH' '$name' '$dir'" ;;
   esac
