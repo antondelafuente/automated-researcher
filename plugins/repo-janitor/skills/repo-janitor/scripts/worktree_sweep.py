@@ -25,6 +25,14 @@ automated-researcher#792): repro/audit temp dirs and per-session scratch that no
 Same tiering, same age bar, same fail-closed discipline — a stale entry is tier 1, a fresh one is silent,
 and anything whose age can't be read (or that trips a path-safety guard) is tier 3, never reaped.
 
+It also runs one CONTENT-KEYED leg (--evict-verified, automated-researcher#856), which needs no lifecycle
+knowledge at all: every rule above is LIFECYCLE-KEYED (it deletes what a known close path registered, at a
+known step, under a known path shape), and the population of workflow variants grows faster than that rule
+set can. The box is a CACHE of the artifact store, so this leg asks one content question per file — "are
+these exact bytes already at the store?" — and treats a file that is proven there as a cache entry: age bar
+0, live-owner veto the only hold (so that veto must hold BY CONSTRUCTION — no derivable owner, or no wired
+liveness seam, keeps the file), everything else fail-closed to "keep, report".
+
 STATE: none. Every sweep recomputes every fact from scratch — the git state IS the state (#364 pinned
 out-of-scope: no database of past reports). DELETION: `--reap-tier1` performs it, but this flag is a
 deliberate researcher opt-in an instance's timer must not pass by default (#364 pinned out-of-scope: no
@@ -39,11 +47,19 @@ Seams (mirroring gpu-job's GPU_JOB_*_CMD provider-seam pattern — instance-supp
   REPO_JANITOR_LIVE_SESSIONS_CMD   "<cmd>" -> prints one LIVE session id per line. Unset -> empty set ->
                                     every owner reads as not-live (fail-safe: nothing is silently routed to
                                     tier 2 without a wired seam; it all surfaces to the researcher instead).
+                                    The --evict-verified leg is the deliberate exception (#859): the veto is
+                                    its ONLY hold, so an unset seam — or a candidate with no derivable owner
+                                    — KEEPS the file instead of evicting it unheld (see evict_live_veto).
+  REPO_JANITOR_STORE_LIST_CMD      "<cmd>" -> `<cmd> <store prefix>` prints `rclone lsjson`-shaped JSON for
+                                    that prefix (used by --evict-verified; unset -> the rclone default in
+                                    EVICT_STORE_LIST_CMD_DEFAULT). A listing that fails, times out, or
+                                    won't parse is UNKNOWN -> nothing under that prefix is ever evicted.
 Session enumeration + message delivery are instance work; this script's contract ends at the report.
 """
 import argparse
 import fnmatch
 import glob as globlib
+import hashlib
 import json
 import os
 import shlex
@@ -116,6 +132,46 @@ SCRATCH_BARE_COMPANIONS = frozenset({"objects", "refs", "packed-refs", "config"}
 SCRATCH_MOUNTINFO = "/proc/self/mountinfo"
 SCRATCH_MOUNTINFO_ENV = "REPO_JANITOR_MOUNTINFO"
 
+# Content-verified eviction constants (automated-researcher#856).
+DEFAULT_EVICT_MIN_SIZE = "50M"
+# The store-listing seam. The default is rclone because an rclone remote is what `--store` names
+# (`r2:mats/experiments`), and `lsjson` is the one rclone verb that reports name + size + hash together in
+# one recursive call. `--files-only` keeps directory records out of the index; `--hash` asks the backend for
+# whatever checksum it already holds (for S3, the ETag's md5, or the `X-Amz-Meta-Md5chksum` metadata rclone
+# writes for a multipart upload whose ETag is not a plain md5) — it never makes rclone re-read object bytes.
+EVICT_STORE_LIST_CMD_ENV = "REPO_JANITOR_STORE_LIST_CMD"
+EVICT_STORE_LIST_CMD_DEFAULT = "rclone lsjson --recursive --files-only --hash"
+# A recursive listing of one experiment's prefix is a handful of API pages; a listing that has not answered
+# in this long is UNKNOWN (nothing under that prefix is evicted) rather than an unbounded wait in a sweep.
+EVICT_STORE_LIST_TIMEOUT = 300
+# Hash names as `rclone lsjson --hash` spells them, mapped to the hashlib algorithm that recomputes them
+# locally. Only these are ever compared: an algorithm this script cannot recompute (crc32, quickxor,
+# whirlpool, dropbox) is not evidence of anything, and — since a comparable hash is now REQUIRED to evict
+# (Codex review, automated-researcher#859 round 1) — an object exposing only those verifies nothing.
+#
+# Keyed on the NORMALIZED name (evict_hashes), not on rclone's literal spelling: rclone has emitted these
+# as `MD5`/`SHA-1` as well as `md5`/`sha1` across versions and backends, and a case-sensitive lookup silently
+# dropped the real hashes a production listing carries — which, under the pre-review bar, downgraded straight
+# to unsafe name+size eviction. The smoke's fixtures now assert BOTH spellings for exactly that reason.
+EVICT_HASH_ALGOS = {"md5": "md5", "sha1": "sha1", "sha256": "sha256", "sha512": "sha512"}
+EVICT_HASH_CHUNK = 4 * 1024 * 1024
+# Same reasoning as SCRATCH_WALK_NODE_CAP one leg over: an unbounded walk inside a scheduled sweep is its
+# own failure mode. Larger than that cap because this walk's job IS to visit every file under the root
+# (the age-fact walk only needs the newest mtime), and tripping it under-evicts rather than over-evicts.
+EVICT_WALK_NODE_CAP = 2_000_000
+# `registry/` of a git tree is the durable experiment record, never a cache entry — vetoed by pruning the
+# walk, so no file beneath it is ever even considered (see scan_evict).
+EVICT_REGISTRY_DIR = "registry"
+# The private name a link is renamed to inside its own directory before it is unlinked (evict_unlink): once
+# staged, the entry is reachable only under a name this process just chose, so nothing can substitute a
+# different inode behind it between the identity check and the unlink. A stage this sweep cannot finish is
+# always renamed back; the prefix is recognizable so a crash-orphaned entry is identifiable by hand.
+EVICT_STAGE_PREFIX = ".repo-janitor-evicting."
+# The kernel's own view of who has the inode open, scanned by evict_writable_holder before and after the
+# re-read (automated-researcher#859 round 3). Linux-only on purpose: evict_unlink already refuses to run
+# anywhere dir-fd ops are unsupported, so a platform without /proc simply never evicts.
+EVICT_PROC_ROOT = "/proc"
+
 # Report-ergonomics collapse threshold (automated-researcher#533): the 2026-07-19 real sweep produced 40
 # entries sharing the EXACT SAME "inspection needed" reason string (one root cause hitting every worktree
 # identically), which buried the one actionable fact in noise instead of surfacing it once. A reason string
@@ -162,23 +218,33 @@ def run_git_bytes(args, cwd, timeout=30):
 
 
 def load_live_sessions():
-    """Returns (live_set, seam_failed). seam_failed distinguishes "no seam configured" (empty set is the
-    deliberate fail-safe default) from "a configured seam errored" (liveness is UNKNOWN this sweep, not
-    "nobody's live" — code-review Finding 1: silently folding a provider failure into the empty set would
-    let a live owner's worktree read as ownerless and reach tier 1)."""
+    """Returns (live_set, seam_failed, seam_configured).
+
+    `seam_failed` distinguishes "no seam configured" (empty set is the deliberate fail-safe default) from
+    "a configured seam errored" (liveness is UNKNOWN this sweep, not "nobody's live" — code-review Finding
+    1: silently folding a provider failure into the empty set would let a live owner's worktree read as
+    ownerless and reach tier 1).
+
+    `seam_configured` is reported SEPARATELY rather than collapsed into the empty set (automated-researcher
+    #859 round 3): "the seam is unset" and "the seam ran and named nobody" are the same `(set(), False)` to
+    the worktree tiers ON PURPOSE — there, an unset seam means nothing is silently routed to tier 2 and it
+    all surfaces to the researcher instead, which is the fail-SAFE direction. For the eviction leg it is the
+    fail-DANGEROUS direction: the live-owner veto is that leg's ONLY hold, so an unset seam makes every
+    owner read `not_live` and the veto inert exactly when nothing else is holding. Only `evict_live_veto`
+    consumes this third value; the worktree tiers' documented behaviour is untouched."""
     cmd = os.environ.get("REPO_JANITOR_LIVE_SESSIONS_CMD", "").strip()
     if not cmd:
-        return set(), False
+        return set(), False, False
     try:
         parts = shlex.split(cmd)
         p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
         if p.returncode != 0:
             log(f"REPO_JANITOR_LIVE_SESSIONS_CMD failed (rc={p.returncode}) — liveness UNKNOWN this sweep")
-            return set(), True
-        return {line.strip() for line in p.stdout.splitlines() if line.strip()}, False
+            return set(), True, True
+        return {line.strip() for line in p.stdout.splitlines() if line.strip()}, False, True
     except Exception as e:  # noqa: BLE001 - any seam failure is UNKNOWN, never fatal
         log(f"REPO_JANITOR_LIVE_SESSIONS_CMD errored ({e}) — liveness UNKNOWN this sweep")
-        return set(), True
+        return set(), True, True
 
 
 def owner_live_status(owner, live, seam_failed):
@@ -190,6 +256,39 @@ def owner_live_status(owner, live, seam_failed):
     if seam_failed:
         return "unknown"
     return "live" if owner in live else "not_live"
+
+
+def evict_live_veto(owner, live, seam_failed, seam_configured):
+    """The reason this leg's live-owner veto does NOT positively hold for `owner`, or None when it does.
+
+    The eviction leg's age bar is 0, so this veto is its ONLY hold — and a hold that is only present when
+    the box happens to be configured for it is not a hold (automated-researcher#859 round 3). Two
+    configurations made it inert without saying so, both of them silent pass-throughs to "evict":
+
+      - `owner is None` — a candidate under an `--evict-verified` root that is not also named
+        `--worktree-root`. `owner_live_status` answers "not_live" for it because for the WORKTREE tiers
+        that is right (no owner question applies to the shared checkout's own drift); here it means the
+        veto has nothing to fire on at all, for every file under that root.
+      - no `REPO_JANITOR_LIVE_SESSIONS_CMD` — every owner reads "not_live" because nobody is known live,
+        which for the worktree tiers is the fail-safe default (flagged entries surface to the researcher
+        instead of being routed to a session) and here is the fail-dangerous one.
+
+    Both now KEEP at classification and SKIP at reap, with the reason naming the cause, so this leg's
+    boundary text ("what covers the realistic writer is the live-owner veto") is true by construction. A
+    seam that is wired and FAILED is unchanged — that was already "unknown", already a veto.
+    """
+    if owner is None:
+        return ("no owner derivable — this --evict-verified root is not covered by --worktree-root, so the "
+                "live-owner veto cannot protect it")
+    if not seam_configured:
+        return (f"no liveness seam is configured (REPO_JANITOR_LIVE_SESSIONS_CMD is unset), so owner "
+                f"'{owner}' cannot be shown to be idle and the live-owner veto — this leg's only hold — "
+                "cannot protect it")
+    status = owner_live_status(owner, live, seam_failed)
+    if status != "not_live":
+        return (f"owner '{owner}' reads as '{status}' — nothing inside a live (or unverifiable) owner's "
+                "tree is ever evicted")
+    return None
 
 
 def resolve_default_ref(repo, default_branch):
@@ -1027,6 +1126,812 @@ def scan_scratch(args, now_ts, protected, results, reap_plan):
             reap_plan.append(dict(entry, kind="scratch", parent=parent, age_days=age_days))
 
 
+# --- content-verified eviction: the box is a cache of the artifact store (automated-researcher#856) -----
+# THE MEASURED FAILURE (2026-09-09, third disk-full incident in four days — 95%, 92%, 94%): 41.5 GB of
+# Tinker adapter tars in six CLOSED exploratory runs (`explore-depv1-*`, NOTE.md landed 10-34h earlier).
+# Every byte was already on R2 under `experiments/<exp>/target_probes/` — verified by name+size, then
+# deleted by hand. Nothing on the box could evict them because the exploratory path registers no close, so
+# no LIFECYCLE-KEYED rule considered them "finished". Each of #792/#793, #804 and #842 deletes only what a
+# known close path registered, at a known step, under a known path shape; every new workflow variant
+# (harness worktrees, ad hoc audit clones, the close leg's fresh pull, now the exploratory path) falls
+# outside the rule set and leaks until someone does forensics by hand. That cannot converge — the variants
+# grow faster than the rules.
+#
+# So this leg asks a CONTENT question instead, which no workflow variant can fall outside of: are these
+# exact bytes already at the artifact store? A file whose bytes are PROVEN there is a cache entry, not
+# work-in-progress, so the age bar is 0 (age is evidence about a WRITER, and the store answers the only
+# question that matters here) and the live-owner veto is the only hold. It is a BACKSTOP, not a replacement
+# for the lifecycle reapers: it makes their coverage gaps a delay instead of a leak.
+#
+# "Are these exact bytes already there?" is answered by a CHECKSUM, never by a name and a length: the two
+# files this leg most needs to tell apart are two adapter tars for one experiment, which share a generic
+# basename AND a size fixed by the adapter's shape rather than its weights (Codex review,
+# automated-researcher#859 round 1). An object exposing no checksum this sweep can recompute proves nothing.
+#
+# FAIL-CLOSED, same as every other fact here: no matching object, no comparable checksum, a checksum that
+# disagrees, an unreadable local file, an unparseable or failed store listing, a hardlink this sweep cannot
+# see, an inode that moved between verification and deletion, an inode whose bytes no longer digest to what
+# the store matched — every one of them KEEPS the file and REPORTS it (tier 3). The only path to a delete is
+# a positive checksum match on an inode that is still provably itself AND still provably holds those bytes
+# when the unlink goes (see evict_unlink; the metadata-for-content substitution is what #859 round 2 caught).
+
+def parse_size(text):
+    """Bytes for a `--min-size` value, or None if it can't be parsed. Accepts a bare byte count or a
+    K/M/G/T suffix (optionally with a trailing 'B'), which is how the flag is written in the instance
+    wiring note (`--min-size 50M`). Powers of 1024, matching what `du -h`/`ls -lh` print on the box the
+    number is eyeballed against."""
+    s = (text or "").strip().upper()
+    if s.endswith("B"):
+        s = s[:-1].strip()  # "50MB" -> "50M"; a bare "50B" -> "50"
+    mult = 1
+    for suffix, factor in (("K", 1024), ("M", 1024 ** 2), ("G", 1024 ** 3), ("T", 1024 ** 4)):
+        if s.endswith(suffix):
+            s, mult = s[:-1].strip(), factor
+            break
+    if not s.isdigit():
+        return None
+    return int(s) * mult
+
+
+def human_bytes(n):
+    """A byte count the way the daily sweep line quotes it ("41.5 GB"). Decimal units on purpose: the
+    incident reports and the store's own console both quote decimal GB, and this string exists to be
+    compared against those. The exact byte count always travels alongside it in --json."""
+    if n is None:
+        return "unmeasured"
+    for unit, factor in (("TB", 10 ** 12), ("GB", 10 ** 9), ("MB", 10 ** 6), ("KB", 10 ** 3)):
+        if abs(n) >= factor:
+            return f"{n / factor:.1f} {unit}"
+    return f"{n} B"
+
+
+def evict_action(paths):
+    return {"kind": "evict", "commands": [shlex.join(["rm", "--", p]) for p in paths]}
+
+
+def store_index(prefix, cache):
+    """(index, err) for one store prefix, listed at most ONCE per sweep (cache is keyed by prefix, and
+    failures are cached too — a prefix that failed to list must not be retried once per file under it).
+
+    `index` maps a BASENAME to every object at that prefix carrying it: [{"path", "size", "hashes"}].
+    Basename, not full path, because the store's layout under `<store>/<exp>/` is the archive step's
+    business, not this sweep's — #856's measured case has the local
+    `~/work/explore-depv1-x/adapters/probe.tar` sitting at `experiments/explore-depv1-x/target_probes/
+    probe.tar`, so a path-shaped lookup would have found nothing while the bytes were demonstrably there.
+
+    err is a one-line reason on ANY failure (the seam exits non-zero, times out, isn't on PATH, or prints
+    something that isn't a JSON array) — never an empty index, which would read as a confirmed "the store
+    does not have this" and evict nothing while looking like it checked. An object whose reported size is
+    negative (rclone's "size unknown") is dropped from the index for the same reason: it can prove nothing.
+    """
+    if prefix in cache:
+        return cache[prefix]
+    cmd = os.environ.get(EVICT_STORE_LIST_CMD_ENV, "").strip() or EVICT_STORE_LIST_CMD_DEFAULT
+    try:
+        parts = shlex.split(cmd) + [prefix]
+        p = subprocess.run(parts, capture_output=True, text=True, timeout=EVICT_STORE_LIST_TIMEOUT)
+    except Exception as e:  # noqa: BLE001 - any seam failure is UNKNOWN, never fatal and never "empty"
+        cache[prefix] = (None, f"store listing errored ({e.__class__.__name__}: {e})")
+        return cache[prefix]
+    if p.returncode != 0:
+        tail = (p.stderr.strip().splitlines() or [""])[-1]
+        cache[prefix] = (None, f"store listing exited {p.returncode}: {tail}")
+        return cache[prefix]
+    try:
+        raw = json.loads(p.stdout or "null")
+    except ValueError as e:
+        cache[prefix] = (None, f"store listing did not parse as JSON ({e})")
+        return cache[prefix]
+    if not isinstance(raw, list):
+        cache[prefix] = (None, "store listing was not a JSON array of objects")
+        return cache[prefix]
+    index = {}
+    for obj in raw:
+        if not isinstance(obj, dict) or obj.get("IsDir"):
+            continue
+        name = obj.get("Name")
+        size = obj.get("Size")
+        if not isinstance(name, str) or not name or not isinstance(size, int) or size < 0:
+            continue
+        hashes = obj.get("Hashes") if isinstance(obj.get("Hashes"), dict) else {}
+        rel = obj.get("Path") if isinstance(obj.get("Path"), str) and obj.get("Path") else name
+        index.setdefault(name, []).append({
+            "path": f"{prefix}/{rel}",
+            "size": size,
+            # Normalized at INDEX time so every consumer sees one spelling (see evict_hashes), and kept as a
+            # SET of values per algorithm rather than one: two spellings of the same algorithm in one record
+            # (`MD5` and `md5`) that disagree are a store record contradicting itself, and evict_verdict's
+            # every-comparable-hash-must-agree bar then refuses to evict on it instead of picking a winner.
+            "hashes": evict_hashes(hashes),
+        })
+    cache[prefix] = (index, None)
+    return cache[prefix]
+
+
+def evict_hashes(raw):
+    """`{normalized algorithm name -> sorted set of lowercase hex values}` for one store record's `Hashes`.
+
+    rclone has spelled these both ways across versions and backends — `md5`/`sha1` and `MD5`/`SHA-1` — so a
+    case-sensitive lookup silently discarded the real hashes a production listing carries (Codex review,
+    automated-researcher#859 round 1). Normalizing to lowercase-alphanumeric collapses every spelling of an
+    algorithm onto one key (`SHA-256` -> `sha256`), which is what makes "this object exposes a comparable
+    hash" a fact about the STORE rather than about rclone's formatting on the day the listing was taken.
+
+    Names this script cannot recompute survive normalization but are simply absent from EVICT_HASH_ALGOS, so
+    they are carried no further; empty/blank values are dropped, since an empty hash is an absent one.
+    """
+    out = {}
+    for name, value in (raw or {}).items():
+        if not isinstance(name, str) or not isinstance(value, str) or not value.strip():
+            continue
+        key = "".join(ch for ch in name.lower() if ch.isalnum())
+        if key not in EVICT_HASH_ALGOS:
+            continue
+        out.setdefault(key, set()).add(value.strip().lower())
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def stream_hashes(fh, algos):
+    """`{algo: lowercase hex digest}` for one open binary stream, every algorithm in ONE pass. Streamed in
+    chunks: these are multi-GB adapter tars, and reading one into memory inside a sweep is its own failure
+    mode."""
+    hs = {a: hashlib.new(EVICT_HASH_ALGOS[a]) for a in algos}
+    while True:
+        chunk = fh.read(EVICT_HASH_CHUNK)
+        if not chunk:
+            break
+        for h in hs.values():
+            h.update(chunk)
+    return {a: h.hexdigest().lower() for a, h in hs.items()}
+
+
+def local_file_hash(path, algo):
+    """The file's own `algo` digest (lowercase hex), or None (UNKNOWN) if it can't be read."""
+    try:
+        with open(path, "rb") as fh:
+            return stream_hashes(fh, [algo])[algo]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def fd_hashes(fd, algos):
+    """`{algo: lowercase hex digest}` read from an ALREADY-OPEN descriptor, or None (UNKNOWN) on any read
+    failure. Reading through the descriptor — never through the path again — is the point: the bytes are
+    attributed to the inode the caller already `fstat`ed, so no name lookup sits between "these are the
+    bytes" and "this is the file". Duplicated before wrapping so the caller keeps its own fd."""
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(fd), "rb", closefd=True) as fh:
+            return stream_hashes(fh, algos)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def evict_writable_holder(stat_key, proc_root=EVICT_PROC_ROOT):
+    """`(veto, blind)` for one inode: `veto` is a reason a WRITABLE descriptor is open on it (or that this
+    platform cannot answer the question at all), else None; `blind` counts the same-uid processes whose
+    descriptor tables this scan was not permitted to inspect.
+
+    WHY THIS EXISTS (automated-researcher#859 round 3). Re-reading the bytes before the unlink closes every
+    writer that goes through a NAME, but not one holding an already-open writable descriptor: it can rewrite
+    an offset the digest has ALREADY consumed while the read is still running, then restore `mtime_ns` with
+    `utime`, leaving `(dev, ino, size, mtime_ns)` bit-identical. So the exposed window is the whole multi-GB
+    read, not the microseconds after it. This scan asks the question the other way round — not "did a write
+    happen?" but "could one have?" — and staging is what makes it sufficient rather than merely suggestive:
+    by the time it runs, every public name for the inode is gone, so a writer that could have opened one
+    must PREDATE staging and is visible here. The step-5 re-scan catches one that opened the (still
+    readdir-visible) staged name during the read.
+
+    WHAT IT CANNOT SEE, measured rather than assumed. Resolving `/proc/<pid>/fd/<n>` needs ptrace-read
+    permission on that process, and Linux's default `kernel.yama.ptrace_scope = 1` grants it only for the
+    scanner's own DESCENDANTS. So on a stock box a same-uid sibling — precisely the agent session this leg's
+    measured 41.5 GB came from — lists as a pid, lists its `fd/` directory, and then refuses every entry
+    with EPERM. Verified on this repo's own CI runner (`ptrace_scope=1`; the user `systemd`'s `fd/` lists
+    and every entry stats EPERM), which is why an uninspectable process is COUNTED here and not treated as a
+    veto: failing closed on it would make the leg evict nothing at all on any default-configured Linux box,
+    and a gate that never passes has removed a feature rather than secured one (this deviation from the
+    strict form is ratified in the round-limit-summons #2 adjudication on #859). What covers that blind spot
+    is the ctime binding in evict_unlink, which observes the write instead of the writer — see there. A
+    process under a DIFFERENT uid is invisible for the same reason and is the same accepted residual.
+
+    A SECOND THING IT CANNOT SEE, and why it is not this function's job (#859 round 4): a writer can `mmap`
+    the file `MAP_SHARED` and CLOSE its descriptor, after which there is no descriptor here to find at all.
+    Extending the scan to `/proc/<pid>/maps` or `/proc/<pid>/map_files` does not help — both are
+    Permission-denied for a same-uid sibling under `ptrace_scope=1` exactly as `fd/` is (measured on this
+    repo's CI runner), so there is no positive detection of that writer at this privilege level and none is
+    attempted. It is closed on the WRITE side instead, by evict_unlink's fsync barrier — see there.
+
+    `os.getpid()` is skipped: this process's own descriptor on the inode is the `O_RDONLY` one step 4 just
+    opened. A pid or a descriptor that vanishes mid-scan was closed and holds nothing.
+    """
+    try:
+        uid = os.getuid()
+        pids = [n for n in os.listdir(proc_root) if n.isdigit()]
+    except (OSError, AttributeError) as e:  # no /proc (or no getuid) -> this platform cannot answer at all
+        return (f"the open-descriptor view this delete needs ('{proc_root}') is unavailable "
+                f"({e.__class__.__name__}: {e}), so a writer on this inode cannot be ruled out"), 0
+    dev, ino = stat_key[0], stat_key[1]
+    me = os.getpid()
+    blind = 0
+    for spid in pids:
+        if int(spid) == me:
+            continue
+        pdir = os.path.join(proc_root, spid)
+        try:
+            # A process `/proc` does not attribute to this janitor's uid cannot be inspected here at all
+            # (its `fd/` is root-owned); a non-dumpable same-uid process lands here for the same reason.
+            if os.stat(pdir).st_uid != uid:
+                continue
+            fds = os.listdir(os.path.join(pdir, "fd"))
+        except (FileNotFoundError, ProcessLookupError):
+            continue  # exited mid-scan: a dead process holds no descriptor
+        except OSError:
+            blind += 1
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(os.path.join(pdir, "fd", fd))
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # closed mid-scan (or the process exited): not a holder
+            except OSError:
+                blind += 1
+                break     # ptrace-denied for this process: every one of its entries will refuse alike
+            if (st.st_dev, st.st_ino) != (dev, ino):
+                continue
+            try:
+                with open(os.path.join(pdir, "fdinfo", fd)) as fh:
+                    info = fh.read()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError as e:
+                # It holds a descriptor on THIS inode and the access mode is unreadable — unlike the
+                # blind cases above this is a positive hit with an unknown mode, so it vetoes.
+                return (f"process {spid} holds a descriptor (fd {fd}) on this inode and its access mode "
+                        f"could not be read ({e.__class__.__name__}: {e})"), blind
+            flags = None
+            for line in info.splitlines():
+                if line.startswith("flags:"):
+                    try:
+                        flags = int(line.split(":", 1)[1].strip(), 8)  # /proc prints these in OCTAL
+                    except ValueError:
+                        flags = None
+                    break
+            if flags is None:
+                return (f"process {spid} holds a descriptor (fd {fd}) on this inode and '{proc_root}' "
+                        "reported no parseable access mode for it"), blind
+            if (flags & os.O_ACCMODE) in (os.O_WRONLY, os.O_RDWR):
+                return (f"process {spid} holds a WRITABLE descriptor (fd {fd}) on this inode, so its bytes "
+                        "could be rewritten unobserved while they are being re-read"), blind
+    return None, blind
+
+
+EVICT_DIR_FD_OPS = (os.stat, os.rename, os.unlink, os.open)
+
+
+def evict_unlink(paths, stat_key, verified_hashes, log):
+    """Unlink every link in one hardlink group, but ONLY an inode still holding the exact bytes that were
+    verified against the store. Returns (outcome, detail): ("evicted", None), ("skipped", reason) when the
+    on-disk state no longer matches what was verified, or ("failed", reason) on an OS error.
+
+    THE INVARIANT THIS WHOLE FUNCTION EXISTS FOR: nothing is unlinked unless the bytes being removed are, at
+    the moment of removal, bytes this sweep has positively established are also at the store — which means
+    that between the ctime anchor and the unlink, EVERY channel that can modify those bytes either leaves
+    evidence a gate checks (the re-read digest, the ctime anchor, the open-descriptor scan) or is FORCED to
+    by the janitor itself (the fsync write-protect barrier); what remains outside is enumerated below,
+    adversarial-only, and adjudicated accepted. Everything in this function is that one sentence; the four
+    review rounds on #859 are four distinct ways a *proxy* for it was substituted for the thing itself.
+
+    WHY THIS IS NOT `lstat(p)` THEN `os.unlink(p)` (round 1): those are two lookups of the same NAME, and a
+    name is not an inode. A concurrent rename between them makes the janitor delete a file it never
+    verified. A link added to the inode after the `st_nlink` check has the same shape: the accounting claims
+    "this frees the bytes" when it no longer does. So the identity is BOUND before it is checked.
+
+    WHY A STAT TUPLE IS NOT THE BYTES (round 2): binding the name still leaves `(dev, ino, size, mtime_ns)`
+    standing in for the content, and that is the SAME substitution the round-1 verdict fix rejected one step
+    earlier (name+size for a checksum), just moved to the delete. `mtime` is not a content hash: an mmap
+    writer's timestamp update fires at the DIRTYING FAULT, so a store into an already-dirty page updates no
+    timestamp at all, a filesystem with coarse timestamp granularity hides a write inside its own granule,
+    and a writer holding an fd bypasses the name the staging step bound. So the LAST thing that happens
+    before the unlink is a re-read of the inode's actual bytes, compared against the digest that verified
+    against the store:
+
+      1. Open the containing directory (`O_DIRECTORY|O_NOFOLLOW`) and anchor every later operation to that
+         dirfd, so no ancestor component can be re-pointed under us mid-sequence.
+      2. `rename` the entry, within that same directory, to a name this process just generated. After this
+         the inode is reachable by path only through a name nothing else knows, so nothing can substitute a
+         different inode behind it. EVERY link in the group is staged before any is checked — which is also
+         what makes the link count trustworthy: once all `st_nlink` links carry private names, no outside
+         actor can reach the inode by path to add another.
+      3. `lstat` each staged entry through its dirfd and require a regular file, the exact
+         `(dev, ino, size, mtime_ns)` whose bytes were verified, and `st_nlink == len(paths)` — the CHEAP
+         GATE, not the proof: one stat per link, skipping a stale group without paying for the read in step
+         4. ANCHOR the inode's `st_ctime_ns` here, and scan the kernel's own open-descriptor view
+         (evict_writable_holder) for a WRITABLE descriptor on the inode.
+      4. Open the staged inode `O_RDONLY|O_NOFOLLOW` through its dirfd, `fsync` it — THE BARRIER, see
+         below — then re-read every byte through THAT descriptor and require each digest to equal the one
+         that matched the store. `fstat` the same descriptor to confirm the bytes just read came from the
+         verified inode AND that its ctime is still the anchored one.
+      5. Re-run step 3 — every part, after the read: a write that landed during it (ctime, and size/mtime
+         when they weren't forged back), a link added during it (`st_nlink`), and a writable descriptor
+         opened during it are all caught, and every staged name is re-tied to the inode just hashed.
+      6. Only then unlink the staged entries.
+
+    WHY THE DIGEST ALONE IS NOT ENOUGH (round 3): a writer holding an already-open writable descriptor can
+    rewrite an offset the digest has ALREADY consumed while the read is still running and then restore
+    `mtime_ns` with `utime`, so the exposed window is the WHOLE read, not the microseconds after it — and
+    `(dev, ino, size, mtime_ns)` comes back bit-identical. POSIX has no atomic
+    "unlink-if-contents-still-equal" to close that with, so it is closed from two sides:
+
+      - THE WRITER: step 3/5's `/proc` scan refuses to unlink while any writable descriptor is open on the
+        inode, which staging makes sufficient rather than suggestive (every public name is already gone, so
+        such a writer must predate staging). This is the positive detection, and it is exact when `/proc`
+        lets this janitor look.
+      - THE WRITE: the ctime anchor (see ctime_moved) catches the rewrite itself. A `write(2)` moves ctime,
+        and `utimensat` restores mtime while moving ctime to *now* — there is no syscall for an
+        unprivileged process to set ctime — so the one forgery that defeats the mtime gate is exactly what
+        this observes. It needs no permission over the writer, which matters because Linux's default
+        `ptrace_scope=1` hides a same-uid SIBLING's descriptors from the scan (measured — see
+        evict_writable_holder), and a same-uid sibling is the realistic writer here.
+
+    WHY CTIME ALONE IS NOT ENOUGH EITHER, and what the fsync in step 4 is for (round 4): the ctime anchor is
+    not universal over write channels. A `MAP_SHARED` writable mapping (whose fd may be closed the moment
+    `mmap` returns, so the scan above has nothing to see, and whose pages `ptrace_scope=1` equally forbids
+    reading through `/proc/<pid>/maps`) updates the timestamp at the DIRTYING FAULT, not at writeback — so a
+    store into a page that is ALREADY dirty moves nothing, and a later `msync` does not move it either. A
+    writer that pre-dirties a page with UNCHANGED bytes before the anchor is therefore free to store new
+    bytes mid-read, invisibly to both gates above. Step 4's `fsync` is what removes that freedom: flushing
+    the inode WRITE-PROTECTS every PTE mapping its pages, so any store after it must re-fault and the fault
+    moves ctime, which the step-4 `fstat` and step-5 re-check then see. A store BEFORE the fsync is already
+    in the page cache, so the re-read digests the writer's bytes and disagrees. Ordering is what makes it
+    sound: anchor (step 3) -> fsync -> read -> ctime re-check. Every byte-modifying channel now lands on one
+    side or the other of that barrier. (Verified on ext4 for both `/tmp` and `$HOME`, with a control run
+    confirming a merely-mapped file with a dirty page still evicts.)
+
+    THE BOUNDARY THIS LEAVES, enumerated rather than papered over — adjudicated accepted residual at this
+    repo's stated scale (senior-engineer adjudication on automated-researcher#859, round-limit summons #2):
+      (a) a same-uid writer running the two-phase attack above on a NO-WRITEBACK filesystem (tmpfs), where
+          `fsync` is not a barrier at all because there is nothing to write back and the pages are never
+          re-protected. Measured. It costs this leg nothing real: an eviction target exists to reclaim DISK,
+          and a tmpfs artifact occupies RAM.
+      (b) a writer under a different uid, invisible to this janitor's `/proc` view for the same reason a
+          sibling's descriptors are.
+      (c) a writer that opens the (readdir-visible) staged name after step 5 and wins the microseconds
+          before step 6's `unlink`.
+      (d) a filesystem whose timestamp granularity is coarse enough to hide a write inside the same granule
+          as the staging rename, which would hide it from the ctime anchor too.
+    All four are ADVERSARIAL rather than accidental: an accidental writer's first dirtying write moves ctime
+    even on tmpfs (measured), and any modification before the read breaks the re-read digest instead. The
+    other hold is the live-owner veto, which this leg requires to hold BY CONSTRUCTION rather than by
+    configuration (see evict_live_veto): a candidate with no derivable owner, or a sweep with no liveness
+    seam wired, is never evicted at all.
+
+    Any failure in 1-5 puts every staged entry back under its original name, and a restore that cannot
+    complete is logged loudly with the staged path — which is why EVICT_STAGE_PREFIX is recognizable rather
+    than random: a crash-orphaned entry is identifiable by hand, and (carrying a name no store object
+    shares) can never be evicted by a later sweep. The restore refuses to overwrite: it renames back only
+    after confirming the original name is absent, since something may have re-created it meanwhile and
+    clobbering that file would be a second, unrelated deletion.
+    """
+    if not all(op in os.supports_dir_fd for op in EVICT_DIR_FD_OPS):
+        return "skipped", ("this platform cannot anchor a delete to a directory fd, so the verified inode "
+                           "cannot be bound to the unlink")
+    if not paths:
+        return "skipped", "no path was planned for this eviction"
+    algos = sorted(verified_hashes or {})
+    if not algos:
+        # Fail closed rather than fall back to the stat tuple: with no digest to re-check, this function
+        # cannot establish the one thing it exists to establish (round 2). A tier-1 eviction always carries
+        # one — evict_verdict cannot promote a file without a recomputed checksum agreeing with the store.
+        return "skipped", ("no recomputed checksum was carried into the delete, so the bytes about to be "
+                           "removed cannot be re-verified against the store")
+    fds = []      # every fd opened (directory fds + the read fd), closed exactly once in the finally
+    staged = []   # (dirfd, original basename, staged basename, original full path) still needing a restore
+    bound = []    # the inode's st_ctime_ns at the FIRST post-staging look — the anchor for the whole window
+    blind = [0]   # same-uid processes evict_writable_holder was not permitted to inspect (reported below)
+    outcome, detail = None, None
+
+    def ctime_moved(st, p):
+        """None while `st` carries the ctime this window was anchored to, else the reason it doesn't. The
+        FIRST call anchors (every link is the same inode, so they share one value).
+
+        THIS IS WHAT CLOSES THE ROUND-3 WINDOW, and it observes the WRITE rather than the writer: an
+        in-place rewrite through an already-open descriptor bumps the inode's change time, and unlike
+        `mtime` no unprivileged process can put it back — `utimensat` sets atime/mtime and moves ctime to
+        *now* as a side effect; there is no syscall to set ctime at all. Reads do not touch it (a read
+        updates atime, which does not itself move ctime), so the sweep's own multi-GB re-read cannot trip
+        this. Anchored AFTER staging because the staging `rename` moves ctime itself, and the anchor has to
+        be a value taken inside the window it is protecting.
+
+        THE CLAIM THIS DELIBERATELY DOES NOT MAKE (round 4): "unprivileged writers cannot avoid ctime" is
+        true of `write(2)` and `utimensat`, and FALSE of a store through a shared mapping into a page that
+        is already dirty — that channel moves no timestamp, because the update fires at the dirtying fault.
+        This gate is only universal over write channels BECAUSE step 4 fsyncs before reading, which
+        write-protects those pages and forces the next store to fault. Read the two together; neither is
+        the whole gate."""
+        if not bound:
+            bound.append(st.st_ctime_ns)
+            return None
+        if st.st_ctime_ns != bound[0]:
+            return (f"'{p}' has been written to since it was staged for eviction (its inode change time "
+                    "moved, and no unprivileged writer can put that back)")
+        return None
+
+    def staged_state():
+        """The first reason the staged group no longer describes the exact verified inode — or no longer
+        provably excludes a writer on it — or None. Run BEFORE the re-read as a cheap gate and AGAIN after
+        it (see steps 3 and 5)."""
+        for dirfd, _name, tmp, p in staged:
+            try:
+                st = os.lstat(tmp, dir_fd=dirfd)
+            except OSError as e:
+                return f"'{p}' could not be re-checked once staged ({e})"
+            if not stat.S_ISREG(st.st_mode):
+                return f"'{p}' is no longer a regular file"
+            if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != tuple(stat_key):
+                return f"'{p}' is not the inode whose bytes were verified"
+            if st.st_nlink != len(paths):
+                return (f"'{p}' now has {st.st_nlink} link(s), not the {len(paths)} this eviction "
+                        "accounted for")
+            moved = ctime_moved(st, p)
+            if moved:
+                return moved
+        # One scan per call, not one per link: the links are one inode, which the loop above just asserted.
+        holder, unseen = evict_writable_holder(stat_key)
+        if holder:
+            return f"'{paths[0]}' cannot be evicted: {holder}"
+        blind[0] = max(blind[0], unseen)
+        return None
+
+    try:
+        for p in paths:
+            parent, name = os.path.split(p)
+            try:
+                dirfd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+            except OSError as e:
+                outcome, detail = "skipped", f"'{parent}' could not be opened as a directory ({e})"
+                break
+            fds.append(dirfd)
+            tmp = f"{EVICT_STAGE_PREFIX}{os.getpid()}.{os.urandom(8).hex()}"
+            try:
+                # `rename` overwrites its destination, so refuse a staging name that somehow already exists
+                # rather than destroying it. The name is process- and random-keyed, so this is a formality.
+                try:
+                    os.lstat(tmp, dir_fd=dirfd)
+                    outcome, detail = "skipped", f"staging name '{tmp}' already exists next to '{p}'"
+                    break
+                except FileNotFoundError:
+                    pass
+                os.rename(name, tmp, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            except OSError as e:
+                outcome, detail = "skipped", f"'{p}' could not be staged for eviction ({e})"
+                break
+            staged.append((dirfd, name, tmp, p))
+        if outcome is None:
+            reason = staged_state()          # step 3: the cheap gate + the writable-descriptor scan
+            if reason:
+                outcome, detail = "skipped", reason
+        if outcome is None:
+            # Step 4: the bytes themselves, re-read through a descriptor on the staged inode. One read
+            # covers the whole hardlink group — every link is the same inode, which steps 3 and 5 assert.
+            dirfd0, _name0, tmp0, p0 = staged[0]
+            try:
+                filefd = os.open(tmp0, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd0)
+            except OSError as e:
+                outcome, detail = "skipped", f"'{p0}' could not be opened to re-read its bytes ({e})"
+            else:
+                fds.append(filefd)
+                # THE BARRIER (round 4), between the ctime anchor and the first byte read. Flushing the
+                # inode's dirty pages WRITE-PROTECTS every PTE that maps them — that is how the kernel
+                # accounts dirtiness — so a later store through a shared mapping must re-fault, and the
+                # fault runs `file_update_time`, which moves ctime. Without it, a mapping whose page was
+                # ALREADY dirty takes new bytes with NO ctime movement at all (the timestamp fires at the
+                # dirtying fault, not at writeback, so `msync` does not move it either), which is the one
+                # channel neither the digest nor the ctime anchor could see. Legal on an O_RDONLY
+                # descriptor, and near-free on a file this janitor never wrote. Fail closed like any other
+                # step-4 failure: without the barrier the window below is not the one documented.
+                try:
+                    os.fsync(filefd)
+                except OSError as e:
+                    outcome, detail = "skipped", (f"'{p0}' could not be flushed to disk before re-reading "
+                                                  f"it ({e}), so a shared memory mapping could rewrite its "
+                                                  "bytes mid-read without moving the inode's change time")
+                if outcome is None:
+                    digests = fd_hashes(filefd, algos)
+                    try:
+                        fst = os.fstat(filefd)
+                    except OSError:
+                        fst = None
+                    fd_moved = ctime_moved(fst, p0) if fst is not None else None
+                    if digests is None:
+                        outcome, detail = "skipped", (f"'{p0}' could not be re-read, so the bytes about to "
+                                                      "be removed could not be re-verified against the "
+                                                      "store")
+                    elif fst is None or not stat.S_ISREG(fst.st_mode) or (
+                            fst.st_dev, fst.st_ino, fst.st_size, fst.st_mtime_ns) != tuple(stat_key):
+                        outcome, detail = "skipped", (f"'{p0}' is not the inode whose bytes were verified "
+                                                      "(the descriptor they were re-read from disagrees)")
+                    # Asked of the READ DESCRIPTOR, not of a name: the bytes just digested came from this
+                    # fd, so this is the tightest place to ask whether anything wrote to them mid-read.
+                    elif fd_moved:
+                        outcome, detail = "skipped", fd_moved
+                    else:
+                        stale = [a for a in algos if digests[a] != verified_hashes[a]]
+                        if stale:
+                            outcome, detail = "skipped", (
+                                f"'{p0}' no longer holds the bytes that were verified against the store "
+                                f"({'+'.join(stale)} disagrees now)")
+        if outcome is None:
+            reason = staged_state()          # step 5: both halves re-asserted AFTER the read
+            if reason:
+                outcome, detail = "skipped", reason
+        if outcome is None and blind[0]:
+            # Never a silent cap: the descriptor scan's coverage is stated whenever it was incomplete, so a
+            # report never reads as "no writer was open on this" when it means "none that I could see".
+            log(f"EVICT NOTE: {blind[0]} same-uid process(es) would not let this sweep inspect their open "
+                f"descriptors while evicting '{paths[0]}' (ptrace_scope); a descriptor write by one of them "
+                "is caught by the inode's change time, and a shared-mmap write is forced onto that change "
+                "time by the fsync barrier, which together are what the delete rests on here")
+        if outcome is None:
+            done = 0
+            for dirfd, _name, tmp, p in staged:
+                try:
+                    os.unlink(tmp, dir_fd=dirfd)
+                except OSError as e:
+                    # A partial unlink frees NOTHING (the inode survives behind its remaining links), so the
+                    # links that did go are a loss with no reclaim: the rest go back and the whole group is
+                    # reported failed, crediting zero bytes.
+                    outcome = "failed"
+                    detail = f"{p}: {e} ({done} of {len(staged)} link(s) already unlinked)"
+                    break
+                done += 1
+            staged = staged[done:]
+            if outcome is None:
+                return "evicted", None
+        for dirfd, name, tmp, p in staged:
+            try:
+                try:
+                    os.lstat(name, dir_fd=dirfd)
+                except FileNotFoundError:
+                    os.rename(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+                    continue
+                raise FileExistsError(f"'{name}' was re-created while this eviction was staged")
+            except OSError as e:  # noqa: BLE001 - a restore that can't complete is reported, never retried
+                log(f"EVICT STAGE ORPHANED: {p} is staged as '{tmp}' in its own directory and could not be "
+                    f"renamed back ({e}) — the bytes are intact under that name")
+        return outcome, detail
+    finally:
+        for dirfd in fds:
+            try:
+                os.close(dirfd)
+            except OSError:
+                pass
+
+
+def evict_verdict(path, root, size, store, cache, args, live, seam_failed, seam_configured):
+    """(store_object, note, verified_hashes) for one candidate file: store_object is the object that PROVES
+    these bytes are already at the store (evict), or None (keep — `note` is then the tier-3 reason).
+
+    `verified_hashes` is `{algo: local hex digest}` for every checksum the match actually rested on, or
+    None when the file is kept. It is carried all the way to the unlink, where the bytes are re-read and
+    compared against it — a stat tuple is not the bytes (Codex review, automated-researcher#859 round 2).
+
+    The bar, in order, every step fail-closed:
+      1. the live-owner veto, and it must hold BY CONSTRUCTION rather than by configuration
+         (evict_live_veto, automated-researcher#859 round 3): nothing is evicted while its owner reads live
+         or unverifiable, AND nothing is evicted whose owner cannot be derived at all, AND nothing is
+         evicted by a sweep with no liveness seam wired — since with an age bar of 0 this veto is the leg's
+         only hold, and a hold that silently disappears with the configuration is not one. Checked FIRST
+         because it is free and it makes the store listing/hash work unnecessary for a vetoed file.
+      2. a top-level directory name under the root, which is what keys the store prefix
+         (`<store>/<top-level dir>/**`). A file sitting directly under the root has none, so it is kept.
+      3. an object at that prefix with the SAME BASENAME AND SIZE — a cheap prefilter, never the proof.
+      4. and a CHECKSUM this script recomputed from the local bytes agreeing with every comparable checksum
+         that object exposes. A comparable hash is REQUIRED (Codex review, automated-researcher#859 round 1):
+         name + exact size is not exact-byte equivalence, and this leg's whole premise is that the local
+         bytes are already durable somewhere else. The collision is not hypothetical in the population this
+         leg was written for — LoRA adapter tars for one experiment share a generic basename (`probe.tar`)
+         AND a size determined by the adapter's shape rather than its weights, so two different checkpoints
+         under one `<store>/<exp>/` prefix are exactly the shape name+size cannot tell apart. Deleting
+         unique bytes because something at the store shared a name and a length is the one outcome this bar
+         exists to prevent, and it is irreversible.
+
+         An object exposing NO comparable checksum therefore proves nothing and the file is kept and
+         reported (tier 3), naming the object so the operator can run the by-hand check that was run on
+         2026-09-09 — the same fail-closed shape as an unreadable listing. This does not cost the measured
+         case: `--store` names an rclone remote, and rclone reports md5 for S3/R2 objects it uploaded,
+         including the `X-Amz-Meta-Md5chksum` it writes when a multipart ETag is not a plain md5. Aligning
+         on a recomputed checksum is also what `rclone check` — the test the archive step already gates on —
+         actually compares.
+    """
+    owner = owner_of(path, args.worktree_root, args.owner_depth)
+    veto = evict_live_veto(owner, live, seam_failed, seam_configured)
+    if veto:
+        return None, f"verified-eviction candidate kept: {veto}", None
+    rel_parts = os.path.relpath(path, root).split(os.sep)
+    if len(rel_parts) < 2:
+        return None, ("verified-eviction candidate kept: it sits directly under the --evict-verified root, "
+                      "so there is no top-level directory name to key the store prefix on"), None
+    prefix = f"{store}/{rel_parts[0]}"
+    index, err = store_index(prefix, cache)
+    if err:
+        return None, (f"verified-eviction candidate kept: the store prefix could not be listed ({err}) — an "
+                      "unreadable listing is never 'the store does not have this'"), None
+    cands = [o for o in index.get(os.path.basename(path), []) if o["size"] == size]
+    if not cands:
+        return None, ("verified-eviction candidate kept: no object under its store prefix matches this "
+                      "file's basename AND exact size"), None
+    local = {}
+    saw_comparable_hash = False
+    for obj in cands:
+        algos = sorted(obj["hashes"])
+        if not algos:
+            continue  # this object proves nothing; another candidate may still carry a checksum
+        saw_comparable_hash = True
+        for algo in algos:
+            if algo not in local:
+                local[algo] = local_file_hash(path, algo)
+            if local[algo] is None:
+                return None, (f"verified-eviction candidate kept: its local {algo} could not be computed, so "
+                              "the store's hash could not be checked"), None
+        # EVERY comparable checksum this object exposes must agree — one disagreement (including a record
+        # that carries two spellings of one algorithm with different values) makes it a confirmed different
+        # file, whatever its other hashes say.
+        if all(set(obj["hashes"][algo]) == {local[algo]} for algo in algos):
+            return obj["path"], "+".join(algos) + "-verified", {a: local[a] for a in algos}
+    if saw_comparable_hash:
+        return None, ("verified-eviction candidate kept: an object matches its basename and size, but the "
+                      "checksums the store exposes for it disagree with the local file's"), None
+    return None, ("verified-eviction candidate kept: an object matches its basename and exact size, but the "
+                  "store exposes no checksum this sweep can recompute for it, and name+size is not "
+                  "exact-byte equivalence — verify by hand against "
+                  f"'{cands[0]['path']}' if these bytes really are durable"), None
+
+
+def scan_evict(args, live, seam_failed, seam_configured, results, reap_plan):
+    """Classify every regular file >= --min-size under an --evict-verified root: proven at the store ->
+    tier 1 (+ eviction plan), anything else -> tier 3 (kept, reported). Never tier 2 — a live owner is a
+    VETO here, not a routing target: there is nothing for a session to disposition about its own cache.
+
+    HARDLINKS ARE RESOLVED PER INODE, not per path (#856's design line "delete the local file and hardlink
+    siblings (same inode) with it"): unlinking one of N links frees nothing at all, so an inode is evicted
+    only when EVERY link to it is accounted for in this scan AND every one of them verified — otherwise
+    the group is kept, since destroying a path for zero reclaimed bytes is pure loss. `st_nlink` is what
+    makes "accounted for" checkable: a link outside the scanned roots makes the count disagree, and the
+    group is kept and reported rather than guessed about.
+
+    A SYMLINK IS NEVER A CANDIDATE (only `stat.S_ISREG` files are), and the walk never follows one, so a
+    link into a live tree can neither be evicted nor drag its target's bytes into the scan.
+    """
+    cache = {}
+    store = args.store.rstrip("/")
+
+    def report(path, reason, owner=None):
+        results["tier3"].append({
+            "repo": None, "path": path, "branch": None, "owner": owner, "tier": 3, "kind": "evict",
+            "reason": reason, "action": {"kind": "inspect", "commands": [shlex.join(["ls", "-l", path])]},
+        })
+
+    groups = {}   # (st_dev, st_ino) -> {"size", "nlink", "entries": [(path, root)]}
+    seen = set()  # nested/overlapping roots must not enter the same path twice (it would fake an nlink)
+    for raw in args.evict_verified:
+        root = os.path.realpath(os.path.expanduser(raw))
+        if root == os.sep or not os.path.isdir(root) or os.path.islink(root):
+            report(root, "inspection needed: --evict-verified root is not a readable, non-symlinked "
+                         "directory (or resolves to '/')")
+            continue
+        walk_errors = []
+        nodes = 0
+        capped = False
+        for dirpath, dirs, files in os.walk(root, followlinks=False, onerror=walk_errors.append):
+            names = set(dirs) | set(files)
+            # `registry/` OF A GIT TREE is the durable experiment record — pruned so nothing beneath it is
+            # even stat'd. Keyed on the git marker's NAME being present at this level (never on whether it
+            # RESOLVES — same discipline as scratch_path_blocker: a checkout whose `.git` symlink dangles
+            # is still a checkout, and is the one least likely to have its contents anywhere else).
+            if SCRATCH_CHECKOUT_MARKER in names:
+                dirs[:] = [d for d in dirs if d != EVICT_REGISTRY_DIR]
+            # A git object database is never a cache of the artifact store either, and a pack file large
+            # enough to be a candidate has no business being name+size-matched against it.
+            dirs[:] = [d for d in dirs if d != SCRATCH_CHECKOUT_MARKER]
+            nodes += len(dirs) + len(files)
+            if nodes > EVICT_WALK_NODE_CAP:
+                capped = True
+                break
+            for name in files:
+                full = os.path.join(dirpath, name)
+                if full in seen:
+                    continue
+                try:
+                    st = os.lstat(full)
+                except OSError as e:
+                    report(full, "inspection needed: this file could not be stat'd "
+                                 f"({e.__class__.__name__}: {e})")
+                    continue
+                if not stat.S_ISREG(st.st_mode) or st.st_size < args.min_size_bytes:
+                    continue  # a symlink/fifo/device is never a cache entry; a small file is not the leak
+                seen.add(full)
+                g = groups.setdefault((st.st_dev, st.st_ino),
+                                      {"size": st.st_size, "nlink": st.st_nlink,
+                                       "mtime_ns": st.st_mtime_ns, "entries": []})
+                g["entries"].append((full, root))
+        if capped:
+            report(root, f"inspection needed: this --evict-verified root exceeds the {EVICT_WALK_NODE_CAP}-node "
+                         "scan cap — it was only partially scanned, so nothing under the unscanned part was "
+                         "considered for eviction")
+        if walk_errors:
+            report(root, f"inspection needed: {len(walk_errors)} subdirector(ies) under this --evict-verified "
+                         "root could not be read — files beneath them were never considered for eviction")
+
+    for (dev, ino), g in groups.items():
+        entries, size = g["entries"], g["size"]
+        if len(entries) != g["nlink"]:
+            for full, _root in entries:
+                report(full, f"verified-eviction candidate kept: the inode has {g['nlink']} link(s) but only "
+                             f"{len(entries)} were found under the scanned root(s) — unlinking the ones in "
+                             "scope would free no bytes while destroying a path whose siblings this sweep "
+                             "cannot see")
+            continue
+        verdicts = [(full, *evict_verdict(full, root, size, store, cache, args, live, seam_failed,
+                                          seam_configured))
+                    for full, root in entries]
+        if any(obj is None for _full, obj, _note, _hashes in verdicts):
+            for full, obj, note, _hashes in verdicts:
+                report(full, note if obj is None else
+                       "verified-eviction candidate kept: these bytes are verified at the store, but another "
+                       "hardlink to the same inode is not — unlinking this path alone would free nothing")
+            continue
+        primary, obj, note, verified = verdicts[0]
+        siblings = [full for full, _o, _n, _h in verdicts[1:]]
+        owner = owner_of(primary, args.worktree_root, args.owner_depth)
+        reason = (f"verified on the artifact store at '{obj}' ({note}), {human_bytes(size)} — safe to evict"
+                  + (f" (+{len(siblings)} hardlink sibling(s) to the same inode, unlinked with it)"
+                     if siblings else ""))
+        entry = {"repo": None, "path": primary, "branch": None, "owner": owner, "tier": 1, "kind": "evict",
+                 "reason": reason, "action": evict_action([primary] + siblings)}
+        results["tier1"].append(entry)
+        # `verified_hashes` travels with the plan because it is what the unlink re-checks the bytes against
+        # (#859 round 2). The hardlink group is ONE inode, so the primary's digests speak for every link.
+        reap_plan.append(dict(entry, kind="evict", paths=[primary] + siblings, size=size, store_object=obj,
+                              stat_key=(dev, ino, size, g["mtime_ns"]), verified_hashes=verified))
+
+
+def tree_bytes(path):
+    """Apparent bytes this path occupies (a file's own size; a directory tree's total), or None
+    (UNMEASURED) on any stat/walk failure or once the node cap is hit. Measured immediately before a reap
+    so the sweep's summary can state what it actually reclaimed — #856 asks the daily line to read
+    "reclaimed X GB verified-on-store, Y GB tier-1", and the tier-1 half has no byte figure otherwise.
+
+    Hardlinked files are counted ONCE per inode (a worktree tree carrying two links to one 2 GB tar frees
+    2 GB, not 4). Never fatal: an unmeasurable reap still happens and is reported as unmeasured, because a
+    byte figure is reporting, not a safety fact."""
+    seen = set()
+    total = 0
+    walk_failed = []
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode) or stat.S_ISLNK(st.st_mode):
+            return st.st_size if stat.S_ISREG(st.st_mode) else 0
+        nodes = 0
+        for root, dirs, files in os.walk(path, followlinks=False, onerror=walk_failed.append):
+            for name in files:
+                nodes += 1
+                if nodes > SCRATCH_WALK_NODE_CAP:
+                    return None
+                fst = os.lstat(os.path.join(root, name))
+                if not stat.S_ISREG(fst.st_mode):
+                    continue
+                key = (fst.st_dev, fst.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += fst.st_size
+            if walk_failed:
+                return None
+    except OSError:
+        return None
+    return None if walk_failed else total
+
+
 def process_repo(repo, args, live, seam_failed, now_ts, results, reap_plan):
     repo = os.path.abspath(os.path.expanduser(repo))
 
@@ -1298,14 +2203,17 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
 
     `reaped` is the per-item outcome record the REPORT then prints (automated-researcher#792's acceptance
     bar: "report lists what it removed"). Each item is
-    {"path", "kind", "outcome": "removed"|"pruned"|"deleted"|"dry-run"|"skipped"|"failed", "detail"} —
-    the stderr log lines below are live progress for a human watching a long sweep; this is the same
-    information in the machine-readable place a scheduled sweep's consumer actually reads."""
+    {"path", "kind", "outcome": "removed"|"pruned"|"deleted"|"evicted"|"dry-run"|"skipped"|"failed",
+    "detail", "bytes"} — the stderr log lines below are live progress for a human watching a long sweep;
+    this is the same information in the machine-readable place a scheduled sweep's consumer actually reads.
+    `bytes` is what the action reclaimed (None = unmeasured, 0 = nothing freed), measured immediately
+    BEFORE the delete so the report can state a real figure (automated-researcher#856)."""
     fails = 0
     reaped = []
 
-    def record(item, outcome, detail=""):
-        reaped.append({"path": item["path"], "kind": item["kind"], "outcome": outcome, "detail": detail})
+    def record(item, outcome, detail="", nbytes=0):
+        reaped.append({"path": item["path"], "kind": item["kind"], "outcome": outcome, "detail": detail,
+                       "bytes": nbytes})
 
     # Prune items are handled per-REPO, not per-item: `git worktree prune` prunes every stale record for
     # that repo in one call, and (round-3 code-review Finding 4) a per-record failure inside that single
@@ -1358,7 +2266,7 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
         # between this item's removal and an earlier item's in the same run, and a once-per-batch poll
         # would never see it.
         repo, path, branch, owner = item["repo"], item["path"], item["branch"], item.get("owner")
-        fresh_live, fresh_seam_failed = load_live_sessions()
+        fresh_live, fresh_seam_failed, _fresh_seam_configured = load_live_sessions()
         liveness_now = owner_live_status(owner, fresh_live, fresh_seam_failed)
         if liveness_now != "not_live":
             log(f"SKIPPED (owner '{owner}' liveness is now '{liveness_now}', not re-verified safe): {path}")
@@ -1422,9 +2330,13 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
             log(f"SKIPPED (state changed since classification, not re-verified safe): {path}")
             record(item, "skipped", "git state changed since classification")
             continue
+        # Measured HERE — after the re-verification, immediately before the delete — so the figure is what
+        # this reap actually frees, and so nothing is walked for an item that turned out to be unsafe.
+        nbytes = tree_bytes(path)
         if dry_run:
-            log(f"DRY-RUN would remove: path={path} branch={branch} head={item.get('head')}")
-            record(item, "dry-run", f"would remove (branch={branch}, head={item.get('head')})")
+            log(f"DRY-RUN would remove: path={path} branch={branch} head={item.get('head')} "
+                f"({human_bytes(nbytes)})")
+            record(item, "dry-run", f"would remove (branch={branch}, head={item.get('head')})", nbytes)
             continue
         # --force is required whenever this reap is riding the content-identity bar rather than git's own
         # clean bar (Codex review, automated-researcher#537 round 1): a bare `worktree remove` unconditionally
@@ -1436,8 +2348,8 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
             fails += 1
             record(item, "failed", err.strip())
             continue
-        log(f"REMOVED: path={path} branch={branch} head={item.get('head')}")
-        record(item, "removed", f"branch={branch} head={item.get('head')}")
+        log(f"REMOVED: path={path} branch={branch} head={item.get('head')} ({human_bytes(nbytes)})")
+        record(item, "removed", f"branch={branch} head={item.get('head')}", nbytes)
         # NEVER delete the ref matching the configured default branch name (round-3 code-review Finding
         # 2): a linked worktree can legitimately be checked out ON the default branch itself, and deleting
         # that ref would break every other worktree/operation depending on it existing.
@@ -1476,9 +2388,10 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
             log(f"SKIPPED (written to since classification — now {age_now}d old): {path}")
             record(item, "skipped", f"written to since classification (now {age_now}d old)")
             continue
+        nbytes = tree_bytes(path)
         if dry_run:
-            log(f"DRY-RUN would delete scratch: {path} ({age_now}d old)")
-            record(item, "dry-run", f"would delete ({age_now}d old)")
+            log(f"DRY-RUN would delete scratch: {path} ({age_now}d old, {human_bytes(nbytes)})")
+            record(item, "dry-run", f"would delete ({age_now}d old)", nbytes)
             continue
         try:
             if os.path.isdir(path):
@@ -1490,8 +2403,96 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
             fails += 1
             record(item, "failed", str(e))
             continue
-        log(f"DELETED scratch: {path} ({age_now}d old)")
-        record(item, "deleted", f"{age_now}d old")
+        log(f"DELETED scratch: {path} ({age_now}d old, {human_bytes(nbytes)})")
+        record(item, "deleted", f"{age_now}d old", nbytes)
+
+    # Content-verified evictions (automated-researcher#856), LAST: a worktree/scratch reap above may have
+    # already taken a planned file with it, which this loop then records as a skip rather than
+    # double-counting its bytes on both legs of the summary.
+    #
+    # Re-verified immediately before the unlink, same defense-in-depth as the two loops above — but note
+    # WHICH facts are recomputed, why the STORE side is not, and where the check actually binds.
+    #
+    # Everything mutable is local, so every local fact is re-read from scratch: the live-owner veto (fresh,
+    # per item, and the by-construction form — an ownerless candidate or an unwired seam is refused here
+    # exactly as at classification, #859 round 3), the file still being a regular file, its
+    # (dev, ino, size, mtime_ns) identity, whether any WRITABLE descriptor is open on the inode (round 3),
+    # and — the part a stat tuple cannot answer (Codex review, automated-researcher#859 round 2) — ITS
+    # BYTES, re-read and re-digested inside evict_unlink against the checksum that matched. Round 1's fix took
+    # name+size out of the verdict because it is not exact-byte equivalence; leaving `mtime` to stand for
+    # the content at the delete was the same substitution one step later, so the second read is the price of
+    # the invariant rather than a cost to optimize away. It is paid only on the files a --reap-tier1 run is
+    # actually about to delete, never on the tier-3 majority.
+    #
+    # The STORE side is deliberately not re-listed: what the local bytes are compared against is the digest
+    # recorded when the object matched, and re-listing would answer a different question (has the store
+    # changed?) at the cost of another full listing per prefix.
+    #
+    # WHERE IT BINDS (round 1): re-checking a PATH and then unlinking that path is two lookups of a name,
+    # not one decision about an inode — the state can change in between. The check below is therefore only
+    # an advisory prefilter for good skip messages; the delete itself goes through evict_unlink, which
+    # stages every link under a private name first, so the identity and the bytes it verifies are the
+    # identity and the bytes it removes — and so the descriptor scan it runs is asked about an inode whose
+    # public names are already gone. Nothing here deletes on the strength of the prefilter alone.
+    for item in reap_plan:
+        if item["kind"] != "evict":
+            continue
+        paths = item["paths"]
+        primary, size, obj = item["path"], item["size"], item["store_object"]
+        # The SAME by-construction veto classification applied (evict_live_veto, #859 round 3), not just a
+        # fresh liveness poll: a plan built under a wired seam must not be executed by a reap that can no
+        # longer see one, and an ownerless candidate is refused here exactly as it was refused there.
+        fresh_live, fresh_seam_failed, fresh_seam_configured = load_live_sessions()
+        veto_now = evict_live_veto(item.get("owner"), fresh_live, fresh_seam_failed, fresh_seam_configured)
+        if veto_now:
+            log(f"SKIPPED (the live-owner veto does not hold at reap time: {veto_now}): {primary}")
+            record(item, "skipped", f"the live-owner veto does not hold at reap time: {veto_now}")
+            continue
+        # An ADVISORY prefilter: it produces a precise skip reason for the ordinary cases (the file was
+        # already taken by a worktree/scratch reap above, or something rewrote it since classification)
+        # without renaming anything and without reading a multi-GB file. It is NOT the safety check —
+        # evict_unlink re-checks all of this with the inode bound AND re-reads the bytes, and is the only
+        # thing the delete actually rests on.
+        stale = None
+        for p in paths:
+            try:
+                st = os.lstat(p)
+            except OSError as e:
+                stale = f"'{p}' could not be stat'd ({e.__class__.__name__})"
+                break
+            if not stat.S_ISREG(st.st_mode):
+                stale = f"'{p}' is no longer a regular file"
+                break
+            if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != tuple(item["stat_key"]):
+                stale = f"'{p}' changed since it was verified against the store"
+                break
+            if st.st_nlink != len(paths):
+                stale = (f"'{p}' now has {st.st_nlink} link(s), not the {len(paths)} this eviction "
+                         "accounted for")
+                break
+        if stale:
+            log(f"SKIPPED (state changed since verification: {stale}): {primary}")
+            record(item, "skipped", f"state changed since verification: {stale}")
+            continue
+        if dry_run:
+            log(f"DRY-RUN would evict: {primary} -> {obj} ({human_bytes(size)}, {size} bytes"
+                + (f", +{len(paths) - 1} hardlink sibling(s)" if len(paths) > 1 else "") + ")")
+            record(item, "dry-run", f"would evict -> {obj} ({size} bytes)", size)
+            continue
+        outcome, detail = evict_unlink(paths, item["stat_key"], item.get("verified_hashes"), log)
+        if outcome == "skipped":
+            log(f"SKIPPED (state changed since verification: {detail}): {primary}")
+            record(item, "skipped", f"state changed since verification: {detail}")
+            continue
+        if outcome == "failed":
+            log(f"EVICT FAILED: {detail}")
+            fails += 1
+            record(item, "failed", detail)
+            continue
+        log(f"EVICTED {primary} -> {obj} ({human_bytes(size)}, {size} bytes"
+            + (f", +{len(paths) - 1} hardlink sibling(s)" if len(paths) > 1 else "") + ")")
+        record(item, "evicted", f"-> {obj} ({size} bytes"
+               + (f", +{len(paths) - 1} hardlink sibling(s)" if len(paths) > 1 else "") + ")", size)
 
     return fails, reaped
 
@@ -1511,8 +2512,9 @@ def render_group(lines, entries):
 
     def label(it):
         # A --scratch-glob entry has no branch (automated-researcher#792) — rendering the worktree shape's
-        # `[(detached)]` for it would read as a git fact that was checked and came back empty.
-        if it.get("kind") == "scratch":
+        # `[(detached)]` for it would read as a git fact that was checked and came back empty. Same for an
+        # --evict-verified file (automated-researcher#856): it is a file, not a checkout.
+        if it.get("kind") in ("scratch", "evict"):
             return it["path"]
         return f"{it['path']} [{it['branch'] or '(detached)'}]"
 
@@ -1535,11 +2537,28 @@ def render_group(lines, entries):
                     lines.append(f"    $ {c}")
 
 
+def reclaimed_totals(reaped):
+    """The sweep's own byte accounting (automated-researcher#856), split by which LEG freed the bytes so
+    the daily line reads "reclaimed X GB verified-on-store, Y GB tier-1". The two legs are reported apart
+    on purpose: they answer different questions about the box — the tier-1 figure is how much the
+    lifecycle-keyed reapers are still finding, and the verified-on-store figure is how much they MISSED and
+    a content check caught anyway. Collapsing them into one number would hide exactly the trend #856 was
+    filed to make visible. `unmeasured` counts actions whose size could not be measured, so a small total
+    is never mistaken for a complete one."""
+    store_bytes = sum(it.get("bytes") or 0 for it in reaped if it["outcome"] == "evicted")
+    tier1_bytes = sum(it.get("bytes") or 0 for it in reaped
+                      if it["outcome"] in ("removed", "pruned", "deleted"))
+    unmeasured = sum(1 for it in reaped
+                     if it["outcome"] in ("removed", "pruned", "deleted", "evicted", "dry-run")
+                     and it.get("bytes") is None)
+    return {"verified_on_store_bytes": store_bytes, "tier1_bytes": tier1_bytes, "unmeasured": unmeasured}
+
+
 def render_reaped(lines, reaped):
     """The what-was-actually-removed section (automated-researcher#792): a reaping sweep that only prints
     what it CLASSIFIED leaves the reader inferring the deletions from a stderr log, and a skip (the safety
     net firing) looks identical to a removal. Outcomes are grouped so the removals lead."""
-    order = ["removed", "pruned", "deleted", "dry-run", "skipped", "failed"]
+    order = ["removed", "pruned", "deleted", "evicted", "dry-run", "skipped", "failed"]
     by_outcome = {}
     for it in reaped:
         by_outcome.setdefault(it["outcome"], []).append(it)
@@ -1548,10 +2567,18 @@ def render_reaped(lines, reaped):
         group = by_outcome.get(outcome)
         if not group:
             continue
-        lines.append(f"### {outcome} ({len(group)})")
+        freed = sum(it.get("bytes") or 0 for it in group)
+        lines.append(f"### {outcome} ({len(group)}, {human_bytes(freed)})")
         for it in group:
             detail = f" — {it['detail']}" if it["detail"] else ""
             lines.append(f"- [{it['kind']}] {it['path']}{detail}")
+    totals = reclaimed_totals(reaped)
+    line = (f"reclaimed {human_bytes(totals['verified_on_store_bytes'])} verified-on-store, "
+            f"{human_bytes(totals['tier1_bytes'])} tier-1")
+    if totals["unmeasured"]:
+        line += f" ({totals['unmeasured']} action(s) unmeasured)"
+    lines.append("\n## Reclaimed")
+    lines.append(f"- {line}")
 
 
 def render_text(results):
@@ -1575,6 +2602,17 @@ def render_text(results):
         render_group(lines, t3)
     if reaped:
         render_reaped(lines, reaped)
+    else:
+        # Report-only: state what a --reap-tier1 run WOULD reclaim from the eviction leg
+        # (automated-researcher#856). The whole point of a content-keyed backstop is to be a sensor for how
+        # much the lifecycle-keyed reapers are missing, and a sweep that reports the files but not the
+        # figure leaves the reader adding up sizes by hand — which is exactly the manual forensics this
+        # leg exists to replace.
+        evictable = (results.get("reclaimed") or {}).get("evictable_bytes") or 0
+        if evictable:
+            lines.append("\n## Reclaimed")
+            lines.append(f"- reclaimed nothing (report-only); {human_bytes(evictable)} verified-on-store is "
+                         "evictable now (pass --reap-tier1 to evict it)")
     print("\n".join(lines))
 
 
@@ -1600,6 +2638,18 @@ def build_parser():
                    help="absolute glob of non-git scratch entries to age out alongside the worktrees "
                         "(repeatable; only the LAST path segment may contain wildcards). Same "
                         "--min-age-days bar, same report-only-unless---reap-tier1 rule")
+    p.add_argument("--evict-verified", action="append", default=[], metavar="ROOT",
+                   help="absolute scratch root whose large files are checked against --store and evicted "
+                        "when their bytes are already there (repeatable; requires --store). Content-keyed, "
+                        "so it needs no lifecycle knowledge: age bar 0, live-owner veto the only hold, "
+                        "same report-only-unless---reap-tier1 rule")
+    p.add_argument("--store", metavar="RCLONE_PATH",
+                   help="the artifact store --evict-verified verifies against, as an rclone path "
+                        "(e.g. 'r2:mats/experiments'); each file is looked up under "
+                        "<store>/<its top-level dir under the root>/**")
+    p.add_argument("--min-size", default=DEFAULT_EVICT_MIN_SIZE, metavar="SIZE",
+                   help=f"smallest file --evict-verified considers, with an optional K/M/G/T suffix "
+                        f"(default {DEFAULT_EVICT_MIN_SIZE})")
     return p
 
 
@@ -1657,7 +2707,32 @@ def main(argv=None):
         if err:
             die(f"--scratch-glob '{pattern}' is not safe to expand into deletions: {err}")
 
-    live, seam_failed = load_live_sessions()
+    # --evict-verified is validated up front for the same reason (automated-researcher#856): the root is
+    # what statically bounds which files this leg may ever unlink, so an unusable one is a hard pre-flight
+    # failure, never a per-file surprise. `--store` is required with it because the store IS the whole
+    # safety argument — without an artifact store to verify against there is no evidence, and a mode that
+    # silently degraded to "delete large old files" is the one thing this must never become.
+    args.min_size_bytes = parse_size(args.min_size)
+    if args.evict_verified:
+        if not (args.store or "").strip():
+            die("--evict-verified requires --store (the artifact store its verification is against)")
+        args.store = args.store.strip()
+        if args.min_size_bytes is None:
+            die(f"--min-size '{args.min_size}' is not a byte count with an optional K/M/G/T suffix")
+        for raw in args.evict_verified:
+            if not raw.strip():
+                die("--evict-verified value(s) must not be empty/whitespace-only")
+            root = os.path.expanduser(raw.strip())
+            if not root.startswith("/"):
+                die(f"--evict-verified '{raw}' must be an absolute path")
+            if root != os.path.normpath(root):
+                die(f"--evict-verified '{raw}' must be a normalized absolute path (no '.', '..', or '//')")
+            if root == "/":
+                die("--evict-verified must not be the filesystem root")
+    elif (args.store or "").strip():
+        die("--store only applies to --evict-verified; pass at least one --evict-verified root")
+
+    live, seam_failed, seam_configured = load_live_sessions()
     now_ts = int(time.time())
     results = {"tier1": [], "tier2": {}, "tier3": [], "reaped": []}
     reap_plan = []
@@ -1685,6 +2760,9 @@ def main(argv=None):
                 pass
         scan_scratch(args, now_ts, protected, results, reap_plan)
 
+    if args.evict_verified:
+        scan_evict(args, live, seam_failed, seam_configured, results, reap_plan)
+
     fails = 0
     if args.reap_tier1:
         # Reap BEFORE emitting the report, so the report can state what was actually removed rather than
@@ -1692,6 +2770,11 @@ def main(argv=None):
         # do_reap is unchanged, so a human watching a long sweep still sees each action as it happens.
         fails, results["reaped"] = do_reap(reap_plan, args.dry_run, args.default_branch,
                                            args.min_age_days, protected, now_ts)
+
+    # The sweep's own byte accounting (automated-researcher#856). `evictable_bytes` is what a --reap-tier1
+    # run would free from the eviction leg — the figure a report-only sweep exists to surface.
+    results["reclaimed"] = dict(reclaimed_totals(results["reaped"]),
+                                evictable_bytes=sum(i["size"] for i in reap_plan if i["kind"] == "evict"))
 
     if args.json:
         print(json.dumps(results, indent=2, sort_keys=True))

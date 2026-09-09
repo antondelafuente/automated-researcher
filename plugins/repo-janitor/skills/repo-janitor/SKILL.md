@@ -1,6 +1,6 @@
 ---
 name: repo-janitor
-description: Deterministic weekly sweep of git worktrees + the shared checkout + non-git scratch globs, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Use when worktrees/repo/disk state have accumulated silently (abandoned worktrees from interrupted runs, agent scratch left in a persistent tree, unreaped repro/temp dirs, a shared checkout drifting behind origin) and need a backstop sweep — running the janitor on demand, or wiring it as a scheduled instance sweep. Report-only by default; no state, no lease model.
+description: Deterministic weekly sweep of git worktrees + the shared checkout + non-git scratch globs, plus a content-keyed eviction pass against the artifact store, triaged into three tiers (safe-to-reap, owner-investigates, researcher-residual). Use when worktrees/repo/disk state have accumulated silently (abandoned worktrees from interrupted runs, agent scratch left in a persistent tree, unreaped repro/temp dirs, big files already uploaded to the store, a shared checkout drifting behind origin) and need a backstop sweep — running the janitor on demand, or wiring it as a scheduled instance sweep. Report-only by default; no state, no lease model.
 ---
 
 # repo-janitor — the worktree/repo backstop sweep
@@ -32,7 +32,9 @@ bar for UNMERGED worktrees and scratch), `--merged-min-age-days N` (default 2, t
 worktrees already merged into the default branch — see "The age bar is per tier" below),
 `--default-branch <name>` (default `main`), `--fetch` (do a read-only `git fetch origin` per repo before
 comparing — see "Freshness" below), `--json` (machine-readable; see "The report" below), `--reap-tier1`
-+ `--dry-run` (see "The reap action"), `--scratch-glob <glob>` (repeatable; see "Non-git scratch" below).
++ `--dry-run` (see "The reap action"), `--scratch-glob <glob>` (repeatable; see "Non-git scratch" below),
+`--evict-verified <root>` (repeatable) + `--store <rclone path>` + `--min-size <size>` (default 50M; see
+"Content-verified eviction" below).
 
 **`--worktree-root` is repeatable** (automated-researcher#840) because a box has more than one place
 per-session worktrees get created: the agent-workspace root, and the coding harness's own
@@ -258,6 +260,180 @@ residue a *died-mid-close* run still leaves:
   the glob converts "invisible" into "reported", not into "reaped"; the reaping fix is upstream, at the
   helper that stops the clone being made in the first place.
 
+## Content-verified eviction (`--evict-verified`) — the box is a cache of the artifact store
+
+Every rule above is **lifecycle-keyed**: it deletes what a known close path registered, at a known step,
+under a known path shape. That cannot converge, and automated-researcher#856 is the measurement — a *third*
+disk-full incident in four days (2026-09-06 95%, 09-06 evening 92%, 09-09 94%), each from a class no
+existing reaper rule reached, because each new workflow variant (harness worktrees, ad hoc audit clones,
+the close leg's fresh pull, and then the exploratory path) falls outside the rule set and leaks until
+someone does forensics by hand. Measured 2026-09-09: **41.5 GB** of Tinker adapter tars in six *closed*
+exploratory runs (`explore-depv1-*`, NOTE.md landed 10–34 h earlier). Every byte was already on R2 under
+`experiments/<exp>/target_probes/` — verified by name+size, then deleted **by hand**. Nothing on the box
+could evict them, because the exploratory path registers no close, so no reaper considered them "finished".
+
+`--evict-verified <root> --store <rclone path> [--min-size 50M]` asks a **content** question instead, which
+no workflow variant can fall outside of: *are these exact bytes already at the artifact store?* For every
+regular file at or above `--min-size` under each root, it looks for an object under
+`<store>/<the file's top-level directory under the root>/**` carrying the **same basename and the same exact
+size** — and then requires a **checksum recomputed from the local bytes** to agree with every comparable
+checksum that object exposes (for S3 that is the ETag's md5, or the `X-Amz-Meta-Md5chksum` metadata rclone
+writes for a multipart upload whose ETag is not a plain md5). On a match the local file is evicted; the
+report prints `EVICTED <path> -> <store object>` and the reclaimed bytes. **No match, no comparable
+checksum, a checksum that disagrees, an unreadable local file, or a store listing that fails → keep and
+report** (tier 3), never a guess.
+
+- **Basename, not path.** The store's layout under `<store>/<exp>/` is the archive step's business, not
+  this sweep's: #856's own case has `~/work/<exp>/adapters/probe.tar` living at
+  `experiments/<exp>/target_probes/probe.tar`, so a path-shaped lookup would have found nothing while the
+  bytes were demonstrably there. The **top-level directory name** is the only path fact used, and only to
+  pick the store prefix — which is also what bounds the listing to one experiment's objects.
+- **A recomputed checksum is REQUIRED — name + size is a prefilter, never the proof.** Name and exact byte
+  length are what was checked by hand before those 41.5 GB were deleted, but they are not exact-byte
+  equivalence, and the two files this leg most needs to tell apart are two adapter tars for one experiment:
+  a generic basename (`probe.tar`) and a size fixed by the adapter's *shape* rather than its weights is
+  exactly the collision name+size cannot see. So an object exposing no checksum this sweep can recompute
+  proves nothing, and the file is **kept and reported with that object named** — run the by-hand check
+  yourself if you believe the bytes really are durable. Every comparable checksum the object exposes must
+  agree: one disagreement is a confirmed *different file*, and a record contradicting itself across two
+  spellings of one algorithm picks no winner. An algorithm this sweep can't recompute (crc32, quickxor) is
+  treated exactly like an absent one. This costs the measured case nothing — `--store` names an rclone
+  remote, rclone reports md5 for the S3/R2 objects it uploaded, and a recomputed checksum is what
+  `rclone check` (the test the archive step already gates on) compares. **Hash names are matched
+  case- and punctuation-insensitively** (`MD5`, `md5` and `SHA-1` all normalize), because rclone has spelled
+  them both ways and a listing's formatting must not decide whether a real checksum gets checked.
+- **The age bar is 0, deliberately.** Age is evidence about a *writer*, and the store answers the only
+  question that matters for a cache entry: a file whose bytes are proven durable is not
+  work-in-progress at any age. **The live-owner veto is the only hold** — nothing inside a live (or
+  liveness-unverifiable) owner's tree is ever evicted, reusing the same `--worktree-root`-derived owner and
+  the same `REPO_JANITOR_LIVE_SESSIONS_CMD` seam as the worktree tiers.
+- **Because that veto is the only hold, this leg requires it to hold BY CONSTRUCTION, not by
+  configuration.** Two ordinary configurations used to leave it firing on nothing while the leg went on
+  evicting, and both now **keep** the file with the cause named in its tier-3 reason:
+  - an `--evict-verified` root **not also named `--worktree-root`** derives no owner at all, so there is
+    nobody whose liveness could veto anything. (For the worktree tiers "no owner" rightly means "no owner
+    question applies" — the shared checkout's own drift; here it means the hold is absent.) Name the
+    eviction roots as `--worktree-root` too, or this leg evicts nothing under them.
+  - **no `REPO_JANITOR_LIVE_SESSIONS_CMD` wired** makes every owner read not-live. For the worktree tiers
+    an unset seam is the documented *fail-safe* default (nothing is silently routed to a session; it all
+    surfaces to the researcher) and that behaviour is unchanged. For this leg it is the fail-*dangerous*
+    direction, since nothing else is holding — so an unwired seam keeps every eviction candidate.
+
+  Both are re-checked fresh per item immediately before the unlink as well, so a plan built under a wired
+  seam is never executed by a reap that can no longer see one.
+- **`registry/` of a git tree is never touched**, and neither is a `.git` directory: the walk prunes both,
+  so nothing beneath them is even stat'd. The veto is keyed on the git marker's *name* being present
+  (never on whether it resolves — same discipline as the scratch guards), and it is **git-tree-keyed, not
+  name-keyed**: a directory that merely happens to be called `registry/` outside any checkout is ordinary
+  scratch. That is the whole git-side veto, deliberately: a *tracked* file elsewhere in a checkout could in
+  principle be evicted (leaving the worktree dirty until `git restore`), but a file whose bytes are proven
+  at the store and also committed to a branch is durable twice over, so widening the veto to whole
+  checkouts would cost the leg most of what it was written to reach — executor scratch lives inside
+  worktrees.
+- **Symlinks are never candidates** and the walk never follows one, so a link into a live tree can neither
+  be evicted nor drag its target's bytes into the scan. Only regular files are considered.
+- **Hardlinks are resolved per inode, not per path.** Unlinking one of N links frees *nothing*, so an inode
+  is evicted only when every link to it was found in this scan (`st_nlink` is what makes that checkable)
+  **and every one of them verified**; the reclaimed figure counts its bytes once. A link the sweep cannot
+  see, or a sibling that didn't verify, keeps the whole group — destroying a path for zero reclaimed bytes
+  is pure loss.
+- **Deletion is still `--reap-tier1`-gated, like everything else here.** A verified file classifies as
+  **tier 1** with a `kind` of `evict`; a bare sweep reports it (and the total it would reclaim) and deletes
+  nothing. Every fact is re-verified immediately before the unlink — the owner's liveness fresh per item,
+  the file's `(device, inode, size, mtime)` identity, and **its bytes**, re-read and re-digested against
+  the checksum that matched the store.
+- **The inode that was verified is the inode that is removed — it still holds the verified bytes, and
+  nothing could have rewritten them unobserved.** Four distinct substitutions have to be refused here,
+  and the delete refuses all four:
+  - *A name is not an inode.* Checking a *path* and then unlinking that path is two lookups of a name: a
+    concurrent rename in between would have the janitor delete a file it never verified, and a link added
+    after the count was read would make the accounting claim bytes it no longer frees. So before anything
+    is checked, every link in the group is `rename`d — inside its own directory, through a directory fd
+    opened `O_NOFOLLOW` — to a private `.repo-janitor-evicting.*` name this process just generated.
+    Nothing else can reach the inode by path after that, so the identity and link-count checks *hold*
+    rather than merely having held.
+  - *A stat tuple is not the bytes.* `(device, inode, size, mtime)` is a **proxy** for the content, and
+    letting it stand for the content at the delete is the same substitution the verdict already rejects
+    when it refuses name+size: `mtime` is not a content hash (an mmap writer's timestamp update fires at
+    the *dirtying fault*, so a store into an already-dirty page updates no timestamp at all, a
+    coarse-granularity filesystem hides a write inside its own granule, and a writer holding a descriptor
+    never goes through the name the staging step bound). So the *last*
+    thing before the unlink is a re-read of the staged inode through an `O_RDONLY|O_NOFOLLOW` descriptor,
+    every digest compared against the one that matched the store, with an `fstat` on that same descriptor
+    confirming the bytes came from the verified inode and the identity/link-count checks re-run afterwards
+    (so a write or a new link that landed *during* the read is caught too). The stat checks survive as the
+    cheap gate that skips a stale group without paying for the read; nothing deletes on their strength
+    alone. This is a **second full read of each file a reap is about to delete** — deliberately paid, since
+    it is the only thing that establishes what the leg claims, and it is never paid on the tier-3 majority.
+  - *A digest is not the whole read window.* A writer holding an **already-open writable descriptor** can
+    rewrite an offset the digest has *already consumed* while the read is still running, then restore
+    `mtime_ns` with `utime` — so `(device, inode, size, mtime)` comes back bit-identical, the digest saw
+    the old bytes, and the exposed window is the *whole multi-GB read*, not the microseconds after it.
+    POSIX has no atomic "unlink-if-contents-still-equal" to close that with, so it is closed from two
+    sides, and neither side is sufficient alone:
+    - **the writer** — before and after the read, the kernel's own open-descriptor view (`/proc`) is
+      scanned for any writable descriptor on the inode, and one found is a refusal. Staging is what makes
+      this exact rather than suggestive: every public name is already gone, so such a writer must predate
+      staging. Its limit is measured, not assumed — resolving another process's descriptors needs
+      ptrace-read permission, and Linux's default `kernel.yama.ptrace_scope = 1` grants that only over the
+      scanner's own *descendants*, so a same-uid **sibling** (exactly the agent session this leg's measured
+      41.5 GB came from) lists as a pid and then refuses every descriptor. Those processes are counted and
+      reported, never treated as a veto: failing closed on them would make the leg evict nothing at all on
+      a stock Linux box, which removes the feature rather than securing it.
+    - **the write** — the inode's **change time** is anchored right after staging and re-checked against
+      the read descriptor and again after the read. A `write(2)` moves `ctime`, and `utimensat` restores
+      `mtime` while moving `ctime` to *now* (there is no syscall to set `ctime` at all), so the one forgery
+      that defeats the `mtime` gate is precisely what this observes — and it needs no permission over the
+      writer, which is what covers the scan's blind spot. Reads move `atime`, never `ctime`, so the
+      sweep's own re-read cannot trip it.
+  - *A `ctime` anchor is not universal over write channels either* — and this is what the `fsync` is for.
+    A `MAP_SHARED` writable mapping needs **no open descriptor** once `mmap` has returned (so the scan has
+    nothing to find, and `/proc/<pid>/maps` is Permission-denied for a sibling exactly as `fd/` is), and a
+    store into a page that is **already dirty** moves no timestamp, because the update fires at the
+    dirtying fault rather than at writeback — `msync` does not move it afterwards either. A writer that
+    pre-dirties a page with *unchanged* bytes before the anchor is therefore free to store new bytes
+    mid-read, invisibly to both sides above. So the re-read descriptor is **`fsync`ed before the first
+    byte is hashed**: flushing the inode write-protects every page-table entry mapping its pages, so any
+    later store must re-fault, and the fault updates the inode's timestamps — which the post-read checks
+    then see. A store *before* the barrier is already in the page cache, so the re-read digests the
+    writer's bytes and disagrees instead. The ordering is the whole argument: anchor → `fsync` → read →
+    re-check, which puts every byte-modifying channel on one side or the other of the barrier.
+  - **The boundary this leaves**, enumerated rather than papered over — all four **adjudicated accepted
+    residual** at this repo's stated scale (senior-engineer adjudication on automated-researcher#859,
+    round-limit summons #2): (a) a same-uid writer running that two-phase attack on a **no-writeback
+    filesystem (tmpfs)**, where `fsync` is not a barrier because there is nothing to write back and the
+    pages are never re-protected — measured, and it costs this leg nothing real, since an eviction target
+    exists to reclaim *disk* and a tmpfs artifact occupies RAM; (b) a writer under a **different uid**,
+    invisible to this janitor's `/proc` view; (c) a writer that opens the (readdir-visible) staged name
+    after the last check and wins the microseconds before the `unlink`; (d) a filesystem whose timestamp
+    granularity is coarse enough to hide a write inside the same granule as the staging rename. All four
+    are **adversarial rather than accidental**: an accidental writer's first dirtying write moves `ctime`
+    even on tmpfs, and any modification before the read breaks the re-read digest instead. The other hold
+    is the live-owner veto, which is why this leg requires that veto to be present by construction (see
+    the two bullets above) rather than leaning on a configuration.
+
+  Any disagreement aborts and renames every staged link back (refusing to overwrite a name something
+  re-created meanwhile); a restore that can't complete is logged loudly with the staged path, and a
+  crash-orphaned staging entry is both recognizable by hand and unevictable by a later sweep, since no
+  store object shares that name.
+- **The mount guard from `--scratch-glob` deliberately does not carry over.** It exists because
+  `rmtree` deletes a bind mount's *contents* through the mount before failing on the mount point; this leg
+  unlinks one named regular file whose bytes are proven at the store, so there is no tree-walk to escape
+  and no unverified byte to lose.
+- **Why this is a backstop, not a replacement.** It does not know or care what a close path did, so it
+  covers variants nobody has written a rule for yet — which makes the lifecycle reapers' coverage gaps a
+  *delay* instead of a leak. It would also have caught the 2026-09-06 row4-factorial triplication (2 of 3
+  copies already on R2) and every `reap_scratch.sh` leftover after a verified archive. Regenerable-but-not-
+  stored content (venvs, `__pycache__`) is not its business — that is the residue allowlist above.
+
+**The store listing goes through a seam**, `REPO_JANITOR_STORE_LIST_CMD`: `<cmd> <store prefix>` must print
+`rclone lsjson --recursive --files-only --hash`-shaped JSON (an array of `{"Path","Name","Size","Hashes"}`).
+Unset, it *is* `rclone lsjson --recursive --files-only --hash` — `--store r2:mats/experiments` is an rclone
+remote, and `lsjson` is the one verb that reports name, size and hash together in a single recursive call
+without re-reading object bytes. Each prefix is listed at most once per sweep, failures included: a prefix
+that failed to list must not be retried once per file under it. An object whose reported size is negative
+(rclone's "size unknown") proves nothing and is dropped from the index.
+
 ## The report
 
 Default output is human-readable text, grouped by tier (tier 2 sub-grouped by owner). Every entry carries
@@ -272,9 +448,11 @@ collapses that group into one summary line plus a flat path list instead of repe
 action per entry, so the shared root cause isn't buried in noise. `--json` is unaffected — every entry is
 always listed individually there for a machine consumer to group however it needs.
 
-`--json` emits `{"tier1": [...], "tier2": {"<owner>": [...]}, "tier3": [...], "reaped": [...]}` — each
-tier entry has `repo`, `path`, `branch`, `owner`, `tier`, `kind` (`"worktree"` or `"scratch"`), `reason`,
-and `action` (`{"kind": "remove"|"prune"|"delete"|"inspect", "commands": [...]}`). An instance's messaging
+`--json` emits `{"tier1": [...], "tier2": {"<owner>": [...]}, "tier3": [...], "reaped": [...],
+"reclaimed": {...}}` — each
+tier entry has `repo`, `path`, `branch`, `owner`, `tier`, `kind` (`"worktree"`, `"scratch"` or `"evict"`),
+`reason`,
+and `action` (`{"kind": "remove"|"prune"|"delete"|"evict"|"inspect", "commands": [...]}`). An instance's messaging
 wrapper iterates this (one message per tier-2 owner key, one combined message for tier 3) — **the sweep
 never sends anything itself**; delivery is instance work (see "What the instance supplies" below). The
 report is silent when there's nothing to flag.
@@ -282,11 +460,24 @@ report is silent when there's nothing to flag.
 **`reaped` — what the sweep actually removed** (automated-researcher#792). A reaping sweep that prints
 only what it *classified* leaves the reader inferring the deletions from a stderr log, where a skip (the
 safety net firing correctly) reads identically to a removal. Each record is `{"path", "kind", "outcome",
-"detail"}` with `outcome` in `removed` / `pruned` / `deleted` / `dry-run` / `skipped` / `failed`; the human
+"detail", "bytes"}` with `outcome` in `removed` / `pruned` / `deleted` / `evicted` / `dry-run` / `skipped`
+/ `failed`; the human
 report renders the same information under a `## Reaped` section, grouped so the removals lead. It is empty
 without `--reap-tier1`. Because the report now states removals, it is emitted **after** the reap runs — the
 live per-action stderr log inside the reap is unchanged, so a human watching a long sweep still sees each
 action as it happens.
+
+**`reclaimed` — the byte accounting, split by leg** (automated-researcher#856):
+`{"verified_on_store_bytes", "tier1_bytes", "unmeasured", "evictable_bytes"}`, rendered as a
+`## Reclaimed` line reading *"reclaimed X GB verified-on-store, Y GB tier-1"*. The two legs are reported
+apart on purpose — they answer different questions about the box: the tier-1 figure is how much the
+lifecycle-keyed reapers are still finding, and the verified-on-store figure is how much they **missed** and
+a content check caught anyway. Collapsing them into one number would hide exactly the trend #856 exists to
+make visible. `bytes` is measured immediately *before* each delete (apparent size, one count per inode, so
+hardlinks aren't double-counted); an action whose size can't be measured is counted in `unmeasured` rather
+than as zero, so a small total is never mistaken for a complete one. `evictable_bytes` is what a
+`--reap-tier1` run *would* free from the eviction leg, which is what a report-only sweep states instead —
+the sensor half of the feature.
 
 ## Freshness (`--fetch`)
 
@@ -304,7 +495,9 @@ gained an initialized submodule, re-checked the same as at classification, not j
 a best-effort `git branch -d` — `--force` is added to the `remove` whenever the content-identity bar above
 (not plain mergedness) is what qualified the entry, since that path's byte-identical dirty/untracked residue
 is exactly what a bare `remove` refuses — and stale `--scratch-glob` entries via `rm -rf`, each re-guarded
-and re-aged immediately before the delete (see "Non-git scratch" above).
+and re-aged immediately before the delete (see "Non-git scratch" above), and `--evict-verified` files via a
+single `unlink` each, re-verified against both the identity *and* the re-read bytes the store proved (see
+"Content-verified eviction" above).
 `--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
 anything.
 
@@ -325,6 +518,11 @@ scratch has no `main` behind it. That is why the scratch bar is "nothing has wri
 why the archive-then-delete step belongs at the point the scratch is *created*
 (`run-experiment`'s close-time `reap_scratch.sh`, which uploads to the artifact store and verifies before
 deleting). This sweep is the backstop for what that step missed, not a substitute for it.
+
+**A content-verified eviction, by contrast, IS recoverable — that is its entire premise.** The store object
+that authorized the delete is named in the reason string, the `## Reaped` detail and the stderr `EVICTED`
+line, so recovery is `rclone copy <that object> <the local dir>`. This is why its age bar can be 0 while
+scratch's is a week: for scratch, the age is the only evidence there is; here the store *is* the evidence.
 
 **Recovering from a reap.** Tier-1's own definition makes this non-destructive of content by construction:
 `merged` means every commit on the worktree's branch already lives in the default branch's history, and
@@ -358,10 +556,22 @@ This plugin owns the classification + report format only. An instance wires:
 - **Which repo(s) and worktree root** to point `--repo`/`--worktree-root` at, and **which scratch globs**
   (if any) to pass as `--scratch-glob`. Those globs are pure instance values — the temp-dir layout, the
   per-session scratch root, the uid in a path — so the product ships the mechanism and none of the paths.
+- **Which scratch roots to evict from, and the store to verify against**: `--evict-verified <root>` (the
+  roots the instance already names, e.g. its executor-scratch root) plus `--store`. Both are instance
+  values; on the box that filed #856 those are `--store r2:mats/experiments` for the experiment roots and
+  `r2:mats/archive/work` for archived executor scratch — one `--store` per sweep invocation, so a box
+  verifying against two stores runs the leg twice (a store is what bounds where a prefix lookup may find
+  proof, so it is deliberately not a list).
 - **`REPO_JANITOR_LIVE_SESSIONS_CMD`** — a command that prints one live session id per line (mirroring
   `gpu-job`'s `GPU_JOB_*_CMD` provider-seam pattern). **Unset ⇒ every owner reads as not-live** — the
   fail-safe default: nothing is silently routed to tier 2 without this wired, everything instead surfaces
-  to the researcher.
+  to the researcher. **`--evict-verified` is the exception, and it is a hard requirement there:** that veto
+  is the eviction leg's only hold, so without this seam wired — or without the eviction roots also named as
+  `--worktree-root`, so an owner is derivable — that leg **evicts nothing at all** and reports every
+  candidate as kept (see "Content-verified eviction" above). Wire both, or the leg is a report-only sensor.
+- **`REPO_JANITOR_STORE_LIST_CMD`** — optional; only if the box's store isn't reachable through plain
+  `rclone lsjson` (see "Content-verified eviction" above for the shape it must print). A listing that
+  fails, times out, or won't parse means nothing under that prefix is ever evicted.
 - **Message delivery** — turning `--json`'s tier-2/tier-3 entries into an actual fleet message per owner /
   to the researcher. Delivery is fire-and-forget: no waiting on responses, no tracking, no timeouts, no
   aggregation. Whatever isn't resolved just reappears next sweep.
@@ -380,7 +590,7 @@ This plugin owns the classification + report format only. An instance wires:
   # daily worktree/scratch sweep. ONE line — crontab has no line continuation. Every angle-bracketed value
   # is an INSTANCE value (checkout path, research repo, worktree roots, temp-dir layout, uid in a path, log
   # path): fill in your own, and see "Non-git scratch" above for what a --scratch-glob may safely look like.
-  17 4 * * * python3 <checkout>/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep.py --repo <research repo> --worktree-root '<agent workspace root>' --worktree-root '<research repo>/.claude/worktrees' --fetch --reap-tier1 --scratch-glob '<absolute glob of repro dirs>' --scratch-glob '<absolute glob of per-session scratch>' >> <log path> 2>&1
+  17 4 * * * python3 <checkout>/plugins/repo-janitor/skills/repo-janitor/scripts/worktree_sweep.py --repo <research repo> --worktree-root '<agent workspace root>' --worktree-root '<research repo>/.claude/worktrees' --fetch --reap-tier1 --scratch-glob '<absolute glob of repro dirs>' --scratch-glob '<absolute glob of per-session scratch>' --evict-verified '<agent workspace root>' --store '<rclone path of the experiment artifact store>' >> <log path> 2>&1
   ```
 
   The age bars apply as described in "The age bar is per tier" above — 2 days for merged worktrees, 7 for
@@ -418,4 +628,31 @@ a genuinely initialized submodule, which the NUL-safe fallback parse must still 
 report's same-reason collapsing, and `--scratch-glob` end to end (stale reaches tier 1 and is really
 deleted; fresh is silent; an old directory mtime with a freshly-written file inside is silent; a symlink,
 its target, and a swept repo's own worktree all survive a real `--reap-tier1`; `--dry-run` deletes nothing;
-every unsafe glob shape is rejected up front; and the `## Reaped` / `reaped` records name what was removed).
+every unsafe glob shape is rejected up front; and the `## Reaped` / `reaped` records name what was removed),
+and content-verified eviction end to end (automated-researcher#856 — the store is stood in for through the
+`REPO_JANITOR_STORE_LIST_CMD` seam, which is exactly why that seam exists: `rclone` is not reachable on a
+CI runner and this leg's contract is what the sweep does with the *listing*. Bytes proven by a recomputed
+checksum reach tier 1 under a store layout that does not mirror the local path and are really evicted, with
+the reason naming the checksum that proved them; rclone's `MD5` and `SHA-1` key spellings verify exactly as
+the lowercase ones do; while name+exact-size with *no* comparable checksum, an incomparable-only algorithm
+(crc32/quickxor), a *disagreeing* checksum, a record contradicting itself across two spellings of one
+algorithm, a size disagreement, an absent object, a failed listing, a file directly under
+the root, and a live owner's file are all kept and survive a real `--reap-tier1`; the two configurations
+that left the live-owner veto inert — an eviction root not covered by `--worktree-root`, and an unwired
+`REPO_JANITOR_LIVE_SESSIONS_CMD` — keep every candidate with the cause named, in a run that also asserts
+the worktree tiers' unset-seam behaviour is unchanged; `evict_unlink` is driven
+directly as a unit — it removes only the verified inode, a process holding an `O_RDWR` descriptor across
+the call blocks the delete while an `O_RDONLY` holder does not, a write made *mid-read* through an
+already-open descriptor with `mtime` forged back is caught by the inode's change time, a store made
+*mid-read* through a descriptor-less `MAP_SHARED` mapping whose page was pre-dirtied with unchanged bytes
+is caught only because the `fsync` barrier re-protected that page (the same case evicts with the barrier
+removed, which is the regression property) while an identically-mapped file with no attack write still
+evicts, and a stat-key or link-count disagreement aborts
+and restores every staged link, leaving no `.repo-janitor-evicting.*` entry behind; a file below `--min-size`,
+a symlink, and everything under `registry/` of a git tree are never even classified, while a plain
+`registry/` directory outside any checkout still evicts (the veto is git-tree-keyed, not name-keyed); a
+hardlinked pair is ONE tier-1 entry that unlinks every link and counts the bytes once, while an inode with
+a link outside the scanned roots is kept; `--dry-run` evicts nothing; the `reaped` records and the
+`## Reclaimed` line split verified-on-store from tier-1 bytes; and every incomplete/unsafe invocation
+— `--evict-verified` without `--store`, `--store` without a root, a relative or `/` or unnormalized root, an
+unparseable `--min-size` — is rejected up front).
