@@ -32,6 +32,11 @@
 #   - the CLOSE'S PEAK footprint is reported from repro_pull.sh's record and never invented (#843): a
 #     recorded peak is printed, an absent or unparsable one reads `unmeasured` (not a fabricated 0), and
 #     the field is on the line for every branch that deletes
+#   - the NOTE PATH's own clean-close evidence (#857): a merged `NOTE.md` at the given git ref reaps an
+#     exploratory work dir that has no run-supervision record at all, an UNMERGED (or non-NOTE) record does
+#     not, the evidence is bound to the record NAME so one note's landing can never authorize deleting
+#     another's scratch, and gates 2-6 (derived target, gap markers, path sanity) apply unchanged there —
+#     the experiment path's own guards are not weakened to let the note path through
 #   - NEVER DELETE THROUGH A MOUNT POINT (round-3 code-review Finding 1): a scratch dir that IS, or
 #     CONTAINS, a mount point is refused with rclone never invoked (including when the mount point's path
 #     carries mountinfo's `\040` space escape), an ANCESTOR mount blocks nothing, and an unreadable mount
@@ -536,7 +541,110 @@ s=$(mkscratch m5); reset_log
 gap_case mount-unreadable mountinfo-unreadable "$s" -- \
   env REAP_SCRATCH_MOUNTINFO="$TMP/no-such-mountinfo" bash "$R" m5 "$s"
 
+# --- the NOTE PATH: the landing IS the close (#857) ---------------------------------------------------
+# `log-exploratory` work dirs have no run-supervision record, so gate 1 can only ever refuse them — which is
+# why 41.5 GB of already-uploaded adapter tars sat under `~/work` 10-34 h after six notes landed. The note
+# path gets its own clean-close EVIDENCE (the record's merged NOTE.md at a git ref) rather than a bypass:
+# gates 2-6 must still apply unchanged, and the evidence must be CHECKED, not taken on the caller's word.
+NOTEREPO="$TMP/research-lab"
+mkdir -p "$NOTEREPO/registry"
+git -C "$NOTEREPO" init -q -b main
+git -C "$NOTEREPO" config user.email smoke@example.invalid
+git -C "$NOTEREPO" config user.name  smoke
+# `origin` is this same repo, so `origin/main` is a real remote-tracking ref without a network.
+git -C "$NOTEREPO" remote add origin "$NOTEREPO"
+
+# note_land <name> — commit registry/<name>/NOTE.md and refresh origin/main (the merge log-experiment does)
+note_land(){
+  mkdir -p "$NOTEREPO/registry/$1"
+  echo "# NOTE — $1" > "$NOTEREPO/registry/$1/NOTE.md"
+  git -C "$NOTEREPO" add -A >/dev/null
+  git -C "$NOTEREPO" commit -qm "Log note: registry/$1" >/dev/null
+  git -C "$NOTEREPO" fetch -q origin >/dev/null 2>&1
+}
+
+# the happy path: a merged NOTE.md is a clean close, and the reap is the SAME archive-verify-delete
+note_land nt1
+s=$(mkscratch nt1); reset_log
+out=$(bash "$R" --note-record "$NOTEREPO/registry/nt1" --merged-ref origin/main nt1 "$s" 2>&1); rc=$?
+[ "$rc" = 0 ] && ok note-merged-exit0 || no "note-merged-exit0 (rc=$rc, out: $out)"
+[ -d "$s" ] && no note-merged-scratch-deleted || ok note-merged-scratch-deleted
+grep -q "^copy $s stub:bucket/archive/work/nt1 -L$" "$RCLONE_LOG" && ok note-merged-copy-derived-dest \
+  || no "note-merged-copy-derived-dest ($(grep '^copy' "$RCLONE_LOG"))"
+grep -q "^check $s stub:bucket/archive/work/nt1 --one-way -L$" "$RCLONE_LOG" && ok note-merged-check-derived-dest \
+  || no "note-merged-check-derived-dest ($(grep '^check' "$RCLONE_LOG"))"
+case "$out" in
+  *"SCRATCH-REAP-RECLAIMED: run=nt1 "*"archived=verified"*) ok note-merged-reclaimed-marker ;;
+  *) no "note-merged-reclaimed-marker (out: $out)" ;;
+esac
+
+# NOT MERGED YET -> refused. The record dir exists on disk (the researcher just wrote it), but nothing is at
+# the ref, so this is an in-flight exploratory run whose scratch is forensics, not residue.
+mkdir -p "$NOTEREPO/registry/nt2"; echo "# NOTE — nt2" > "$NOTEREPO/registry/nt2/NOTE.md"
+s=$(mkscratch nt2); reset_log
+if bash "$R" --note-record "$NOTEREPO/registry/nt2" --merged-ref origin/main nt2 "$s" >/dev/null 2>&1; then
+  no note-unmerged-refused; else ok note-unmerged-refused; fi
+[ -d "$s" ] && ok note-unmerged-scratch-kept || no note-unmerged-scratch-kept
+[ "$(rclone_calls)" = 0 ] && ok note-unmerged-no-rclone || no note-unmerged-no-rclone
+
+# a record dir whose merged content is NOT a NOTE.md is not this path's evidence either
+mkdir -p "$NOTEREPO/registry/nt3"; echo "# DESIGN" > "$NOTEREPO/registry/nt3/DESIGN.md"
+git -C "$NOTEREPO" add -A >/dev/null; git -C "$NOTEREPO" commit -qm "not a note" >/dev/null
+git -C "$NOTEREPO" fetch -q origin >/dev/null 2>&1
+s=$(mkscratch nt3); reset_log
+if bash "$R" --note-record "$NOTEREPO/registry/nt3" --merged-ref origin/main nt3 "$s" >/dev/null 2>&1; then
+  no note-no-notemd-refused; else ok note-no-notemd-refused; fi
+[ -d "$s" ] && ok note-no-notemd-scratch-kept || no note-no-notemd-scratch-kept
+
+# THE RECORD NAME IS THE BINDING: record A's merged evidence must never authorize deleting B's scratch.
+# Without the name check, `--note-record .../nt1` + `<name> nt4` would reap nt4 on nt1's landing.
+note_land nt4
+s=$(mkscratch nt4); reset_log
+if bash "$R" --note-record "$NOTEREPO/registry/nt1" --merged-ref origin/main nt4 "$s" >/dev/null 2>&1; then
+  no note-evidence-name-bound; else ok note-evidence-name-bound; fi
+[ -d "$s" ] && ok note-evidence-name-bound-scratch-kept || no note-evidence-name-bound-scratch-kept
+[ "$(rclone_calls)" = 0 ] && ok note-evidence-name-bound-no-rclone || no note-evidence-name-bound-no-rclone
+
+# gate 2 still binds on this path: only "<EXPERIMENT_SCRATCH_ROOT>/<name>" is reapable, evidence or no
+elsewhere="$TMP/elsewhere/nt4"; mkdir -p "$elsewhere"; echo payload > "$elsewhere/out.txt"; reset_log
+if bash "$R" --note-record "$NOTEREPO/registry/nt4" --merged-ref origin/main nt4 "$elsewhere" >/dev/null 2>&1; then
+  no note-derived-target-enforced; else ok note-derived-target-enforced; fi
+[ -d "$elsewhere" ] && ok note-derived-target-kept || no note-derived-target-kept
+
+# ...and so does gate 6: an unset archive destination is the same loud, on-the-record no-op (#804)
+reset_log
+gap_case note-noseam EXPERIMENT_SCRATCH_ARCHIVE_DEST-unset "$TMP/work/nt4" -- \
+  env -u EXPERIMENT_SCRATCH_ARCHIVE_DEST bash "$R" --note-record "$NOTEREPO/registry/nt4" \
+      --merged-ref origin/main nt4 "$TMP/work/nt4"
+
+# half the evidence proves nothing — both flags or neither
+s="$TMP/work/nt4"; reset_log
+if bash "$R" --note-record "$NOTEREPO/registry/nt4" nt4 "$s" >/dev/null 2>&1; then
+  no note-needs-merged-ref; else ok note-needs-merged-ref; fi
+if bash "$R" --merged-ref origin/main nt4 "$s" >/dev/null 2>&1; then
+  no note-needs-note-record; else ok note-needs-note-record; fi
+[ -d "$s" ] && ok note-half-evidence-scratch-kept || no note-half-evidence-scratch-kept
+
+# a note name that isn't filename-safe is refused: on this path nothing else validates it, and it is a path
+# component of BOTH the derived delete target and the derived archive prefix.
+mkdir -p "$TMP/work/dots"
+if bash "$R" --note-record "$NOTEREPO/registry/nt4" --merged-ref origin/main "../escape" "$TMP/work/dots" >/dev/null 2>&1; then
+  no note-name-charset-refused; else ok note-name-charset-refused; fi
+
+# a record dir outside any git repository cannot produce this path's evidence at all
+outside="$TMP/outside/nt5"; mkdir -p "$outside"; echo "# NOTE" > "$outside/NOTE.md"
+s=$(mkscratch nt5); reset_log
+if bash "$R" --note-record "$outside" --merged-ref origin/main nt5 "$s" >/dev/null 2>&1; then
+  no note-non-repo-refused; else ok note-non-repo-refused; fi
+[ -d "$s" ] && ok note-non-repo-scratch-kept || no note-non-repo-scratch-kept
+
+# the EXPERIMENT path is untouched by all of this: a run-id with no record still refuses, with no flags in play
+s=$(mkscratch nt6); reset_log
+if bash "$R" nt6 "$s" >/dev/null 2>&1; then no experiment-path-unchanged; else ok experiment-path-unchanged; fi
+[ -d "$s" ] && ok experiment-path-unchanged-scratch-kept || no experiment-path-unchanged-scratch-kept
+
 # --- argument validation ----------------------------------------------------------------------------
 if bash "$R" only-one-arg >/dev/null 2>&1; then no args-refused; else ok args-refused; fi
+if bash "$R" --no-such-flag a b >/dev/null 2>&1; then no unknown-flag-refused; else ok unknown-flag-refused; fi
 
 [ "$fails" = 0 ] && { echo "reap_scratch smoke PASS"; exit 0; } || { echo "reap_scratch smoke FAIL"; exit 1; }
