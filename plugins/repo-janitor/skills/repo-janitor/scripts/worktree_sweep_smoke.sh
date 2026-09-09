@@ -51,17 +51,22 @@
 #   - the "Reaped" report section (#792's acceptance bar): --json's `reaped` records and the human
 #     report's section both name what was actually removed, and a tier-3 entry never appears there
 #   - --evict-verified, the CONTENT-keyed eviction leg (automated-researcher#856): bytes proven at the
-#     artifact store reach tier1 and are really unlinked (under a store layout that does NOT mirror the
-#     local path), a store-exposed hash that matches says so while a DISAGREEING hash on the same
-#     name+size is kept, and a size disagreement / absent object / failed listing / file directly under
-#     the root / live owner's file are all kept and survive a real --reap-tier1; a sub---min-size file, a
-#     symlink and everything under `registry/` of a git tree are never even classified while a plain
-#     `registry/` dir outside a checkout still evicts; a hardlinked pair is ONE entry that unlinks every
-#     link and counts its bytes once while an out-of-scope link keeps the group; --dry-run evicts nothing;
-#     the `reaped`/`## Reclaimed` accounting splits verified-on-store from tier-1 bytes; and every
-#     incomplete/unsafe invocation is rejected up front. The store is stood in for through the
-#     REPO_JANITOR_STORE_LIST_CMD seam (rclone is not reachable on a CI runner, and the contract under
-#     test is what the sweep does with the LISTING)
+#     artifact store by a RECOMPUTED CHECKSUM reach tier1 and are really unlinked (under a store layout
+#     that does NOT mirror the local path), while name+size agreement with no comparable checksum, an
+#     incomparable-only algorithm, a disagreeing checksum, one record contradicting itself across two
+#     spellings of one algorithm, a size disagreement, an absent object, a failed listing, a file directly
+#     under the root and a live owner's file are ALL kept and survive a real --reap-tier1; rclone's
+#     `MD5`/`SHA-1` spellings verify exactly as `md5`/`sha1` do (a case-sensitive lookup silently dropped
+#     production hashes — Codex review #859 round 1); a sub---min-size file, a symlink and everything under
+#     `registry/` of a git tree are never even classified while a plain `registry/` dir outside a checkout
+#     still evicts; a hardlinked pair is ONE entry that unlinks every link and counts its bytes once while
+#     an out-of-scope link keeps the group; --dry-run evicts nothing; the `reaped`/`## Reclaimed`
+#     accounting splits verified-on-store from tier-1 bytes; and every incomplete/unsafe invocation is
+#     rejected up front. The store is stood in for through the REPO_JANITOR_STORE_LIST_CMD seam (rclone is
+#     not reachable on a CI runner, and the contract under test is what the sweep does with the LISTING)
+#   - evict_unlink's identity binding (#859 round 1), driven directly as a unit: the verified inode is the
+#     one removed, a stat-key or link-count disagreement aborts and RESTORES every staged link under its
+#     original name, and no `.repo-janitor-evicting.*` staging entry is ever left behind
 # -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
 # `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
 # vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
@@ -1111,9 +1116,15 @@ done
 # --- content-verified eviction (--evict-verified, automated-researcher#856) ---------------------------
 # The artifact store is stood in for through the REPO_JANITOR_STORE_LIST_CMD seam, which is exactly why
 # that seam exists: `rclone` is neither installed nor reachable on a CI runner, and this leg's whole
-# contract is what the sweep does with the LISTING — a match, a size disagreement, a hash disagreement, an
-# absent object, a failed listing. The fake prints `rclone lsjson --recursive --files-only --hash`-shaped
-# JSON for the prefix it is handed, so every assertion below exercises the real parser and the real bar.
+# contract is what the sweep does with the LISTING — a checksum match, a checksum disagreement, a listing
+# that offers no comparable checksum at all, a size disagreement, an absent object, a failed listing. The
+# fake prints `rclone lsjson --recursive --files-only --hash`-shaped JSON for the prefix it is handed, so
+# every assertion below exercises the real parser and the real bar.
+#
+# EVERY fixture that is expected to EVICT carries a real checksum (Codex review #859 round 1): a recomputed
+# checksum is now required, so a hashless fixture would assert the old, unsafe name+size bar. The spellings
+# are deliberately mixed — `md5`, `MD5`, `SHA-1` — because rclone has emitted all of them and the
+# case-sensitive lookup that shipped in round 1 silently discarded the ones a production listing carries.
 #
 # A DEDICATED repo: every eviction run below passes --reap-tier1 for real, and $REPO's worktree/scratch
 # fixtures are consumed by the assertions above — reaping them here would make those tests order-dependent.
@@ -1147,14 +1158,21 @@ store_put(){
     "$2" "${2##*/}" "$3" "$hashes" > "$STORE_DB/$key.json"
 }
 mkbig(){ mkdir -p "$(dirname "$1")"; head -c "${2:-2000000}" /dev/urandom > "$1"; }
-md5of(){ python3 -c "
+digestof(){ python3 -c "
 import hashlib, sys
-h = hashlib.md5()
+h = hashlib.new(sys.argv[2])
 with open(sys.argv[1], 'rb') as fh:
     for chunk in iter(lambda: fh.read(1 << 20), b''):
         h.update(chunk)
 print(h.hexdigest())
-" "$1"; }
+" "$1" "${2:-md5}"; }
+md5of(){ digestof "$1" md5; }
+# store_put_md5 <top-level dir> <object path under the prefix> <local file> [hash key spelling]
+# The ordinary "these bytes really are at the store" fixture: same size, same md5, spelled however rclone
+# would spell the key on the day the listing was taken.
+store_put_md5(){
+  store_put "$1" "$2" "$(stat -c%s "$3")" "{\"${4:-md5}\":\"$(md5of "$3")\"}"
+}
 sweep_evict(){ # extra args -> stdout is the JSON report
   REPO_JANITOR_STORE_LIST_CMD="$STORE_CMD" python3 "$SWEEP" --repo "$EVREPO" \
     --evict-verified "$EV" --store "$STORE" --min-size 1M "$@" 2>/dev/null
@@ -1164,21 +1182,39 @@ sweep_evict(){ # extra args -> stdout is the JSON report
 #    path (`adapters/probe.tar` locally, `target_probes/probe.tar` at the store) — a path-shaped lookup
 #    would have found nothing while the bytes were demonstrably there.
 mkbig "$EV/exp-match/adapters/probe.tar"
-store_put exp-match "target_probes/probe.tar" "$(stat -c%s "$EV/exp-match/adapters/probe.tar")"
+store_put_md5 exp-match "target_probes/probe.tar" "$EV/exp-match/adapters/probe.tar"
 # 2. same basename at the store, DIFFERENT size -> not these bytes
 mkbig "$EV/exp-size/big.tar"
 store_put exp-size "x/big.tar" "$(( $(stat -c%s "$EV/exp-size/big.tar") + 1 ))"
 # 3. nothing at the store under that prefix at all
 mkbig "$EV/exp-none/orphan.tar"
-# 4. the store exposes a hash, and it MATCHES
+# 4. the store spells its hash key the way rclone does on an S3/R2 backend — `MD5`, not `md5`. The bar is a
+#    fact about the STORE, not about rclone's formatting: this must verify exactly as lowercase does.
 mkbig "$EV/exp-hash/hashed.tar"
-store_put exp-hash "y/hashed.tar" "$(stat -c%s "$EV/exp-hash/hashed.tar")" \
-  "{\"md5\":\"$(md5of "$EV/exp-hash/hashed.tar")\"}"
+store_put_md5 exp-hash "y/hashed.tar" "$EV/exp-hash/hashed.tar" "MD5"
 # 5. the store exposes a hash and it DISAGREES while name+size match — the collision case name+size alone
-#    would wave through. A hash the store offers makes a hash match REQUIRED.
+#    would wave through.
 mkbig "$EV/exp-badhash/collide.tar"
 store_put exp-badhash "z/collide.tar" "$(stat -c%s "$EV/exp-badhash/collide.tar")" \
   '{"md5":"00000000000000000000000000000000"}'
+# 5b. THE ROUND-1 P0 (#859): name and exact size agree and the store offers NO comparable checksum. Two
+#     adapter tars for one experiment share a generic basename and a size fixed by the adapter's shape, so
+#     this is the shape name+size cannot tell apart — it must be KEPT, not waved through.
+mkbig "$EV/exp-nohash/probe.tar"
+store_put exp-nohash "p/probe.tar" "$(stat -c%s "$EV/exp-nohash/probe.tar")"
+# 5c. an algorithm this sweep cannot recompute is exactly as much evidence as no hash at all
+mkbig "$EV/exp-crc/probe.tar"
+store_put exp-crc "p/probe.tar" "$(stat -c%s "$EV/exp-crc/probe.tar")" \
+  '{"crc32":"deadbeef","quickxor":"zzz"}'
+# 5d. `SHA-1` normalizes onto sha1 and verifies — the other spelling rclone actually emits
+mkbig "$EV/exp-sha/probe.tar"
+store_put exp-sha "p/probe.tar" "$(stat -c%s "$EV/exp-sha/probe.tar")" \
+  "{\"SHA-1\":\"$(digestof "$EV/exp-sha/probe.tar" sha1)\"}"
+# 5e. one record carrying two spellings of ONE algorithm that DISAGREE is a store record contradicting
+#     itself: every comparable checksum must agree, so no winner is picked and the file is kept.
+mkbig "$EV/exp-selfcontra/probe.tar"
+store_put exp-selfcontra "p/probe.tar" "$(stat -c%s "$EV/exp-selfcontra/probe.tar")" \
+  "{\"md5\":\"$(md5of "$EV/exp-selfcontra/probe.tar")\",\"MD5\":\"00000000000000000000000000000000\"}"
 # 6. the listing itself fails -> UNKNOWN, never "the store does not have this"
 mkbig "$EV/exp-fail/unlisted.tar"
 touch "$STORE_DB/$(printf '%s' "$STORE/exp-fail" | tr '/:' '__').fail"
@@ -1190,20 +1226,20 @@ mkbig "$EV/exp-reg/tree/registry/e1/rec.tar"
 git init -q "$EV/exp-reg/tree"
 mkdir -p "$EV/exp-reg/plain/registry"
 cp "$EV/exp-reg/tree/registry/e1/rec.tar" "$EV/exp-reg/plain/registry/rec.tar"
-store_put exp-reg "recs/rec.tar" "$(stat -c%s "$EV/exp-reg/tree/registry/e1/rec.tar")"
+store_put_md5 exp-reg "recs/rec.tar" "$EV/exp-reg/tree/registry/e1/rec.tar"
 # 9. a live owner vetoes eviction outright, whatever the store says
 mkbig "$EV/exp-live/adapters/probe.tar"
-store_put exp-live "target_probes/probe.tar" "$(stat -c%s "$EV/exp-live/adapters/probe.tar")"
+store_put_md5 exp-live "target_probes/probe.tar" "$EV/exp-live/adapters/probe.tar"
 # 10. a hardlinked pair, both links in scope and both verifiable -> ONE tier-1 entry, both links unlinked,
 #     the bytes counted ONCE (unlinking one of two links frees nothing at all).
 mkbig "$EV/exp-hl/a/big.tar"
 mkdir -p "$EV/exp-hl/b"; ln "$EV/exp-hl/a/big.tar" "$EV/exp-hl/b/big.tar"
-store_put exp-hl "hl/big.tar" "$(stat -c%s "$EV/exp-hl/a/big.tar")"
+store_put_md5 exp-hl "hl/big.tar" "$EV/exp-hl/a/big.tar"
 # 11. a link this sweep CANNOT see (outside every scanned root) -> kept: the unlink would free nothing
 #     while destroying a path whose sibling is unaccounted for.
 mkbig "$EV/exp-hlout/big.tar"
 ln "$EV/exp-hlout/big.tar" "$TMP/outside-link.tar"
-store_put exp-hlout "hl/big.tar" "$(stat -c%s "$EV/exp-hlout/big.tar")"
+store_put_md5 exp-hlout "hl/big.tar" "$EV/exp-hlout/big.tar"
 # 12. a symlink is never a candidate, however verifiable its target looks
 ln -s "adapters/probe.tar" "$EV/exp-match/probe-link.tar"
 # 13. a file directly under the root has no top-level dir to key the store prefix on -> kept
@@ -1219,13 +1255,20 @@ reason_has "d['tier3']" "$EV/exp-live/adapters/probe.tar" "nothing inside a live
 sweep_evict --json > "$TMP/evict.json"
 has_path_in "d['tier1']" "$EV/exp-match/adapters/probe.tar" < "$TMP/evict.json" && ok "evict: bytes proven at the store reach tier1 (store layout need not mirror the local path)" || no "evict: a store-verified file must reach tier1"
 reason_has "d['tier1']" "$EV/exp-match/adapters/probe.tar" "$STORE/exp-match/target_probes/probe.tar" < "$TMP/evict.json" && ok "evict: the tier-1 reason names the store object that proves the bytes" || no "evict: tier-1 reason must name the store object"
-has_path_in "d['tier1']" "$EV/exp-hash/hashed.tar" < "$TMP/evict.json" && ok "evict: a store-exposed hash that matches reaches tier1" || no "evict: a matching hash must reach tier1"
-reason_has "d['tier1']" "$EV/exp-hash/hashed.tar" "md5-verified" < "$TMP/evict.json" && ok "evict: the reason states the verification was hash-based when the store exposed one" || no "evict: reason must state md5-verified"
-for keep in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar"; do
+has_path_in "d['tier1']" "$EV/exp-hash/hashed.tar" < "$TMP/evict.json" && ok "evict: rclone's 'MD5' key spelling verifies exactly as 'md5' does (#859: a case-sensitive lookup dropped it)" || no "evict: an uppercase MD5 key must verify"
+reason_has "d['tier1']" "$EV/exp-hash/hashed.tar" "md5-verified" < "$TMP/evict.json" && ok "evict: the reason names the checksum the verification rested on" || no "evict: reason must state md5-verified"
+has_path_in "d['tier1']" "$EV/exp-sha/probe.tar" < "$TMP/evict.json" && ok "evict: rclone's 'SHA-1' key spelling normalizes onto sha1 and verifies" || no "evict: a 'SHA-1' key must verify"
+reason_has "d['tier1']" "$EV/exp-sha/probe.tar" "sha1-verified" < "$TMP/evict.json" && ok "evict: the reason names sha1 when that is what proved the bytes" || no "evict: reason must state sha1-verified"
+for keep in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-nohash/probe.tar" "$EV/exp-crc/probe.tar" "$EV/exp-selfcontra/probe.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar"; do
   has_path_in "d['tier3']" "$keep" < "$TMP/evict.json" && ok "evict: unverified '$(basename "$(dirname "$keep")")/$(basename "$keep")' is kept and reported (tier3)" || no "evict: unverified $keep must be reported in tier3"
   has_path_in "d['tier1']" "$keep" < "$TMP/evict.json" && no "evict: unverified $keep must never reach tier1" || ok "evict: unverified '$(basename "$(dirname "$keep")")/$(basename "$keep")' never reaches tier1"
 done
-reason_has "d['tier3']" "$EV/exp-badhash/collide.tar" "every hash the store exposes for it disagrees" < "$TMP/evict.json" && ok "evict: a name+size collision whose hash disagrees is kept, and the reason says why" || no "evict: hash-disagreement reason missing"
+reason_has "d['tier3']" "$EV/exp-badhash/collide.tar" "the checksums the store exposes for it disagree" < "$TMP/evict.json" && ok "evict: a name+size collision whose checksum disagrees is kept, and the reason says why" || no "evict: hash-disagreement reason missing"
+# THE ROUND-1 P0 (#859): name+size agreement is not exact-byte equivalence and never evicts on its own.
+reason_has "d['tier3']" "$EV/exp-nohash/probe.tar" "name+size is not" < "$TMP/evict.json" && ok "evict: name+exact-size with no comparable checksum is KEPT, and the reason says name+size is not equivalence" || no "evict: name+size alone must never evict"
+reason_has "d['tier3']" "$EV/exp-nohash/probe.tar" "$STORE/exp-nohash/p/probe.tar" < "$TMP/evict.json" && ok "evict: the kept-for-no-checksum reason still names the object, so the by-hand check is one step away" || no "evict: no-checksum reason must name the candidate object"
+reason_has "d['tier3']" "$EV/exp-crc/probe.tar" "no checksum this sweep can recompute" < "$TMP/evict.json" && ok "evict: an incomparable-only algorithm (crc32/quickxor) is exactly as much evidence as no hash at all" || no "evict: incomparable-algorithm reason missing"
+reason_has "d['tier3']" "$EV/exp-selfcontra/probe.tar" "the checksums the store exposes for it disagree" < "$TMP/evict.json" && ok "evict: a record contradicting itself across two spellings of one algorithm picks no winner" || no "evict: self-contradicting record must be kept"
 reason_has "d['tier3']" "$EV/exp-fail/unlisted.tar" "store prefix could not be listed" < "$TMP/evict.json" && ok "evict: a failed store listing is UNKNOWN, not an empty store" || no "evict: failed-listing reason missing"
 # the sub-threshold file and everything under `registry/` of a git tree are not just un-reaped, they are
 # never CONSIDERED — silent, in no tier at all
@@ -1262,7 +1305,8 @@ sweep_evict --reap-tier1 --json > "$TMP/evict-reaped.json"
 [ -f "$EV/exp-match/adapters/probe.tar" ] && no "evict: a store-verified file was NOT evicted by --reap-tier1" || ok "evict: --reap-tier1 really evicts a store-verified file"
 [ -f "$EV/exp-hash/hashed.tar" ]           && no "evict: a hash-verified file was NOT evicted" || ok "evict: --reap-tier1 really evicts a hash-verified file"
 [ -f "$EV/exp-hl/a/big.tar" ] || [ -f "$EV/exp-hl/b/big.tar" ] && no "evict: a hardlink sibling survived its inode's eviction (frees nothing)" || ok "evict: every link to an evicted inode is unlinked"
-for survivor in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar" "$EV/exp-match/small.bin" "$EV/exp-reg/tree/registry/e1/rec.tar"; do
+find "$EV" -name '.repo-janitor-evicting.*' -print -quit | grep -q . && no "evict: a staging entry was left behind by a successful reap" || ok "evict: a successful reap leaves no staging entry behind"
+for survivor in "$EV/exp-size/big.tar" "$EV/exp-none/orphan.tar" "$EV/exp-badhash/collide.tar" "$EV/exp-nohash/probe.tar" "$EV/exp-crc/probe.tar" "$EV/exp-selfcontra/probe.tar" "$EV/exp-fail/unlisted.tar" "$EV/exp-hlout/big.tar" "$EV/loose.tar" "$EV/exp-match/small.bin" "$EV/exp-reg/tree/registry/e1/rec.tar"; do
   [ -f "$survivor" ] && ok "evict: '$(basename "$(dirname "$survivor")")/$(basename "$survivor")' survives a real --reap-tier1" || no "evict: $survivor was DELETED without being verified at the store"
 done
 python3 -c "
@@ -1278,6 +1322,71 @@ assert d['reclaimed']['verified_on_store_bytes'] == sum(r['bytes'] for r in ev),
 assert d['reclaimed']['tier1_bytes'] == 0, d['reclaimed']
 " < "$TMP/evict-reaped.json" && ok "evict: the 'reaped' records name each eviction, its store object and its reclaimed bytes" || no "evict: eviction reap records are wrong"
 sweep_evict --reap-tier1 2>/dev/null | grep -q "verified-on-store, .* tier-1" && no "evict: nothing is left to evict on a second pass, so no reclaimed line is expected" || ok "evict: a second pass finds nothing left to evict"
+
+# evict_unlink's identity binding, driven directly (Codex review #859 round 1). The race it closes cannot
+# be scheduled from a shell — but its whole mechanism is "the inode I verified is the inode I remove", and
+# that IS assertable: hand it a stat key or a link count that no longer describes the file and it must
+# abort and put every staged link back exactly where it was. Driven as a unit because a sweep can only
+# reach this through a real classification, which by construction never disagrees with itself.
+UNLINK_DIR="$TMP/unlink-unit"; mkdir -p "$UNLINK_DIR"
+python3 - "$SWEEP" "$UNLINK_DIR" <<'PY' && ok "evict: evict_unlink removes only the verified inode, and restores every staged link when it cannot" || no "evict: evict_unlink identity binding/restore is wrong"
+import importlib.util, os, sys
+
+spec = importlib.util.spec_from_file_location("ws", sys.argv[1])
+ws = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(ws)
+root = sys.argv[2]
+logged = []
+
+def mkgroup(name, links=1):
+    """A file plus `links - 1` hardlinks to it; returns (paths, stat_key)."""
+    paths = []
+    for i in range(links):
+        p = os.path.join(root, f"{name}.{i}")
+        if i == 0:
+            with open(p, "wb") as fh:
+                fh.write(os.urandom(4096))
+        else:
+            os.link(paths[0], p)
+        paths.append(p)
+    st = os.lstat(paths[0])
+    return paths, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+def staging_entries():
+    return [n for n in os.listdir(root) if n.startswith(ws.EVICT_STAGE_PREFIX)]
+
+# 1. the happy path: every link to the verified inode goes
+paths, key = mkgroup("happy", links=2)
+assert ws.evict_unlink(paths, key, logged.append) == ("evicted", None)
+assert not any(os.path.lexists(p) for p in paths), paths
+assert staging_entries() == [], staging_entries()
+
+# 2. a stat key that does not describe the file: nothing is deleted, and every link is back under its
+#    ORIGINAL name — a staged rename this sweep does not finish must never be visible afterwards.
+paths, key = mkgroup("wrongkey", links=2)
+outcome, detail = ws.evict_unlink(paths, (key[0], key[1], key[2], key[3] + 1), logged.append)
+assert outcome == "skipped" and "not the inode whose bytes were verified" in detail, (outcome, detail)
+assert all(os.path.lexists(p) for p in paths), paths
+assert staging_entries() == [], staging_entries()
+
+# 3. a link added to the inode after the plan was made: the unlink would no longer free the bytes, so the
+#    group is skipped whole and restored.
+paths, key = mkgroup("extralink", links=2)
+os.link(paths[0], os.path.join(root, "extralink.sneaked"))
+outcome, detail = ws.evict_unlink(paths, key, logged.append)
+assert outcome == "skipped" and "link(s), not the 2" in detail, (outcome, detail)
+assert all(os.path.lexists(p) for p in paths), paths
+assert staging_entries() == [], staging_entries()
+
+# 4. a path that is not a regular file any more is never unlinked
+p = os.path.join(root, "gone-dir")
+_, key = mkgroup("gone", links=1)
+os.mkdir(p)
+outcome, detail = ws.evict_unlink([p], key, logged.append)
+assert outcome == "skipped", (outcome, detail)
+assert os.path.isdir(p), p
+assert staging_entries() == [], staging_entries()
+PY
 
 # tier-1 worktree/scratch reaps carry their own byte figure, so the summary can split the two legs
 SC2="$TMP/scratch2"; mkdir -p "$SC2"

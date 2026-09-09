@@ -9,16 +9,25 @@
   box considered them finished. New `worktree_sweep.py --evict-verified <root> --store <rclone path>
   [--min-size 50M]` asks the content question instead: for every regular file at/above `--min-size` under a
   scratch root, is there an object under `<store>/<its top-level dir>/**` with the same basename and exact
-  size — and the same **hash** when the backend exposes one this sweep can recompute (S3's ETag md5, or the
-  `X-Amz-Meta-Md5chksum` rclone writes for a multipart upload), in which case a hash match becomes
-  *required* rather than optional. A match is tier 1 with `kind: evict`, and `--reap-tier1` unlinks it,
-  logging `EVICTED <path> -> <store object>`; no match, a disagreeing hash, an unreadable file, or a failed
+  size whose **checksum, recomputed from the local bytes, agrees**? Name+size is only the prefilter: the two
+  files this leg most needs to tell apart are two adapter tars for one experiment, sharing a generic
+  basename AND a size fixed by the adapter's *shape* rather than its weights, so an object exposing no
+  checksum this sweep can recompute (S3's ETag md5, or the `X-Amz-Meta-Md5chksum` rclone writes for a
+  multipart upload) proves nothing and the file is kept with that object named for a by-hand check. Hash
+  keys are matched case- and punctuation-insensitively, since rclone spells them `MD5`/`SHA-1` as well as
+  `md5`/`sha1` and a listing's formatting must not decide whether a real checksum gets checked. A match is
+  tier 1 with `kind: evict`, and `--reap-tier1` unlinks it, logging `EVICTED <path> -> <store object>`; no
+  match, no comparable checksum, a disagreeing one, an unreadable file, or a failed
   store listing keeps and reports it. **Age bar 0** — a file whose bytes are proven durable is a cache
   entry at any age, and the recovery is `rclone copy` of the object named in the report — with the
   **live-owner veto the only hold**, reused verbatim from the worktree tiers. `registry/` of a git tree and
   every `.git` dir are pruned from the walk (git-tree-keyed, not name-keyed); symlinks are never
   candidates; **hardlinks resolve per inode** (unlinking one of N links frees nothing, so an inode goes
-  only when every link was found *and* verified, and its bytes count once). The store listing goes through
+  only when every link was found *and* verified, and its bytes count once). **The inode that was verified
+  is the inode that is removed:** checking a path and then unlinking that path is two lookups of a NAME, so
+  every link is first `rename`d — inside its own directory, through an `O_NOFOLLOW` dirfd — to a private
+  `.repo-janitor-evicting.*` name, which is what makes the identity and link-count checks *hold* rather
+  than merely having held; any disagreement aborts and restores every staged link. The store listing goes through
   a new `REPO_JANITOR_STORE_LIST_CMD` seam defaulting to `rclone lsjson --recursive --files-only --hash`,
   listed once per prefix per sweep, failures included. The sweep also gained byte accounting: a
   `## Reclaimed` line / `reclaimed` JSON key reading "reclaimed X GB verified-on-store, Y GB tier-1", split

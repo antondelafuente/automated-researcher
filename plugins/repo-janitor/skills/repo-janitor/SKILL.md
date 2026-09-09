@@ -276,23 +276,32 @@ could evict them, because the exploratory path registers no close, so no reaper 
 no workflow variant can fall outside of: *are these exact bytes already at the artifact store?* For every
 regular file at or above `--min-size` under each root, it looks for an object under
 `<store>/<the file's top-level directory under the root>/**` carrying the **same basename and the same exact
-size** — and its **hash** when the backend exposes one this sweep can recompute (for S3 that is the ETag's
-md5, or the `X-Amz-Meta-Md5chksum` metadata rclone writes for a multipart upload whose ETag is not a plain
-md5). On a match the local file is evicted; the report prints `EVICTED <path> -> <store object>` and the
-reclaimed bytes. **No match, a hash that disagrees, an unreadable local file, or a store listing that fails
-→ keep and report** (tier 3), never a guess.
+size** — and then requires a **checksum recomputed from the local bytes** to agree with every comparable
+checksum that object exposes (for S3 that is the ETag's md5, or the `X-Amz-Meta-Md5chksum` metadata rclone
+writes for a multipart upload whose ETag is not a plain md5). On a match the local file is evicted; the
+report prints `EVICTED <path> -> <store object>` and the reclaimed bytes. **No match, no comparable
+checksum, a checksum that disagrees, an unreadable local file, or a store listing that fails → keep and
+report** (tier 3), never a guess.
 
 - **Basename, not path.** The store's layout under `<store>/<exp>/` is the archive step's business, not
   this sweep's: #856's own case has `~/work/<exp>/adapters/probe.tar` living at
   `experiments/<exp>/target_probes/probe.tar`, so a path-shaped lookup would have found nothing while the
   bytes were demonstrably there. The **top-level directory name** is the only path fact used, and only to
   pick the store prefix — which is also what bounds the listing to one experiment's objects.
-- **A hash the store offers makes a hash match REQUIRED.** Name + exact byte length is the same test that
-  was run by hand before those 41.5 GB were deleted, and it is the evidence when the backend exposes no
-  comparable checksum — but when it does expose one, a disagreement is a confirmed *different file*, and
-  the one thing this bar must never do is delete unique bytes because something at the store happened to
-  share a name and a length. An algorithm this sweep can't recompute (crc32, quickxor) is treated exactly
-  like an absent one: it is not evidence.
+- **A recomputed checksum is REQUIRED — name + size is a prefilter, never the proof.** Name and exact byte
+  length are what was checked by hand before those 41.5 GB were deleted, but they are not exact-byte
+  equivalence, and the two files this leg most needs to tell apart are two adapter tars for one experiment:
+  a generic basename (`probe.tar`) and a size fixed by the adapter's *shape* rather than its weights is
+  exactly the collision name+size cannot see. So an object exposing no checksum this sweep can recompute
+  proves nothing, and the file is **kept and reported with that object named** — run the by-hand check
+  yourself if you believe the bytes really are durable. Every comparable checksum the object exposes must
+  agree: one disagreement is a confirmed *different file*, and a record contradicting itself across two
+  spellings of one algorithm picks no winner. An algorithm this sweep can't recompute (crc32, quickxor) is
+  treated exactly like an absent one. This costs the measured case nothing — `--store` names an rclone
+  remote, rclone reports md5 for the S3/R2 objects it uploaded, and a recomputed checksum is what
+  `rclone check` (the test the archive step already gates on) compares. **Hash names are matched
+  case- and punctuation-insensitively** (`MD5`, `md5` and `SHA-1` all normalize), because rclone has spelled
+  them both ways and a listing's formatting must not decide whether a real checksum gets checked.
 - **The age bar is 0, deliberately.** Age is evidence about a *writer*, and the store answers the only
   question that matters for a cache entry: a file whose bytes are proven durable is not
   work-in-progress at any age. **The live-owner veto is the only hold** — nothing inside a live (or
@@ -322,6 +331,17 @@ reclaimed bytes. **No match, a hash that disagrees, an unreadable local file, or
   That tuple *is* the re-verification of the store match: if the bytes changed under us the identity
   changes with them, so the earlier comparison still speaks for the file on disk, and the sweep doesn't
   re-read multi-GB files a second time to learn what a `stat` already says.
+- **The inode that was verified is the inode that is removed.** Checking a *path* and then unlinking that
+  path is two lookups of a name, and a name is not an inode: a concurrent rename in between would have the
+  janitor delete a file it never verified, and a link added after the count was read would make the
+  accounting claim bytes it no longer frees. So before anything is checked, every link in the group is
+  `rename`d — inside its own directory, through a directory fd opened `O_NOFOLLOW` — to a private
+  `.repo-janitor-evicting.*` name this process just generated. Nothing else can reach the inode by path
+  after that, so the identity and link-count checks *hold* rather than merely having held, and only then
+  does the unlink run. Any disagreement aborts and renames every staged link back (refusing to overwrite a
+  name something re-created meanwhile); a restore that can't complete is logged loudly with the staged
+  path, and a crash-orphaned staging entry is both recognizable by hand and unevictable by a later sweep,
+  since no store object shares that name.
 - **The mount guard from `--scratch-glob` deliberately does not carry over.** It exists because
   `rmtree` deletes a bind mount's *contents* through the mount before failing on the mount point; this leg
   unlinks one named regular file whose bytes are proven at the store, so there is no tree-walk to escape
@@ -535,11 +555,15 @@ its target, and a swept repo's own worktree all survive a real `--reap-tier1`; `
 every unsafe glob shape is rejected up front; and the `## Reaped` / `reaped` records name what was removed),
 and content-verified eviction end to end (automated-researcher#856 — the store is stood in for through the
 `REPO_JANITOR_STORE_LIST_CMD` seam, which is exactly why that seam exists: `rclone` is not reachable on a
-CI runner and this leg's contract is what the sweep does with the *listing*. Bytes proven at the store reach
-tier 1 under a store layout that does not mirror the local path and are really evicted; a hash the store
-exposes that matches also reaches tier 1 and says `md5-verified`, while the same name+size with a
-*disagreeing* hash is kept; a size disagreement, an absent object, a failed listing, a file directly under
-the root, and a live owner's file are all kept and survive a real `--reap-tier1`; a file below `--min-size`,
+CI runner and this leg's contract is what the sweep does with the *listing*. Bytes proven by a recomputed
+checksum reach tier 1 under a store layout that does not mirror the local path and are really evicted, with
+the reason naming the checksum that proved them; rclone's `MD5` and `SHA-1` key spellings verify exactly as
+the lowercase ones do; while name+exact-size with *no* comparable checksum, an incomparable-only algorithm
+(crc32/quickxor), a *disagreeing* checksum, a record contradicting itself across two spellings of one
+algorithm, a size disagreement, an absent object, a failed listing, a file directly under
+the root, and a live owner's file are all kept and survive a real `--reap-tier1`; `evict_unlink` is driven
+directly as a unit — it removes only the verified inode, and a stat-key or link-count disagreement aborts
+and restores every staged link, leaving no `.repo-janitor-evicting.*` entry behind; a file below `--min-size`,
 a symlink, and everything under `registry/` of a git tree are never even classified, while a plain
 `registry/` directory outside any checkout still evicts (the veto is git-tree-keyed, not name-keyed); a
 hardlinked pair is ONE tier-1 entry that unlinks every link and counts the bytes once, while an inode with
