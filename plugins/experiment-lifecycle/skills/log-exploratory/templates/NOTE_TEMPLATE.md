@@ -28,4 +28,10 @@ not the audited pipeline — say so plainly rather than implying more rigor than
 ## Artifacts
 
 <Where the raw data actually lives — an R2/artifact-store path, plus what's committed alongside this note
-(figures, small derived CSVs) vs. what stays in the store (raw JSONL, full logs).>
+(figures, small derived CSVs) vs. what stays in the store (raw JSONL, full logs). A MANIFEST of store paths,
+not a copied/hardlinked second tree: one artifact, one object in the store.>
+
+**scratch reaped:** <the `bytes=` figure from `log-experiment`'s `[scratch: SCRATCH-REAP-RECLAIMED: …]` line;
+or `n/a` if nothing was staged on the box; or the verbatim `SCRATCH-REAP-GAP:`/failure line if the work dir
+is still on disk and why. Never blank — an unfilled line means the close is unfinished, which is exactly
+what it is there to show.>

@@ -1,3 +1,25 @@
+- experiment-lifecycle 0.12.0 (2026-09-09): **the exploratory fast lane gets a close** (#857).
+  `log-exploratory` — work in `<EXPERIMENT_SCRATCH_ROOT>/<name>`, land a `NOTE.md` via `log-experiment` — is
+  now the lab's VOLUME path (27 work dirs in two days, 15 exploratory) and had no close hygiene at all: six
+  closed Codex explores held **41.5 GB** of Tinker LoRA adapter tars, *already durable on R2*, 10–34 h after
+  their notes landed, because nothing in the path ever reaps. **Landing = close:** for `KIND=note`,
+  `log-experiment.sh` now derives `<EXPERIMENT_SCRATCH_ROOT>/<record-name>` after the merge and, when that
+  dir exists, reaps it through **`reap_scratch.sh`'s new note-path entry point** — archive → verify →
+  delete, one `SCRATCH-REAP-RECLAIMED:` line. The experiment path's fail-closed guards are NOT weakened to
+  let it through: gates 2–6 (derived delete target, path sanity, mount-freedom, no-delete-without-a-verified-
+  archive, re-derived verify destination, loud `SCRATCH-REAP-GAP:` no-ops) apply unchanged, and the note path
+  brings its own clean-close EVIDENCE in place of the run-supervision record an explore never has — the
+  record's own merge, re-checked (`<record>/NOTE.md` present at the given git ref) rather than taken on the
+  caller's word, and bound to the record NAME so one note's landing can never authorize deleting another's
+  scratch. It is reported, never enforced: the record is already merged when it runs, so the outcome rides
+  the final `OK:` line as `[scratch: …]` and a bad reap never fails a landing. The `NOTE.md` skeleton gains a
+  **`scratch reaped:`** line written from it, so a note whose scratch is still on the box is visibly
+  unfinished. Plus the staging habit behind the doubled uploads (R2 held 104 objects for 50 unique tars):
+  `log-exploratory` now states the artifact rule — producer → store directly, the box holds pointers, nothing
+  >1 GB under the work dir that isn't on its way to the store or deleted by the same script, archive by
+  MANIFEST not by copy — and ships **`stream_tar_census.sh`**, which reads a remote tar's member list from
+  the stream (`curl … | tar -t`) so a checkpoint census never materializes the archive locally at all.
+
 - experiment-lifecycle 0.11.0 (2026-09-08): both supervision layers stop resting on a scheduled job nobody
   ever saw fire (#849). In a **bridge** session — the kind the Remote-Control host spawns (`claude rc --spawn
   worktree`), running as `claude --print --sdk-url … --session-id cse_…` — `CronCreate` is advertised and

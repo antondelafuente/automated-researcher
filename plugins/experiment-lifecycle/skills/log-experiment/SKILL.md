@@ -6,7 +6,9 @@ description: >-
   (DESIGN.md+RESULTS.md = experiment; DESIGN.md alone = design-stage, the design PR; otherwise note) and gates
   by context: an experiment verifies its close-audit is present + triaged; a design-stage verifies its
   design-audit is present + secret scan; a note runs a deterministic secret scan. A cross-family engineer bot
-  (the family opposite the author) approves to satisfy branch protection. Run this instead of hand-doing branch/PR/approve/merge.
+  (the family opposite the author) approves to satisfy branch protection. For a note, the merge is also its
+  CLOSE: the record's exploratory work dir is archived, verified and removed, with the reclaimed bytes
+  reported. Run this instead of hand-doing branch/PR/approve/merge.
   Self-contained (does not source wf.sh); config via RESEARCH_REPO + the instance engineer seam.
 ---
 # log-experiment — log an experiment or note to GitHub as a gated PR
@@ -194,6 +196,31 @@ driver BLOCKS regardless — the exact silent prose/tree divergence #331 caught 
 dropped by an ignore rule while the audited docs said it was committed). An intentional R2-scale exclusion is
 fine; a doc that still claims the file landed is not.
 
+## Close hygiene on the note path: the landing IS the close (#857)
+
+An experiment's executor scratch is archived and removed by `run-experiment`'s close leg. A **note** has no
+close leg — this merge is its close — so for `KIND=note` this driver performs that same teardown itself,
+right after the merge. It derives `<EXPERIMENT_SCRATCH_ROOT>/<record-name>` and, **only when that directory
+exists**, hands it to `run-experiment`'s `reap_scratch.sh` (resolved beside this script, else in the sibling
+`run-experiment` skill) through that script's **note-path entry point**: archive → verify → delete, one
+`SCRATCH-REAP-RECLAIMED:` line. Every guard on the experiment path still applies — the delete target is
+derived from the declared scratch root and the record name (never a caller-supplied path, never a path named
+in `NOTE.md`'s prose), nothing is deleted without a verified archive, and an unset seam is a loud
+`SCRATCH-REAP-GAP:` no-op rather than a delete. The reaper's own clean-close evidence on this path is the
+record's merge, and it **re-checks it** (`<record>/NOTE.md` present at `origin/<base branch>`) rather than
+trusting this driver's say-so.
+
+Why here: `log-exploratory` is now the lab's volume path, and it had no close hygiene at all — six closed
+explores held 41.5 GB of already-uploaded Tinker adapter tars 10–34 h after their notes landed, because
+nothing in the path ever reaps. This is the one place that knows the record actually landed.
+
+**It is not a gate.** The record is merged before it runs, so a reap that refuses, gaps, or fails never turns
+a successful landing into a failure: the outcome is appended to the final `OK:` line as `[scratch: …]` (the
+reclaimed/gap marker verbatim, or `none` / `not-wired` / `reap-FAILED` / `reaper-not-found`), and the
+reaper's own output is passed through on stderr. `log-exploratory`'s `NOTE.md` skeleton carries a
+`scratch reaped:` line written from it, so a note whose scratch was never reaped is visibly unfinished.
+Non-note kinds are untouched by this leg.
+
 ## Identity / auth
 
 Both the writes and the review go through **engineer bots**: the **author-family** bot does the commit /
@@ -218,7 +245,10 @@ For an **experiment** or **design-stage** PR, the already-run audit is **surface
 ## Composes
 
 - **`run-experiment`** — produces the registry record this logs (and runs the close-audit the experiment
-  gate verifies).
+  gate verifies). It also owns `reap_scratch.sh`, whose note-path entry point this driver calls after a note
+  merges (see Close hygiene above) — one archive-verify-delete implementation, two entry points.
+- **`log-exploratory`** — the recipe that produces most notes; its `NOTE.md` skeleton carries the
+  `scratch reaped:` line written from this driver's `[scratch: …]` outcome.
 - **`design-experiment`** — writes the `START.md` instance-profile snapshot (`scripts/aar_profile_snapshot.sh
   snapshot`) the design-stage gate verifies; this skill ships a byte-identical copy of that helper (`check`
   verb only) so the gate has no cross-plugin path dependency.

@@ -1303,4 +1303,63 @@ if [ "$(git rev-parse --abbrev-ref HEAD)" = "$BASE_BRANCH" ]; then
 else
   note "checkout is on $(git rev-parse --abbrev-ref HEAD), not $BASE_BRANCH; skipping local sync"
 fi
-echo "OK: logged $KIND '$REL'${PS_REL:+ + page source '$PS_REL'} as PR #$PR (merged)."   # the EXIT trap removes the temp worktree + its local branch
+
+# ---- close hygiene: LANDING = CLOSE for the exploratory note path (#857) ----------------------------
+# INCIDENT (automated-researcher#857, 2026-09-09): `log-exploratory` — work in `<EXPERIMENT_SCRATCH_ROOT>/
+# <name>`, land a NOTE.md here — is now the lab's VOLUME path (27 work dirs in two days, 15 exploratory) and
+# had NO close hygiene at all. Six closed explores held 41.5 GB of Tinker adapter tars, already durable on
+# R2, 10-34 h after their NOTE landed, because nothing in the path ever reaps. An experiment's scratch is
+# reaped by `run-experiment`'s close; a note's close IS this merge, so the reap belongs HERE — the one place
+# that knows the record landed. It runs AFTER the merge and AFTER the fetch above, because the reaper's own
+# clean-close gate re-checks the merged NOTE.md at `origin/$BASE_BRANCH` rather than taking our word for it.
+#
+# It is deliberately NOT a gate: the record is already merged by the time this runs, so a reap that refuses,
+# gaps, or fails must never turn a successful landing into a non-zero exit. Every outcome is instead stated
+# on the final OK line (and the reaper's own SCRATCH-REAP-* marker is passed through), which is what the
+# NOTE skeleton's "scratch reaped:" line is written from — a note without one is visibly unfinished.
+SCRATCH_OUTCOME=""
+reap_note_scratch() {
+  local root="${EXPERIMENT_SCRATCH_ROOT:-}" helper="" cand dir out rc=0
+  local name; name="$(basename -- "$REL")"   # the record's own name — the ONLY binding to its work dir
+  # The reaper lives with the rest of the close-time teardown symmetry in run-experiment/scripts. Resolved
+  # beside this script first (an instance that co-locates a copy), then at the sibling skill — a plugin
+  # install of experiment-lifecycle carries both skills, so that path resolves there and in a repo checkout.
+  for cand in "$SELF_DIR/reap_scratch.sh" "$SELF_DIR/../../run-experiment/scripts/reap_scratch.sh"; do
+    [ -f "$cand" ] && { helper="$cand"; break; }
+  done
+  if [ -z "$helper" ]; then
+    SCRATCH_OUTCOME="reaper-not-found"
+    note "REAP BY HAND: reap_scratch.sh was not found beside this script or in the sibling run-experiment skill, so this note's exploratory scratch (if any) was NOT archived or removed. Nothing is deleted from here: the bounded delete lives in that helper (#857)."
+    return 0
+  fi
+  if [ -z "${root// /}" ]; then
+    # No declared scratch root -> no bounded target to derive, so there is nothing this can even look at.
+    # Said once, plainly, rather than silently: an unwired seam being invisible is how seven closes reaped
+    # zero scratch dirs while the disk refilled (#804).
+    SCRATCH_OUTCOME="not-wired"
+    note "close hygiene: EXPERIMENT_SCRATCH_ROOT is unset, so no exploratory work dir could be derived for '$REL' — wire the instance's scratch root if this note had one (#857)."
+    return 0
+  fi
+  dir="${root%/}/$name"
+  if [ ! -d "$dir" ]; then
+    SCRATCH_OUTCOME="none"
+    note "close hygiene: no exploratory work dir at '$dir' — nothing to reap (#857)."
+    return 0
+  fi
+  note "close hygiene: reaping this note's exploratory scratch '$dir' (archive -> verify -> delete) (#857)"
+  # `|| rc=$?` (not a bare assignment): under `set -e` an assignment from a failing command substitution
+  # would abort the script, and a reap outcome must never fail a landing that is already merged.
+  out="$(bash "$helper" --note-record "$DIR" --merged-ref "origin/$BASE_BRANCH" "$name" "$dir" 2>&1)" || rc=$?
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  case "$rc" in
+    0) SCRATCH_OUTCOME="$(printf '%s\n' "$out" | grep -m1 '^SCRATCH-REAP-RECLAIMED:' || echo 'reaped')" ;;
+    3) SCRATCH_OUTCOME="$(printf '%s\n' "$out" | grep -m1 '^SCRATCH-REAP-GAP:' || echo 'gap')"
+       note "close hygiene: the reap was a WIRING GAP — nothing was archived and nothing was deleted, and '$dir' is exactly where it was. Put the SCRATCH-REAP-GAP line on the note." ;;
+    *) SCRATCH_OUTCOME="reap-FAILED"
+       note "close hygiene: the reap FAILED (exit $rc) — '$dir' is STILL ON DISK. The record itself is merged and durable; re-run by hand once the cause above is fixed: reap_scratch.sh --note-record '$DIR' --merged-ref 'origin/$BASE_BRANCH' '$name' '$dir'" ;;
+  esac
+  return 0
+}
+if [ "$KIND" = "note" ]; then reap_note_scratch; fi
+
+echo "OK: logged $KIND '$REL'${PS_REL:+ + page source '$PS_REL'} as PR #$PR (merged).${SCRATCH_OUTCOME:+ [scratch: $SCRATCH_OUTCOME]}"   # the EXIT trap removes the temp worktree + its local branch
