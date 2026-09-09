@@ -1099,8 +1099,10 @@ def scan_scratch(args, now_ts, protected, results, reap_plan):
 #
 # FAIL-CLOSED, same as every other fact here: no matching object, no comparable checksum, a checksum that
 # disagrees, an unreadable local file, an unparseable or failed store listing, a hardlink this sweep cannot
-# see, an inode that moved between verification and deletion — every one of them KEEPS the file and REPORTS
-# it (tier 3). The only path to a delete is a positive checksum match on an inode still provably itself.
+# see, an inode that moved between verification and deletion, an inode whose bytes no longer digest to what
+# the store matched — every one of them KEEPS the file and REPORTS it (tier 3). The only path to a delete is
+# a positive checksum match on an inode that is still provably itself AND still provably holds those bytes
+# when the unlink goes (see evict_unlink; the metadata-for-content substitution is what #859 round 2 caught).
 
 def parse_size(text):
     """Bytes for a `--min-size` value, or None if it can't be parsed. Accepts a bare byte count or a
@@ -1218,38 +1220,67 @@ def evict_hashes(raw):
     return {k: sorted(v) for k, v in out.items()}
 
 
-def local_file_hash(path, algo):
-    """The file's own `algo` digest (lowercase hex), or None (UNKNOWN) if it can't be read. Streamed in
+def stream_hashes(fh, algos):
+    """`{algo: lowercase hex digest}` for one open binary stream, every algorithm in ONE pass. Streamed in
     chunks: these are multi-GB adapter tars, and reading one into memory inside a sweep is its own failure
     mode."""
+    hs = {a: hashlib.new(EVICT_HASH_ALGOS[a]) for a in algos}
+    while True:
+        chunk = fh.read(EVICT_HASH_CHUNK)
+        if not chunk:
+            break
+        for h in hs.values():
+            h.update(chunk)
+    return {a: h.hexdigest().lower() for a, h in hs.items()}
+
+
+def local_file_hash(path, algo):
+    """The file's own `algo` digest (lowercase hex), or None (UNKNOWN) if it can't be read."""
     try:
-        h = hashlib.new(EVICT_HASH_ALGOS[algo])
         with open(path, "rb") as fh:
-            while True:
-                chunk = fh.read(EVICT_HASH_CHUNK)
-                if not chunk:
-                    break
-                h.update(chunk)
-        return h.hexdigest().lower()
-    except (OSError, ValueError):
+            return stream_hashes(fh, [algo])[algo]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def fd_hashes(fd, algos):
+    """`{algo: lowercase hex digest}` read from an ALREADY-OPEN descriptor, or None (UNKNOWN) on any read
+    failure. Reading through the descriptor — never through the path again — is the point: the bytes are
+    attributed to the inode the caller already `fstat`ed, so no name lookup sits between "these are the
+    bytes" and "this is the file". Duplicated before wrapping so the caller keeps its own fd."""
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(fd), "rb", closefd=True) as fh:
+            return stream_hashes(fh, algos)
+    except (OSError, ValueError, KeyError):
         return None
 
 
 EVICT_DIR_FD_OPS = (os.stat, os.rename, os.unlink, os.open)
 
 
-def evict_unlink(paths, stat_key, log):
-    """Unlink every link in one hardlink group, but ONLY the exact inode whose bytes were verified against
-    the store. Returns (outcome, detail): ("evicted", None), ("skipped", reason) when the on-disk state no
-    longer matches what was verified, or ("failed", reason) on an OS error.
+def evict_unlink(paths, stat_key, verified_hashes, log):
+    """Unlink every link in one hardlink group, but ONLY an inode still holding the exact bytes that were
+    verified against the store. Returns (outcome, detail): ("evicted", None), ("skipped", reason) when the
+    on-disk state no longer matches what was verified, or ("failed", reason) on an OS error.
 
-    WHY THIS IS NOT `lstat(p)` THEN `os.unlink(p)` (Codex review, automated-researcher#859 round 1): those
-    are two lookups of the same NAME, and a name is not an inode. A concurrent rename between them makes the
-    janitor delete a file it never verified — the exact failure this leg's fail-closed discipline exists to
-    prevent, on the one code path where the mistake is irreversible. A link added to the inode after the
-    `st_nlink` check has the same shape: the accounting claims "this frees the bytes" when it no longer does.
+    THE INVARIANT THIS WHOLE FUNCTION EXISTS FOR: nothing is unlinked unless the bytes being removed are,
+    at the moment of removal, bytes this sweep has positively established are also at the store. Everything
+    below is that one sentence; the two review rounds on #859 are the two distinct ways a *proxy* for it was
+    substituted for the thing itself.
 
-    So the identity is BOUND before it is checked, by the standard stage-then-verify-then-delete shape:
+    WHY THIS IS NOT `lstat(p)` THEN `os.unlink(p)` (round 1): those are two lookups of the same NAME, and a
+    name is not an inode. A concurrent rename between them makes the janitor delete a file it never
+    verified. A link added to the inode after the `st_nlink` check has the same shape: the accounting claims
+    "this frees the bytes" when it no longer does. So the identity is BOUND before it is checked.
+
+    WHY A STAT TUPLE IS NOT THE BYTES (round 2): binding the name still leaves `(dev, ino, size, mtime_ns)`
+    standing in for the content, and that is the SAME substitution the round-1 verdict fix rejected one step
+    earlier (name+size for a checksum), just moved to the delete. `mtime` is not a content hash: an mmap
+    writer's timestamp update is only guaranteed by writeback/msync, a filesystem with coarse timestamp
+    granularity hides a write inside its own granule, and a writer holding an fd bypasses the name the
+    staging step bound. So the LAST thing that happens before the unlink is a re-read of the inode's actual
+    bytes, compared against the digest that verified against the store:
 
       1. Open the containing directory (`O_DIRECTORY|O_NOFOLLOW`) and anchor every later operation to that
          dirfd, so no ancestor component can be re-pointed under us mid-sequence.
@@ -1259,10 +1290,24 @@ def evict_unlink(paths, stat_key, log):
          what makes the link count trustworthy: once all `st_nlink` links carry private names, no outside
          actor can reach the inode by path to add another.
       3. `lstat` each staged entry through its dirfd and require a regular file, the exact
-         `(dev, ino, size, mtime_ns)` whose bytes were verified, and `st_nlink == len(paths)`.
-      4. Only then unlink the staged entries.
+         `(dev, ino, size, mtime_ns)` whose bytes were verified, and `st_nlink == len(paths)`. This is now
+         the CHEAP GATE, not the proof: it costs one stat per link and skips a stale group without paying
+         for the read in step 4.
+      4. Open the staged inode `O_RDONLY|O_NOFOLLOW` through its dirfd, re-read every byte through THAT
+         descriptor, and require each digest to equal the one that matched the store. `fstat` the same
+         descriptor to confirm the bytes just read came from the verified inode.
+      5. Re-run step 3 — after the read, so a write that landed during it (size/mtime) or a link added
+         during it (`st_nlink`) is caught, and so every staged name is re-tied to the inode just hashed.
+      6. Only then unlink the staged entries.
 
-    Any failure in 1-3 puts every staged entry back under its original name, and a restore that cannot
+    THE BOUNDARY THIS LEAVES, stated rather than papered over: POSIX offers no atomic
+    "unlink-if-contents-still-equal", so a writer holding an open descriptor could in principle write into
+    the inode in the window between step 4's last read and step 6's `unlink` — microseconds, containing no
+    I/O of ours. That residual is irreducible here; what actually covers the realistic writer is the
+    live-owner veto (nothing inside a live, or liveness-unverifiable, owner's tree is ever a candidate),
+    checked at classification and re-checked fresh per item immediately before this call.
+
+    Any failure in 1-5 puts every staged entry back under its original name, and a restore that cannot
     complete is logged loudly with the staged path — which is why EVICT_STAGE_PREFIX is recognizable rather
     than random: a crash-orphaned entry is identifiable by hand, and (carrying a name no store object
     shares) can never be evicted by a later sweep. The restore refuses to overwrite: it renames back only
@@ -1272,9 +1317,36 @@ def evict_unlink(paths, stat_key, log):
     if not all(op in os.supports_dir_fd for op in EVICT_DIR_FD_OPS):
         return "skipped", ("this platform cannot anchor a delete to a directory fd, so the verified inode "
                            "cannot be bound to the unlink")
-    fds = []      # every dirfd opened, closed exactly once in the finally
+    if not paths:
+        return "skipped", "no path was planned for this eviction"
+    algos = sorted(verified_hashes or {})
+    if not algos:
+        # Fail closed rather than fall back to the stat tuple: with no digest to re-check, this function
+        # cannot establish the one thing it exists to establish (round 2). A tier-1 eviction always carries
+        # one — evict_verdict cannot promote a file without a recomputed checksum agreeing with the store.
+        return "skipped", ("no recomputed checksum was carried into the delete, so the bytes about to be "
+                           "removed cannot be re-verified against the store")
+    fds = []      # every fd opened (directory fds + the read fd), closed exactly once in the finally
     staged = []   # (dirfd, original basename, staged basename, original full path) still needing a restore
     outcome, detail = None, None
+
+    def staged_state():
+        """The first reason the staged group no longer describes the exact verified inode, or None. Run
+        BEFORE the re-read as a cheap gate and AGAIN after it (see steps 3 and 5)."""
+        for dirfd, _name, tmp, p in staged:
+            try:
+                st = os.lstat(tmp, dir_fd=dirfd)
+            except OSError as e:
+                return f"'{p}' could not be re-checked once staged ({e})"
+            if not stat.S_ISREG(st.st_mode):
+                return f"'{p}' is no longer a regular file"
+            if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != tuple(stat_key):
+                return f"'{p}' is not the inode whose bytes were verified"
+            if st.st_nlink != len(paths):
+                return (f"'{p}' now has {st.st_nlink} link(s), not the {len(paths)} this eviction "
+                        "accounted for")
+        return None
+
     try:
         for p in paths:
             parent, name = os.path.split(p)
@@ -1300,22 +1372,40 @@ def evict_unlink(paths, stat_key, log):
                 break
             staged.append((dirfd, name, tmp, p))
         if outcome is None:
-            for dirfd, _name, tmp, p in staged:
+            reason = staged_state()          # step 3: the cheap gate
+            if reason:
+                outcome, detail = "skipped", reason
+        if outcome is None:
+            # Step 4: the bytes themselves, re-read through a descriptor on the staged inode. One read
+            # covers the whole hardlink group — every link is the same inode, which steps 3 and 5 assert.
+            dirfd0, _name0, tmp0, p0 = staged[0]
+            try:
+                filefd = os.open(tmp0, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dirfd0)
+            except OSError as e:
+                outcome, detail = "skipped", f"'{p0}' could not be opened to re-read its bytes ({e})"
+            else:
+                fds.append(filefd)
+                digests = fd_hashes(filefd, algos)
                 try:
-                    st = os.lstat(tmp, dir_fd=dirfd)
-                except OSError as e:
-                    outcome, detail = "skipped", f"'{p}' could not be re-checked once staged ({e})"
-                    break
-                if not stat.S_ISREG(st.st_mode):
-                    outcome, detail = "skipped", f"'{p}' is no longer a regular file"
-                    break
-                if (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns) != tuple(stat_key):
-                    outcome, detail = "skipped", f"'{p}' is not the inode whose bytes were verified"
-                    break
-                if st.st_nlink != len(paths):
-                    outcome, detail = ("skipped", f"'{p}' now has {st.st_nlink} link(s), not the "
-                                                  f"{len(paths)} this eviction accounted for")
-                    break
+                    fst = os.fstat(filefd)
+                except OSError:
+                    fst = None
+                if digests is None:
+                    outcome, detail = "skipped", (f"'{p0}' could not be re-read, so the bytes about to be "
+                                                  "removed could not be re-verified against the store")
+                elif fst is None or not stat.S_ISREG(fst.st_mode) or (
+                        fst.st_dev, fst.st_ino, fst.st_size, fst.st_mtime_ns) != tuple(stat_key):
+                    outcome, detail = "skipped", (f"'{p0}' is not the inode whose bytes were verified (the "
+                                                  "descriptor they were re-read from disagrees)")
+                else:
+                    stale = [a for a in algos if digests[a] != verified_hashes[a]]
+                    if stale:
+                        outcome, detail = "skipped", (f"'{p0}' no longer holds the bytes that were verified "
+                                                      f"against the store ({'+'.join(stale)} disagrees now)")
+        if outcome is None:
+            reason = staged_state()          # step 5: re-asserted AFTER the read
+            if reason:
+                outcome, detail = "skipped", reason
         if outcome is None:
             done = 0
             for dirfd, _name, tmp, p in staged:
@@ -1353,8 +1443,12 @@ def evict_unlink(paths, stat_key, log):
 
 
 def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
-    """(store_object, note) for one candidate file: store_object is the object that PROVES these bytes are
-    already at the store (evict), or None (keep — `note` is then the tier-3 reason).
+    """(store_object, note, verified_hashes) for one candidate file: store_object is the object that PROVES
+    these bytes are already at the store (evict), or None (keep — `note` is then the tier-3 reason).
+
+    `verified_hashes` is `{algo: local hex digest}` for every checksum the match actually rested on, or
+    None when the file is kept. It is carried all the way to the unlink, where the bytes are re-read and
+    compared against it — a stat tuple is not the bytes (Codex review, automated-researcher#859 round 2).
 
     The bar, in order, every step fail-closed:
       1. the live-owner veto, reused verbatim from the worktree tiers — nothing inside a live (or
@@ -1385,20 +1479,20 @@ def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
     liveness = owner_live_status(owner, live, seam_failed)
     if liveness != "not_live":
         return None, (f"verified-eviction candidate kept: owner '{owner}' reads as '{liveness}' — nothing "
-                      "inside a live (or unverifiable) owner's tree is ever evicted")
+                      "inside a live (or unverifiable) owner's tree is ever evicted"), None
     rel_parts = os.path.relpath(path, root).split(os.sep)
     if len(rel_parts) < 2:
         return None, ("verified-eviction candidate kept: it sits directly under the --evict-verified root, "
-                      "so there is no top-level directory name to key the store prefix on")
+                      "so there is no top-level directory name to key the store prefix on"), None
     prefix = f"{store}/{rel_parts[0]}"
     index, err = store_index(prefix, cache)
     if err:
         return None, (f"verified-eviction candidate kept: the store prefix could not be listed ({err}) — an "
-                      "unreadable listing is never 'the store does not have this'")
+                      "unreadable listing is never 'the store does not have this'"), None
     cands = [o for o in index.get(os.path.basename(path), []) if o["size"] == size]
     if not cands:
         return None, ("verified-eviction candidate kept: no object under its store prefix matches this "
-                      "file's basename AND exact size")
+                      "file's basename AND exact size"), None
     local = {}
     saw_comparable_hash = False
     for obj in cands:
@@ -1411,19 +1505,19 @@ def evict_verdict(path, root, size, store, cache, args, live, seam_failed):
                 local[algo] = local_file_hash(path, algo)
             if local[algo] is None:
                 return None, (f"verified-eviction candidate kept: its local {algo} could not be computed, so "
-                              "the store's hash could not be checked")
+                              "the store's hash could not be checked"), None
         # EVERY comparable checksum this object exposes must agree — one disagreement (including a record
         # that carries two spellings of one algorithm with different values) makes it a confirmed different
         # file, whatever its other hashes say.
         if all(set(obj["hashes"][algo]) == {local[algo]} for algo in algos):
-            return obj["path"], "+".join(algos) + "-verified"
+            return obj["path"], "+".join(algos) + "-verified", {a: local[a] for a in algos}
     if saw_comparable_hash:
         return None, ("verified-eviction candidate kept: an object matches its basename and size, but the "
-                      "checksums the store exposes for it disagree with the local file's")
+                      "checksums the store exposes for it disagree with the local file's"), None
     return None, ("verified-eviction candidate kept: an object matches its basename and exact size, but the "
                   "store exposes no checksum this sweep can recompute for it, and name+size is not "
                   "exact-byte equivalence — verify by hand against "
-                  f"'{cands[0]['path']}' if these bytes really are durable")
+                  f"'{cands[0]['path']}' if these bytes really are durable"), None
 
 
 def scan_evict(args, live, seam_failed, results, reap_plan):
@@ -1512,14 +1606,14 @@ def scan_evict(args, live, seam_failed, results, reap_plan):
             continue
         verdicts = [(full, *evict_verdict(full, root, size, store, cache, args, live, seam_failed))
                     for full, root in entries]
-        if any(obj is None for _full, obj, _note in verdicts):
-            for full, obj, note in verdicts:
+        if any(obj is None for _full, obj, _note, _hashes in verdicts):
+            for full, obj, note, _hashes in verdicts:
                 report(full, note if obj is None else
                        "verified-eviction candidate kept: these bytes are verified at the store, but another "
                        "hardlink to the same inode is not — unlinking this path alone would free nothing")
             continue
-        primary, obj, note = verdicts[0]
-        siblings = [full for full, _o, _n in verdicts[1:]]
+        primary, obj, note, verified = verdicts[0]
+        siblings = [full for full, _o, _n, _h in verdicts[1:]]
         owner = owner_of(primary, args.worktree_root, args.owner_depth)
         reason = (f"verified on the artifact store at '{obj}' ({note}), {human_bytes(size)} — safe to evict"
                   + (f" (+{len(siblings)} hardlink sibling(s) to the same inode, unlinked with it)"
@@ -1527,8 +1621,10 @@ def scan_evict(args, live, seam_failed, results, reap_plan):
         entry = {"repo": None, "path": primary, "branch": None, "owner": owner, "tier": 1, "kind": "evict",
                  "reason": reason, "action": evict_action([primary] + siblings)}
         results["tier1"].append(entry)
+        # `verified_hashes` travels with the plan because it is what the unlink re-checks the bytes against
+        # (#859 round 2). The hardlink group is ONE inode, so the primary's digests speak for every link.
         reap_plan.append(dict(entry, kind="evict", paths=[primary] + siblings, size=size, store_object=obj,
-                              stat_key=(dev, ino, size, g["mtime_ns"])))
+                              stat_key=(dev, ino, size, g["mtime_ns"]), verified_hashes=verified))
 
 
 def tree_bytes(path):
@@ -2050,17 +2146,23 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
     # WHICH facts are recomputed, why the STORE side is not, and where the check actually binds.
     #
     # Everything mutable is local, so every local fact is re-read from scratch: the owner's liveness (fresh,
-    # per item), the file still being a regular file, and its (dev, ino, size, mtime_ns) identity being the
-    # exact one whose bytes were verified. That last tuple IS the re-verification of the store match — if
-    # the bytes changed under us the inode/size/mtime changes with them, so the earlier checksum still
-    # speaks for the file on disk. Re-listing and re-HASHING every candidate a second time within the same
-    # sweep would double this leg's dominant cost (a multi-GB read per file) to learn nothing new.
+    # per item), the file still being a regular file, its (dev, ino, size, mtime_ns) identity, and — the
+    # part a stat tuple cannot answer (Codex review, automated-researcher#859 round 2) — ITS BYTES, re-read
+    # and re-digested inside evict_unlink against the checksum that matched the store. Round 1's fix took
+    # name+size out of the verdict because it is not exact-byte equivalence; leaving `mtime` to stand for
+    # the content at the delete was the same substitution one step later, so the second read is the price of
+    # the invariant rather than a cost to optimize away. It is paid only on the files a --reap-tier1 run is
+    # actually about to delete, never on the tier-3 majority.
     #
-    # WHERE IT BINDS (Codex review, automated-researcher#859 round 1): re-checking a PATH and then unlinking
-    # that path is two lookups of a name, not one decision about an inode — the state can change in between.
-    # The check below is therefore only an advisory prefilter for good skip messages; the delete itself goes
-    # through evict_unlink, which stages every link under a private name first so the identity it verifies
-    # is the identity it removes. Nothing here deletes on the strength of the prefilter alone.
+    # The STORE side is deliberately not re-listed: what the local bytes are compared against is the digest
+    # recorded when the object matched, and re-listing would answer a different question (has the store
+    # changed?) at the cost of another full listing per prefix.
+    #
+    # WHERE IT BINDS (round 1): re-checking a PATH and then unlinking that path is two lookups of a name,
+    # not one decision about an inode — the state can change in between. The check below is therefore only
+    # an advisory prefilter for good skip messages; the delete itself goes through evict_unlink, which
+    # stages every link under a private name first, so the identity and the bytes it verifies are the
+    # identity and the bytes it removes. Nothing here deletes on the strength of the prefilter alone.
     for item in reap_plan:
         if item["kind"] != "evict":
             continue
@@ -2074,8 +2176,9 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
             continue
         # An ADVISORY prefilter: it produces a precise skip reason for the ordinary cases (the file was
         # already taken by a worktree/scratch reap above, or something rewrote it since classification)
-        # without renaming anything. It is NOT the safety check — evict_unlink re-checks all of this with
-        # the inode bound, and is the only thing the delete actually rests on.
+        # without renaming anything and without reading a multi-GB file. It is NOT the safety check —
+        # evict_unlink re-checks all of this with the inode bound AND re-reads the bytes, and is the only
+        # thing the delete actually rests on.
         stale = None
         for p in paths:
             try:
@@ -2102,7 +2205,7 @@ def do_reap(reap_plan, dry_run, default_branch, min_age_days, protected, now_ts)
                 + (f", +{len(paths) - 1} hardlink sibling(s)" if len(paths) > 1 else "") + ")")
             record(item, "dry-run", f"would evict -> {obj} ({size} bytes)", size)
             continue
-        outcome, detail = evict_unlink(paths, item["stat_key"], log)
+        outcome, detail = evict_unlink(paths, item["stat_key"], item.get("verified_hashes"), log)
         if outcome == "skipped":
             log(f"SKIPPED (state changed since verification: {detail}): {primary}")
             record(item, "skipped", f"state changed since verification: {detail}")

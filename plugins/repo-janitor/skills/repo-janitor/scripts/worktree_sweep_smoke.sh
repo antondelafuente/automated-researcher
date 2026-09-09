@@ -64,9 +64,11 @@
 #     accounting splits verified-on-store from tier-1 bytes; and every incomplete/unsafe invocation is
 #     rejected up front. The store is stood in for through the REPO_JANITOR_STORE_LIST_CMD seam (rclone is
 #     not reachable on a CI runner, and the contract under test is what the sweep does with the LISTING)
-#   - evict_unlink's identity binding (#859 round 1), driven directly as a unit: the verified inode is the
-#     one removed, a stat-key or link-count disagreement aborts and RESTORES every staged link under its
-#     original name, and no `.repo-janitor-evicting.*` staging entry is ever left behind
+#   - evict_unlink's identity-AND-byte binding (#859 rounds 1 and 2), driven directly as a unit: the
+#     verified inode is the one removed and its BYTES are re-digested immediately before the unlink, so a
+#     file rewritten in place with its size and mtime_ns preserved — the case a stat tuple cannot see — is
+#     refused; a stat-key, link-count or digest disagreement (and a missing digest at all) aborts and
+#     RESTORES every staged link under its original name, leaving no `.repo-janitor-evicting.*` entry behind
 # -e (merge-gate code-review Finding 5): fixture setup must fail FAST and LOUD, not silently — a swallowed
 # `git init`/`commit`/`clone` failure would let a later negative assertion ("X is not tier1") pass
 # vacuously because X was never actually created. Safe here because every INTENTIONALLY-nonzero
@@ -1323,14 +1325,15 @@ assert d['reclaimed']['tier1_bytes'] == 0, d['reclaimed']
 " < "$TMP/evict-reaped.json" && ok "evict: the 'reaped' records name each eviction, its store object and its reclaimed bytes" || no "evict: eviction reap records are wrong"
 sweep_evict --reap-tier1 2>/dev/null | grep -q "verified-on-store, .* tier-1" && no "evict: nothing is left to evict on a second pass, so no reclaimed line is expected" || ok "evict: a second pass finds nothing left to evict"
 
-# evict_unlink's identity binding, driven directly (Codex review #859 round 1). The race it closes cannot
-# be scheduled from a shell — but its whole mechanism is "the inode I verified is the inode I remove", and
-# that IS assertable: hand it a stat key or a link count that no longer describes the file and it must
-# abort and put every staged link back exactly where it was. Driven as a unit because a sweep can only
-# reach this through a real classification, which by construction never disagrees with itself.
+# evict_unlink's identity-AND-BYTE binding, driven directly (Codex review #859 rounds 1 and 2). Neither
+# race can be scheduled from a shell — but the mechanism is "the inode I verified is the inode I remove,
+# and the bytes I verified are the bytes I remove", and that IS assertable: hand it a stat key, a link
+# count, or a digest that no longer describes the file and it must abort and put every staged link back
+# exactly where it was. Driven as a unit because a sweep can only reach this through a real classification,
+# which by construction never disagrees with itself.
 UNLINK_DIR="$TMP/unlink-unit"; mkdir -p "$UNLINK_DIR"
-python3 - "$SWEEP" "$UNLINK_DIR" <<'PY' && ok "evict: evict_unlink removes only the verified inode, and restores every staged link when it cannot" || no "evict: evict_unlink identity binding/restore is wrong"
-import importlib.util, os, sys
+python3 - "$SWEEP" "$UNLINK_DIR" <<'PY' && ok "evict: evict_unlink removes only the verified inode holding the verified bytes, and restores every staged link when it cannot" || no "evict: evict_unlink identity/byte binding or restore is wrong"
+import hashlib, importlib.util, os, sys
 
 spec = importlib.util.spec_from_file_location("ws", sys.argv[1])
 ws = importlib.util.module_from_spec(spec)
@@ -1339,7 +1342,7 @@ root = sys.argv[2]
 logged = []
 
 def mkgroup(name, links=1):
-    """A file plus `links - 1` hardlinks to it; returns (paths, stat_key)."""
+    """A file plus `links - 1` hardlinks to it; returns (paths, stat_key, verified_hashes)."""
     paths = []
     for i in range(links):
         p = os.path.join(root, f"{name}.{i}")
@@ -1350,41 +1353,73 @@ def mkgroup(name, links=1):
             os.link(paths[0], p)
         paths.append(p)
     st = os.lstat(paths[0])
-    return paths, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    with open(paths[0], "rb") as fh:
+        digest = hashlib.md5(fh.read()).hexdigest()
+    return paths, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns), {"md5": digest}
 
 def staging_entries():
     return [n for n in os.listdir(root) if n.startswith(ws.EVICT_STAGE_PREFIX)]
 
 # 1. the happy path: every link to the verified inode goes
-paths, key = mkgroup("happy", links=2)
-assert ws.evict_unlink(paths, key, logged.append) == ("evicted", None)
+paths, key, hashes = mkgroup("happy", links=2)
+assert ws.evict_unlink(paths, key, hashes, logged.append) == ("evicted", None)
 assert not any(os.path.lexists(p) for p in paths), paths
 assert staging_entries() == [], staging_entries()
 
 # 2. a stat key that does not describe the file: nothing is deleted, and every link is back under its
 #    ORIGINAL name — a staged rename this sweep does not finish must never be visible afterwards.
-paths, key = mkgroup("wrongkey", links=2)
-outcome, detail = ws.evict_unlink(paths, (key[0], key[1], key[2], key[3] + 1), logged.append)
+paths, key, hashes = mkgroup("wrongkey", links=2)
+outcome, detail = ws.evict_unlink(paths, (key[0], key[1], key[2], key[3] + 1), hashes, logged.append)
 assert outcome == "skipped" and "not the inode whose bytes were verified" in detail, (outcome, detail)
 assert all(os.path.lexists(p) for p in paths), paths
 assert staging_entries() == [], staging_entries()
 
 # 3. a link added to the inode after the plan was made: the unlink would no longer free the bytes, so the
 #    group is skipped whole and restored.
-paths, key = mkgroup("extralink", links=2)
+paths, key, hashes = mkgroup("extralink", links=2)
 os.link(paths[0], os.path.join(root, "extralink.sneaked"))
-outcome, detail = ws.evict_unlink(paths, key, logged.append)
+outcome, detail = ws.evict_unlink(paths, key, hashes, logged.append)
 assert outcome == "skipped" and "link(s), not the 2" in detail, (outcome, detail)
 assert all(os.path.lexists(p) for p in paths), paths
 assert staging_entries() == [], staging_entries()
 
 # 4. a path that is not a regular file any more is never unlinked
 p = os.path.join(root, "gone-dir")
-_, key = mkgroup("gone", links=1)
+_, key, hashes = mkgroup("gone", links=1)
 os.mkdir(p)
-outcome, detail = ws.evict_unlink([p], key, logged.append)
+outcome, detail = ws.evict_unlink([p], key, hashes, logged.append)
 assert outcome == "skipped", (outcome, detail)
 assert os.path.isdir(p), p
+assert staging_entries() == [], staging_entries()
+
+# 5. THE ROUND-2 P0 (#859): the stat tuple STILL AGREES and the bytes do not. Rewritten in place, same
+#    length, same inode, mtime restored to the nanosecond — exactly what a writer holding an open fd
+#    leaves behind, and exactly what `(dev, ino, size, mtime_ns)` cannot see. The bytes about to be
+#    deleted are no longer the bytes the store matched, so nothing may be deleted.
+paths, key, hashes = mkgroup("rewritten", links=2)
+with open(paths[0], "r+b") as fh:
+    fh.write(b"\xff" * 4096)
+os.utime(paths[0], ns=(key[3], key[3]))
+assert os.lstat(paths[0]).st_mtime_ns == key[3]                 # the metadata proxy still says "unchanged"
+outcome, detail = ws.evict_unlink(paths, key, hashes, logged.append)
+assert outcome == "skipped" and "no longer holds the bytes" in detail, (outcome, detail)
+assert all(os.path.lexists(p) for p in paths), paths           # every link back under its original name
+assert staging_entries() == [], staging_entries()
+
+# 6. fail-closed with nothing to re-check against: no digest was carried into the delete, so the function
+#    cannot establish the one thing it exists to establish and must refuse rather than fall back to stat.
+paths, key, _hashes = mkgroup("nohash", links=1)
+for empty in (None, {}):
+    outcome, detail = ws.evict_unlink(paths, key, empty, logged.append)
+    assert outcome == "skipped" and "no recomputed checksum" in detail, (empty, outcome, detail)
+    assert os.path.lexists(paths[0]), paths
+assert staging_entries() == [], staging_entries()
+
+# 7. the digest itself disagreeing (the store-side value, not a local rewrite) is the same refusal
+paths, key, _hashes = mkgroup("baddigest", links=1)
+outcome, detail = ws.evict_unlink(paths, key, {"md5": "0" * 32}, logged.append)
+assert outcome == "skipped" and "md5 disagrees now" in detail, (outcome, detail)
+assert os.path.lexists(paths[0]), paths
 assert staging_entries() == [], staging_entries()
 PY
 

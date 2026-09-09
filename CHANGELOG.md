@@ -24,10 +24,17 @@
   every `.git` dir are pruned from the walk (git-tree-keyed, not name-keyed); symlinks are never
   candidates; **hardlinks resolve per inode** (unlinking one of N links frees nothing, so an inode goes
   only when every link was found *and* verified, and its bytes count once). **The inode that was verified
-  is the inode that is removed:** checking a path and then unlinking that path is two lookups of a NAME, so
-  every link is first `rename`d — inside its own directory, through an `O_NOFOLLOW` dirfd — to a private
-  `.repo-janitor-evicting.*` name, which is what makes the identity and link-count checks *hold* rather
-  than merely having held; any disagreement aborts and restores every staged link. The store listing goes through
+  is the inode that is removed — and it still holds the verified bytes:** checking a path and then unlinking
+  that path is two lookups of a NAME, so every link is first `rename`d — inside its own directory, through
+  an `O_NOFOLLOW` dirfd — to a private `.repo-janitor-evicting.*` name, which is what makes the identity and
+  link-count checks *hold* rather than merely having held; and because `(dev, ino, size, mtime_ns)` is a
+  *proxy* for the content, not the content (mmap timestamp updates are only guaranteed by writeback, a
+  coarse-granularity filesystem hides a write inside its own granule, and a descriptor a writer already
+  holds never goes through the bound name), the **last** step before the unlink re-reads the staged inode
+  through an `O_RDONLY|O_NOFOLLOW` descriptor and re-digests it against the checksum that matched the store —
+  a second full read of exactly the files a reap is about to delete, which is the only thing that
+  establishes what this leg claims. The stat checks survive as the cheap gate that skips a stale group
+  without paying for that read. Any disagreement aborts and restores every staged link. The store listing goes through
   a new `REPO_JANITOR_STORE_LIST_CMD` seam defaulting to `rclone lsjson --recursive --files-only --hash`,
   listed once per prefix per sweep, failures included. The sweep also gained byte accounting: a
   `## Reclaimed` line / `reclaimed` JSON key reading "reclaimed X GB verified-on-store, Y GB tier-1", split

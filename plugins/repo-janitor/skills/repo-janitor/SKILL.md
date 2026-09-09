@@ -327,21 +327,39 @@ report** (tier 3), never a guess.
 - **Deletion is still `--reap-tier1`-gated, like everything else here.** A verified file classifies as
   **tier 1** with a `kind` of `evict`; a bare sweep reports it (and the total it would reclaim) and deletes
   nothing. Every fact is re-verified immediately before the unlink — the owner's liveness fresh per item,
-  and the file's `(device, inode, size, mtime)` identity being the exact one whose bytes were verified.
-  That tuple *is* the re-verification of the store match: if the bytes changed under us the identity
-  changes with them, so the earlier comparison still speaks for the file on disk, and the sweep doesn't
-  re-read multi-GB files a second time to learn what a `stat` already says.
-- **The inode that was verified is the inode that is removed.** Checking a *path* and then unlinking that
-  path is two lookups of a name, and a name is not an inode: a concurrent rename in between would have the
-  janitor delete a file it never verified, and a link added after the count was read would make the
-  accounting claim bytes it no longer frees. So before anything is checked, every link in the group is
-  `rename`d — inside its own directory, through a directory fd opened `O_NOFOLLOW` — to a private
-  `.repo-janitor-evicting.*` name this process just generated. Nothing else can reach the inode by path
-  after that, so the identity and link-count checks *hold* rather than merely having held, and only then
-  does the unlink run. Any disagreement aborts and renames every staged link back (refusing to overwrite a
-  name something re-created meanwhile); a restore that can't complete is logged loudly with the staged
-  path, and a crash-orphaned staging entry is both recognizable by hand and unevictable by a later sweep,
-  since no store object shares that name.
+  the file's `(device, inode, size, mtime)` identity, and **its bytes**, re-read and re-digested against
+  the checksum that matched the store.
+- **The inode that was verified is the inode that is removed — and it still holds the verified bytes.**
+  Two distinct substitutions have to be refused here, and the delete refuses both:
+  - *A name is not an inode.* Checking a *path* and then unlinking that path is two lookups of a name: a
+    concurrent rename in between would have the janitor delete a file it never verified, and a link added
+    after the count was read would make the accounting claim bytes it no longer frees. So before anything
+    is checked, every link in the group is `rename`d — inside its own directory, through a directory fd
+    opened `O_NOFOLLOW` — to a private `.repo-janitor-evicting.*` name this process just generated.
+    Nothing else can reach the inode by path after that, so the identity and link-count checks *hold*
+    rather than merely having held.
+  - *A stat tuple is not the bytes.* `(device, inode, size, mtime)` is a **proxy** for the content, and
+    letting it stand for the content at the delete is the same substitution the verdict already rejects
+    when it refuses name+size: `mtime` is not a content hash (an mmap writer's timestamp update is only
+    guaranteed by writeback/`msync`, a coarse-granularity filesystem hides a write inside its own granule,
+    and a writer holding a descriptor never goes through the name the staging step bound). So the *last*
+    thing before the unlink is a re-read of the staged inode through an `O_RDONLY|O_NOFOLLOW` descriptor,
+    every digest compared against the one that matched the store, with an `fstat` on that same descriptor
+    confirming the bytes came from the verified inode and the identity/link-count checks re-run afterwards
+    (so a write or a new link that landed *during* the read is caught too). The stat checks survive as the
+    cheap gate that skips a stale group without paying for the read; nothing deletes on their strength
+    alone. This is a **second full read of each file a reap is about to delete** — deliberately paid, since
+    it is the only thing that establishes what the leg claims, and it is never paid on the tier-3 majority.
+  - **The boundary this leaves**, stated rather than papered over: POSIX has no atomic
+    "unlink-if-contents-still-equal", so a writer holding an open descriptor could in principle write into
+    the inode in the microsecond window between that last read and the `unlink`. What covers the realistic
+    writer is the live-owner veto, not the window; the digest closes everything a stat tuple silently
+    waved through.
+
+  Any disagreement aborts and renames every staged link back (refusing to overwrite a name something
+  re-created meanwhile); a restore that can't complete is logged loudly with the staged path, and a
+  crash-orphaned staging entry is both recognizable by hand and unevictable by a later sweep, since no
+  store object shares that name.
 - **The mount guard from `--scratch-glob` deliberately does not carry over.** It exists because
   `rmtree` deletes a bind mount's *contents* through the mount before failing on the mount point; this leg
   unlinks one named regular file whose bytes are proven at the store, so there is no tree-walk to escape
@@ -422,8 +440,8 @@ a best-effort `git branch -d` — `--force` is added to the `remove` whenever th
 (not plain mergedness) is what qualified the entry, since that path's byte-identical dirty/untracked residue
 is exactly what a bare `remove` refuses — and stale `--scratch-glob` entries via `rm -rf`, each re-guarded
 and re-aged immediately before the delete (see "Non-git scratch" above), and `--evict-verified` files via a
-single `unlink` each, re-verified against the identity whose bytes the store proved (see "Content-verified
-eviction" above).
+single `unlink` each, re-verified against both the identity *and* the re-read bytes the store proved (see
+"Content-verified eviction" above).
 `--dry-run` (only meaningful with `--reap-tier1`) logs every removal it would perform without touching
 anything.
 
