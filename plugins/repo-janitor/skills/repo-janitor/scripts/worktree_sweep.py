@@ -1329,9 +1329,17 @@ def evict_writable_holder(stat_key, proc_root=EVICT_PROC_ROOT):
     with EPERM. Verified on this repo's own CI runner (`ptrace_scope=1`; the user `systemd`'s `fd/` lists
     and every entry stats EPERM), which is why an uninspectable process is COUNTED here and not treated as a
     veto: failing closed on it would make the leg evict nothing at all on any default-configured Linux box,
-    and a gate that never passes has removed a feature rather than secured one. What covers that blind spot
+    and a gate that never passes has removed a feature rather than secured one (this deviation from the
+    strict form is ratified in the round-limit-summons #2 adjudication on #859). What covers that blind spot
     is the ctime binding in evict_unlink, which observes the write instead of the writer — see there. A
     process under a DIFFERENT uid is invisible for the same reason and is the same accepted residual.
+
+    A SECOND THING IT CANNOT SEE, and why it is not this function's job (#859 round 4): a writer can `mmap`
+    the file `MAP_SHARED` and CLOSE its descriptor, after which there is no descriptor here to find at all.
+    Extending the scan to `/proc/<pid>/maps` or `/proc/<pid>/map_files` does not help — both are
+    Permission-denied for a same-uid sibling under `ptrace_scope=1` exactly as `fd/` is (measured on this
+    repo's CI runner), so there is no positive detection of that writer at this privilege level and none is
+    attempted. It is closed on the WRITE side instead, by evict_unlink's fsync barrier — see there.
 
     `os.getpid()` is skipped: this process's own descriptor on the inode is the `O_RDONLY` one step 4 just
     opened. A pid or a descriptor that vanishes mid-scan was closed and holds nothing.
@@ -1405,11 +1413,13 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
     verified against the store. Returns (outcome, detail): ("evicted", None), ("skipped", reason) when the
     on-disk state no longer matches what was verified, or ("failed", reason) on an OS error.
 
-    THE INVARIANT THIS WHOLE FUNCTION EXISTS FOR: nothing is unlinked unless the bytes being removed are,
-    at the moment of removal, bytes this sweep has positively established are also at the store — and
-    nothing is unlinked while any descriptor that could rewrite those bytes UNOBSERVED is open on the inode.
-    Everything below is that one sentence; the three review rounds on #859 are the three distinct ways a
-    *proxy* for it was substituted for the thing itself.
+    THE INVARIANT THIS WHOLE FUNCTION EXISTS FOR: nothing is unlinked unless the bytes being removed are, at
+    the moment of removal, bytes this sweep has positively established are also at the store — which means
+    that between the ctime anchor and the unlink, EVERY channel that can modify those bytes either leaves
+    evidence a gate checks (the re-read digest, the ctime anchor, the open-descriptor scan) or is FORCED to
+    by the janitor itself (the fsync write-protect barrier); what remains outside is enumerated below,
+    adversarial-only, and adjudicated accepted. Everything in this function is that one sentence; the four
+    review rounds on #859 are four distinct ways a *proxy* for it was substituted for the thing itself.
 
     WHY THIS IS NOT `lstat(p)` THEN `os.unlink(p)` (round 1): those are two lookups of the same NAME, and a
     name is not an inode. A concurrent rename between them makes the janitor delete a file it never
@@ -1419,10 +1429,11 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
     WHY A STAT TUPLE IS NOT THE BYTES (round 2): binding the name still leaves `(dev, ino, size, mtime_ns)`
     standing in for the content, and that is the SAME substitution the round-1 verdict fix rejected one step
     earlier (name+size for a checksum), just moved to the delete. `mtime` is not a content hash: an mmap
-    writer's timestamp update is only guaranteed by writeback/msync, a filesystem with coarse timestamp
-    granularity hides a write inside its own granule, and a writer holding an fd bypasses the name the
-    staging step bound. So the LAST thing that happens before the unlink is a re-read of the inode's actual
-    bytes, compared against the digest that verified against the store:
+    writer's timestamp update fires at the DIRTYING FAULT, so a store into an already-dirty page updates no
+    timestamp at all, a filesystem with coarse timestamp granularity hides a write inside its own granule,
+    and a writer holding an fd bypasses the name the staging step bound. So the LAST thing that happens
+    before the unlink is a re-read of the inode's actual bytes, compared against the digest that verified
+    against the store:
 
       1. Open the containing directory (`O_DIRECTORY|O_NOFOLLOW`) and anchor every later operation to that
          dirfd, so no ancestor component can be re-pointed under us mid-sequence.
@@ -1436,10 +1447,10 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
          GATE, not the proof: one stat per link, skipping a stale group without paying for the read in step
          4. ANCHOR the inode's `st_ctime_ns` here, and scan the kernel's own open-descriptor view
          (evict_writable_holder) for a WRITABLE descriptor on the inode.
-      4. Open the staged inode `O_RDONLY|O_NOFOLLOW` through its dirfd, re-read every byte through THAT
-         descriptor, and require each digest to equal the one that matched the store. `fstat` the same
-         descriptor to confirm the bytes just read came from the verified inode AND that its ctime is still
-         the anchored one.
+      4. Open the staged inode `O_RDONLY|O_NOFOLLOW` through its dirfd, `fsync` it — THE BARRIER, see
+         below — then re-read every byte through THAT descriptor and require each digest to equal the one
+         that matched the store. `fstat` the same descriptor to confirm the bytes just read came from the
+         verified inode AND that its ctime is still the anchored one.
       5. Re-run step 3 — every part, after the read: a write that landed during it (ctime, and size/mtime
          when they weren't forged back), a link added during it (`st_nlink`), and a writable descriptor
          opened during it are all caught, and every staged name is re-tied to the inode just hashed.
@@ -1455,23 +1466,44 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
         inode, which staging makes sufficient rather than suggestive (every public name is already gone, so
         such a writer must predate staging). This is the positive detection, and it is exact when `/proc`
         lets this janitor look.
-      - THE WRITE: the ctime anchor (see ctime_moved) catches the rewrite itself. `utime` restores mtime but
-        moves ctime to *now*, and no unprivileged process can set ctime at all — so the one forgery that
-        defeats the mtime gate is exactly what this observes. It needs no permission over the writer, which
-        matters because Linux's default `ptrace_scope=1` hides a same-uid SIBLING's descriptors from the
-        scan (measured — see evict_writable_holder), and a same-uid sibling is the realistic writer here.
+      - THE WRITE: the ctime anchor (see ctime_moved) catches the rewrite itself. A `write(2)` moves ctime,
+        and `utimensat` restores mtime while moving ctime to *now* — there is no syscall for an
+        unprivileged process to set ctime — so the one forgery that defeats the mtime gate is exactly what
+        this observes. It needs no permission over the writer, which matters because Linux's default
+        `ptrace_scope=1` hides a same-uid SIBLING's descriptors from the scan (measured — see
+        evict_writable_holder), and a same-uid sibling is the realistic writer here.
 
-    Neither is sufficient alone; together they cover writer-visible and writer-invisible alike.
+    WHY CTIME ALONE IS NOT ENOUGH EITHER, and what the fsync in step 4 is for (round 4): the ctime anchor is
+    not universal over write channels. A `MAP_SHARED` writable mapping (whose fd may be closed the moment
+    `mmap` returns, so the scan above has nothing to see, and whose pages `ptrace_scope=1` equally forbids
+    reading through `/proc/<pid>/maps`) updates the timestamp at the DIRTYING FAULT, not at writeback — so a
+    store into a page that is ALREADY dirty moves nothing, and a later `msync` does not move it either. A
+    writer that pre-dirties a page with UNCHANGED bytes before the anchor is therefore free to store new
+    bytes mid-read, invisibly to both gates above. Step 4's `fsync` is what removes that freedom: flushing
+    the inode WRITE-PROTECTS every PTE mapping its pages, so any store after it must re-fault and the fault
+    moves ctime, which the step-4 `fstat` and step-5 re-check then see. A store BEFORE the fsync is already
+    in the page cache, so the re-read digests the writer's bytes and disagrees. Ordering is what makes it
+    sound: anchor (step 3) -> fsync -> read -> ctime re-check. Every byte-modifying channel now lands on one
+    side or the other of that barrier. (Verified on ext4 for both `/tmp` and `$HOME`, with a control run
+    confirming a merely-mapped file with a dirty page still evicts.)
 
-    THE BOUNDARY THIS LEAVES, stated rather than papered over: a writer that opens the (readdir-visible)
-    staged name after step 5 and wins the microseconds before step 6's `unlink` is still unobserved, and a
-    filesystem whose timestamp granularity is coarse enough to hide a write inside the same granule as the
-    staging rename would hide it from the ctime anchor too. Both are adversarial rather than accidental —
-    an accidental writer holds its descriptor from before staging, and its write moves ctime by more than a
-    granule — and both are accepted residual at this repo's stated scale. The other hold is the live-owner
-    veto, which this leg now requires to hold BY CONSTRUCTION rather than by configuration (see
-    evict_live_veto): a candidate with no derivable owner, or a sweep with no liveness seam wired, is never
-    evicted at all.
+    THE BOUNDARY THIS LEAVES, enumerated rather than papered over — adjudicated accepted residual at this
+    repo's stated scale (senior-engineer adjudication on automated-researcher#859, round-limit summons #2):
+      (a) a same-uid writer running the two-phase attack above on a NO-WRITEBACK filesystem (tmpfs), where
+          `fsync` is not a barrier at all because there is nothing to write back and the pages are never
+          re-protected. Measured. It costs this leg nothing real: an eviction target exists to reclaim DISK,
+          and a tmpfs artifact occupies RAM.
+      (b) a writer under a different uid, invisible to this janitor's `/proc` view for the same reason a
+          sibling's descriptors are.
+      (c) a writer that opens the (readdir-visible) staged name after step 5 and wins the microseconds
+          before step 6's `unlink`.
+      (d) a filesystem whose timestamp granularity is coarse enough to hide a write inside the same granule
+          as the staging rename, which would hide it from the ctime anchor too.
+    All four are ADVERSARIAL rather than accidental: an accidental writer's first dirtying write moves ctime
+    even on tmpfs (measured), and any modification before the read breaks the re-read digest instead. The
+    other hold is the live-owner veto, which this leg requires to hold BY CONSTRUCTION rather than by
+    configuration (see evict_live_veto): a candidate with no derivable owner, or a sweep with no liveness
+    seam wired, is never evicted at all.
 
     Any failure in 1-5 puts every staged entry back under its original name, and a restore that cannot
     complete is logged loudly with the staged path — which is why EVICT_STAGE_PREFIX is recognizable rather
@@ -1502,13 +1534,20 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
         """None while `st` carries the ctime this window was anchored to, else the reason it doesn't. The
         FIRST call anchors (every link is the same inode, so they share one value).
 
-        THIS IS WHAT ACTUALLY CLOSES THE ROUND-3 WINDOW, and it observes the WRITE rather than the writer:
-        an in-place rewrite through an already-open descriptor bumps the inode's change time, and unlike
+        THIS IS WHAT CLOSES THE ROUND-3 WINDOW, and it observes the WRITE rather than the writer: an
+        in-place rewrite through an already-open descriptor bumps the inode's change time, and unlike
         `mtime` no unprivileged process can put it back — `utimensat` sets atime/mtime and moves ctime to
         *now* as a side effect; there is no syscall to set ctime at all. Reads do not touch it (a read
         updates atime, which does not itself move ctime), so the sweep's own multi-GB re-read cannot trip
         this. Anchored AFTER staging because the staging `rename` moves ctime itself, and the anchor has to
-        be a value taken inside the window it is protecting."""
+        be a value taken inside the window it is protecting.
+
+        THE CLAIM THIS DELIBERATELY DOES NOT MAKE (round 4): "unprivileged writers cannot avoid ctime" is
+        true of `write(2)` and `utimensat`, and FALSE of a store through a shared mapping into a page that
+        is already dirty — that channel moves no timestamp, because the update fires at the dirtying fault.
+        This gate is only universal over write channels BECAUSE step 4 fsyncs before reading, which
+        write-protects those pages and forces the next store to fault. Read the two together; neither is
+        the whole gate."""
         if not bound:
             bound.append(st.st_ctime_ns)
             return None
@@ -1581,28 +1620,46 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
                 outcome, detail = "skipped", f"'{p0}' could not be opened to re-read its bytes ({e})"
             else:
                 fds.append(filefd)
-                digests = fd_hashes(filefd, algos)
+                # THE BARRIER (round 4), between the ctime anchor and the first byte read. Flushing the
+                # inode's dirty pages WRITE-PROTECTS every PTE that maps them — that is how the kernel
+                # accounts dirtiness — so a later store through a shared mapping must re-fault, and the
+                # fault runs `file_update_time`, which moves ctime. Without it, a mapping whose page was
+                # ALREADY dirty takes new bytes with NO ctime movement at all (the timestamp fires at the
+                # dirtying fault, not at writeback, so `msync` does not move it either), which is the one
+                # channel neither the digest nor the ctime anchor could see. Legal on an O_RDONLY
+                # descriptor, and near-free on a file this janitor never wrote. Fail closed like any other
+                # step-4 failure: without the barrier the window below is not the one documented.
                 try:
-                    fst = os.fstat(filefd)
-                except OSError:
-                    fst = None
-                fd_moved = ctime_moved(fst, p0) if fst is not None else None
-                if digests is None:
-                    outcome, detail = "skipped", (f"'{p0}' could not be re-read, so the bytes about to be "
-                                                  "removed could not be re-verified against the store")
-                elif fst is None or not stat.S_ISREG(fst.st_mode) or (
-                        fst.st_dev, fst.st_ino, fst.st_size, fst.st_mtime_ns) != tuple(stat_key):
-                    outcome, detail = "skipped", (f"'{p0}' is not the inode whose bytes were verified (the "
-                                                  "descriptor they were re-read from disagrees)")
-                # Asked of the READ DESCRIPTOR, not of a name: the bytes just digested came from this fd, so
-                # this is the tightest place to ask whether anything wrote to them during the read.
-                elif fd_moved:
-                    outcome, detail = "skipped", fd_moved
-                else:
-                    stale = [a for a in algos if digests[a] != verified_hashes[a]]
-                    if stale:
-                        outcome, detail = "skipped", (f"'{p0}' no longer holds the bytes that were verified "
-                                                      f"against the store ({'+'.join(stale)} disagrees now)")
+                    os.fsync(filefd)
+                except OSError as e:
+                    outcome, detail = "skipped", (f"'{p0}' could not be flushed to disk before re-reading "
+                                                  f"it ({e}), so a shared memory mapping could rewrite its "
+                                                  "bytes mid-read without moving the inode's change time")
+                if outcome is None:
+                    digests = fd_hashes(filefd, algos)
+                    try:
+                        fst = os.fstat(filefd)
+                    except OSError:
+                        fst = None
+                    fd_moved = ctime_moved(fst, p0) if fst is not None else None
+                    if digests is None:
+                        outcome, detail = "skipped", (f"'{p0}' could not be re-read, so the bytes about to "
+                                                      "be removed could not be re-verified against the "
+                                                      "store")
+                    elif fst is None or not stat.S_ISREG(fst.st_mode) or (
+                            fst.st_dev, fst.st_ino, fst.st_size, fst.st_mtime_ns) != tuple(stat_key):
+                        outcome, detail = "skipped", (f"'{p0}' is not the inode whose bytes were verified "
+                                                      "(the descriptor they were re-read from disagrees)")
+                    # Asked of the READ DESCRIPTOR, not of a name: the bytes just digested came from this
+                    # fd, so this is the tightest place to ask whether anything wrote to them mid-read.
+                    elif fd_moved:
+                        outcome, detail = "skipped", fd_moved
+                    else:
+                        stale = [a for a in algos if digests[a] != verified_hashes[a]]
+                        if stale:
+                            outcome, detail = "skipped", (
+                                f"'{p0}' no longer holds the bytes that were verified against the store "
+                                f"({'+'.join(stale)} disagrees now)")
         if outcome is None:
             reason = staged_state()          # step 5: both halves re-asserted AFTER the read
             if reason:
@@ -1611,8 +1668,9 @@ def evict_unlink(paths, stat_key, verified_hashes, log):
             # Never a silent cap: the descriptor scan's coverage is stated whenever it was incomplete, so a
             # report never reads as "no writer was open on this" when it means "none that I could see".
             log(f"EVICT NOTE: {blind[0]} same-uid process(es) would not let this sweep inspect their open "
-                f"descriptors while evicting '{paths[0]}' (ptrace_scope); a write by one of them is caught "
-                "by the inode's change time, which is what the delete actually rests on here")
+                f"descriptors while evicting '{paths[0]}' (ptrace_scope); a descriptor write by one of them "
+                "is caught by the inode's change time, and a shared-mmap write is forced onto that change "
+                "time by the fsync barrier, which together are what the delete rests on here")
         if outcome is None:
             done = 0
             for dirfd, _name, tmp, p in staged:

@@ -1382,7 +1382,7 @@ sweep_evict --reap-tier1 2>/dev/null | grep -q "verified-on-store, .* tier-1" &&
 # reach this through a real classification, which by construction never disagrees with itself.
 UNLINK_DIR="$TMP/unlink-unit"; mkdir -p "$UNLINK_DIR"
 python3 - "$SWEEP" "$UNLINK_DIR" <<'PY' && ok "evict: evict_unlink removes only the verified inode holding the verified bytes, and restores every staged link when it cannot" || no "evict: evict_unlink identity/byte binding or restore is wrong"
-import hashlib, importlib.util, os, subprocess, sys
+import hashlib, importlib.util, mmap, os, subprocess, sys
 
 spec = importlib.util.spec_from_file_location("ws", sys.argv[1])
 ws = importlib.util.module_from_spec(spec)
@@ -1529,6 +1529,65 @@ assert outcome == "skipped" and "inode change time moved" in detail, (outcome, d
 assert os.path.lexists(paths[0]), paths
 with open(paths[0], "rb") as fh:
     assert fh.read(1) == b"\xff", "the writer's unverified bytes must be what survived"
+assert staging_entries() == [], staging_entries()
+
+# 11. THE ROUND-4 P0 (#859): the channel that defeats BOTH gates of round 3 unless the barrier is there.
+#     A MAP_SHARED writable mapping needs no open descriptor once `mmap` has returned, so the /proc scan
+#     has nothing to find; and a store into a page that is ALREADY dirty updates no timestamp at all,
+#     because the update fires at the dirtying FAULT, not at writeback (msync does not move it either).
+#     So a writer that pre-dirties the page with UNCHANGED bytes before the anchor is then free to store
+#     new bytes mid-read, invisibly. What closes it is step 4's `fsync`: flushing write-protects every PTE
+#     mapping the file, so the store below must re-fault and the fault moves ctime. Against the pre-fix
+#     commit this case EVICTS — that is the regression property being pinned here.
+def dirty_mapping(name):
+    """A file with a live MAP_SHARED writable mapping whose first page is ALREADY DIRTY, plus the plan
+    (key, hashes) taken AFTER that pre-dirty — the state the round-4 writer sets up before the anchor. The
+    pre-dirtying store is the FIRST fault, so it moves mtime/ctime itself; the plan is therefore taken
+    afterwards, exactly as a real sweep's classification would see the file."""
+    paths, _key, _hashes = mkgroup(name, links=1)
+    fd = os.open(paths[0], os.O_RDWR)
+    mm = mmap.mmap(fd, 0, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+    os.close(fd)                     # the writer keeps NO descriptor: nothing for the /proc scan to find
+    mm[0:1] = mm[0:1]                # pre-dirty with UNCHANGED bytes — after this, stores move no timestamp
+    st = os.lstat(paths[0])
+    with open(paths[0], "rb") as fh:
+        digest = hashlib.md5(fh.read()).hexdigest()
+    return paths, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns), {"md5": digest}, mm
+
+paths, key, hashes, mm = dirty_mapping("mmapraced")
+real_fd_hashes = ws.fd_hashes
+def mmap_racing_fd_hashes(fd, algos):
+    digests = real_fd_hashes(fd, algos)      # the digest sees the ORIGINAL bytes ...
+    mm[0:4096] = b"\xfe" * 4096              # ... and only then are they stored through the mapping
+    return digests
+ws.fd_hashes = mmap_racing_fd_hashes
+try:
+    outcome, detail = ws.evict_unlink(paths, key, hashes, logged.append)
+finally:
+    ws.fd_hashes = real_fd_hashes
+# The re-fault the barrier forces runs `file_update_time`, which moves mtime and ctime TOGETHER, so either
+# gate may be the one that reports — both are the same refusal, and both are unreachable without the fsync
+# (with no barrier the page is still dirty, the store updates no timestamp at all, and the group evicts on
+# a stale digest). Pin the refusal and the surviving bytes, not which gate spoke first.
+assert outcome == "skipped", (outcome, detail)
+assert ("inode change time moved" in detail or "not the inode whose bytes were verified" in detail), detail
+assert os.path.lexists(paths[0]), paths                         # restored under its ORIGINAL name
+assert staging_entries() == [], staging_entries()
+mm.seek(0)
+assert mm.read(1) == b"\xfe", "the writer's unverified bytes must be what survived"
+mm.close()
+
+# 12. ... and the barrier must not manufacture a SKIP out of a file that merely happens to be mapped. Same
+#     pre-dirtied writable mapping, NO attack write: the fsync must not itself move any timestamp, so the
+#     file still evicts. Without this, "fail closed" would quietly become "never evict a mapped file",
+#     which is the same feature-removing failure the /proc scan's strict form had.
+paths, key, hashes, mm = dirty_mapping("mmapclean")
+try:
+    outcome, detail = ws.evict_unlink(paths, key, hashes, logged.append)
+finally:
+    mm.close()
+assert (outcome, detail) == ("evicted", None), (outcome, detail)
+assert not os.path.lexists(paths[0]), paths
 assert staging_entries() == [], staging_entries()
 PY
 

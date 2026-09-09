@@ -35,8 +35,9 @@
   that path is two lookups of a NAME, so every link is first `rename`d — inside its own directory, through
   an `O_NOFOLLOW` dirfd — to a private `.repo-janitor-evicting.*` name, which is what makes the identity and
   link-count checks *hold* rather than merely having held; and because `(dev, ino, size, mtime_ns)` is a
-  *proxy* for the content, not the content (mmap timestamp updates are only guaranteed by writeback, a
-  coarse-granularity filesystem hides a write inside its own granule, and a descriptor a writer already
+  *proxy* for the content, not the content (an mmap timestamp update fires at the *dirtying fault*, so a
+  store into an already-dirty page updates nothing, a coarse-granularity filesystem hides a write inside its
+  own granule, and a descriptor a writer already
   holds never goes through the bound name), the **last** step before the unlink re-reads the staged inode
   through an `O_RDONLY|O_NOFOLLOW` descriptor and re-digests it against the checksum that matched the store —
   a second full read of exactly the files a reap is about to delete, which is the only thing that
@@ -49,14 +50,34 @@
   (`/proc`) is scanned before and after the read and a WRITABLE descriptor on the inode is a refusal
   (staging is what makes that exact — every public name is already gone, so such a writer must predate it);
   and the inode's **change time** is anchored right after staging and re-checked against the read
-  descriptor and again afterwards, because `utime` restores `mtime` but moves `ctime` to *now* and no
-  unprivileged process can set `ctime` at all. The second is what covers the first's measured limit —
+  descriptor and again afterwards, because a `write(2)` moves `ctime` and `utimensat` restores `mtime`
+  while moving `ctime` to *now* (there is no syscall to set `ctime` at all). The second is what covers the
+  first's measured limit —
   resolving another process's descriptors needs ptrace-read permission, and Linux's default
   `kernel.yama.ptrace_scope = 1` grants it only over the scanner's own descendants, so a same-uid *sibling*
   (exactly the agent session whose adapter tars this leg exists for) lists as a pid and then refuses every
   descriptor. Those processes are counted and reported rather than treated as a veto: failing closed on
   them would make the leg evict nothing at all on a stock Linux box, which removes the feature instead of
-  securing it. Any disagreement aborts and restores every staged link. The store listing goes through
+  securing it. **And a `ctime` anchor is not universal over write channels:** a `MAP_SHARED` writable
+  mapping needs no open descriptor once `mmap` has returned — so the scan has nothing to find, and
+  `/proc/<pid>/maps` is Permission-denied for a sibling exactly as `fd/` is — and a store into an
+  **already-dirty** page moves no timestamp at all, because the update fires at the dirtying fault rather
+  than at writeback (`msync` does not move it either), so a writer that pre-dirties a page with *unchanged*
+  bytes before the anchor could rewrite it mid-read invisibly to both sides above. The re-read descriptor
+  is therefore **`fsync`ed before the first byte is hashed**: flushing write-protects every page-table
+  entry mapping the inode's pages, so any later store must re-fault and the fault updates its timestamps,
+  which the post-read checks see; a store *before* the barrier is already in the page cache, so the re-read
+  digests the writer's bytes and disagrees instead. Anchor → `fsync` → read → re-check is the whole
+  argument, and it puts every byte-modifying channel on one side or the other of the barrier. **The
+  residual, enumerated and adjudicated accepted** (senior-engineer adjudication on #859, round-limit
+  summons #2): that two-phase attack on a **no-writeback filesystem (tmpfs)**, where `fsync` re-protects
+  nothing — measured, and it costs this leg nothing real, since an eviction target exists to reclaim *disk*
+  while a tmpfs artifact occupies RAM; a writer under a **different uid**; one that opens the
+  readdir-visible staged name and wins the scan-to-unlink microseconds; and a timestamp granularity coarse
+  enough to hide a write inside the staging rename's own granule. All four are **adversarial rather than
+  accidental** — an accidental writer's first dirtying write moves `ctime` even on tmpfs, and any
+  modification before the read breaks the re-read digest.
+  Any disagreement aborts and restores every staged link. The store listing goes through
   a new `REPO_JANITOR_STORE_LIST_CMD` seam defaulting to `rclone lsjson --recursive --files-only --hash`,
   listed once per prefix per sweep, failures included. The sweep also gained byte accounting: a
   `## Reclaimed` line / `reclaimed` JSON key reading "reclaimed X GB verified-on-store, Y GB tier-1", split

@@ -343,8 +343,8 @@ report** (tier 3), never a guess.
   the file's `(device, inode, size, mtime)` identity, and **its bytes**, re-read and re-digested against
   the checksum that matched the store.
 - **The inode that was verified is the inode that is removed — it still holds the verified bytes, and
-  nothing could have rewritten them unobserved.** Three distinct substitutions have to be refused here,
-  and the delete refuses all three:
+  nothing could have rewritten them unobserved.** Four distinct substitutions have to be refused here,
+  and the delete refuses all four:
   - *A name is not an inode.* Checking a *path* and then unlinking that path is two lookups of a name: a
     concurrent rename in between would have the janitor delete a file it never verified, and a link added
     after the count was read would make the accounting claim bytes it no longer frees. So before anything
@@ -354,9 +354,10 @@ report** (tier 3), never a guess.
     rather than merely having held.
   - *A stat tuple is not the bytes.* `(device, inode, size, mtime)` is a **proxy** for the content, and
     letting it stand for the content at the delete is the same substitution the verdict already rejects
-    when it refuses name+size: `mtime` is not a content hash (an mmap writer's timestamp update is only
-    guaranteed by writeback/`msync`, a coarse-granularity filesystem hides a write inside its own granule,
-    and a writer holding a descriptor never goes through the name the staging step bound). So the *last*
+    when it refuses name+size: `mtime` is not a content hash (an mmap writer's timestamp update fires at
+    the *dirtying fault*, so a store into an already-dirty page updates no timestamp at all, a
+    coarse-granularity filesystem hides a write inside its own granule, and a writer holding a descriptor
+    never goes through the name the staging step bound). So the *last*
     thing before the unlink is a re-read of the staged inode through an `O_RDONLY|O_NOFOLLOW` descriptor,
     every digest compared against the one that matched the store, with an `fstat` on that same descriptor
     confirming the bytes came from the verified inode and the identity/link-count checks re-run afterwards
@@ -380,17 +381,36 @@ report** (tier 3), never a guess.
       reported, never treated as a veto: failing closed on them would make the leg evict nothing at all on
       a stock Linux box, which removes the feature rather than securing it.
     - **the write** — the inode's **change time** is anchored right after staging and re-checked against
-      the read descriptor and again after the read. `utime` restores `mtime` but moves `ctime` to *now*,
-      and no unprivileged process can set `ctime` at all, so the one forgery that defeats the `mtime` gate
-      is precisely what this observes — and it needs no permission over the writer, which is what covers
-      the scan's blind spot. Reads move `atime`, never `ctime`, so the sweep's own re-read cannot trip it.
-  - **The boundary this leaves**, stated rather than papered over: a writer that opens the (readdir-visible)
-    staged name after the last check and wins the microseconds before the `unlink`, and a filesystem whose
-    timestamp granularity is coarse enough to hide a write inside the same granule as the staging rename.
-    Both are adversarial rather than accidental — an accidental writer holds its descriptor from before
-    staging and its write moves `ctime` by more than a granule — and both are accepted residual at this
-    repo's stated scale. The other hold is the live-owner veto, which is why this leg now requires that
-    veto to be present by construction (see the two bullets above) rather than leaning on a configuration.
+      the read descriptor and again after the read. A `write(2)` moves `ctime`, and `utimensat` restores
+      `mtime` while moving `ctime` to *now* (there is no syscall to set `ctime` at all), so the one forgery
+      that defeats the `mtime` gate is precisely what this observes — and it needs no permission over the
+      writer, which is what covers the scan's blind spot. Reads move `atime`, never `ctime`, so the
+      sweep's own re-read cannot trip it.
+  - *A `ctime` anchor is not universal over write channels either* — and this is what the `fsync` is for.
+    A `MAP_SHARED` writable mapping needs **no open descriptor** once `mmap` has returned (so the scan has
+    nothing to find, and `/proc/<pid>/maps` is Permission-denied for a sibling exactly as `fd/` is), and a
+    store into a page that is **already dirty** moves no timestamp, because the update fires at the
+    dirtying fault rather than at writeback — `msync` does not move it afterwards either. A writer that
+    pre-dirties a page with *unchanged* bytes before the anchor is therefore free to store new bytes
+    mid-read, invisibly to both sides above. So the re-read descriptor is **`fsync`ed before the first
+    byte is hashed**: flushing the inode write-protects every page-table entry mapping its pages, so any
+    later store must re-fault, and the fault updates the inode's timestamps — which the post-read checks
+    then see. A store *before* the barrier is already in the page cache, so the re-read digests the
+    writer's bytes and disagrees instead. The ordering is the whole argument: anchor → `fsync` → read →
+    re-check, which puts every byte-modifying channel on one side or the other of the barrier.
+  - **The boundary this leaves**, enumerated rather than papered over — all four **adjudicated accepted
+    residual** at this repo's stated scale (senior-engineer adjudication on automated-researcher#859,
+    round-limit summons #2): (a) a same-uid writer running that two-phase attack on a **no-writeback
+    filesystem (tmpfs)**, where `fsync` is not a barrier because there is nothing to write back and the
+    pages are never re-protected — measured, and it costs this leg nothing real, since an eviction target
+    exists to reclaim *disk* and a tmpfs artifact occupies RAM; (b) a writer under a **different uid**,
+    invisible to this janitor's `/proc` view; (c) a writer that opens the (readdir-visible) staged name
+    after the last check and wins the microseconds before the `unlink`; (d) a filesystem whose timestamp
+    granularity is coarse enough to hide a write inside the same granule as the staging rename. All four
+    are **adversarial rather than accidental**: an accidental writer's first dirtying write moves `ctime`
+    even on tmpfs, and any modification before the read breaks the re-read digest instead. The other hold
+    is the live-owner veto, which is why this leg requires that veto to be present by construction (see
+    the two bullets above) rather than leaning on a configuration.
 
   Any disagreement aborts and renames every staged link back (refusing to overwrite a name something
   re-created meanwhile); a restore that can't complete is logged loudly with the staged path, and a
@@ -623,8 +643,11 @@ that left the live-owner veto inert — an eviction root not covered by `--workt
 the worktree tiers' unset-seam behaviour is unchanged; `evict_unlink` is driven
 directly as a unit — it removes only the verified inode, a process holding an `O_RDWR` descriptor across
 the call blocks the delete while an `O_RDONLY` holder does not, a write made *mid-read* through an
-already-open descriptor with `mtime` forged back is caught by the inode's change time, and a stat-key or
-link-count disagreement aborts
+already-open descriptor with `mtime` forged back is caught by the inode's change time, a store made
+*mid-read* through a descriptor-less `MAP_SHARED` mapping whose page was pre-dirtied with unchanged bytes
+is caught only because the `fsync` barrier re-protected that page (the same case evicts with the barrier
+removed, which is the regression property) while an identically-mapped file with no attack write still
+evicts, and a stat-key or link-count disagreement aborts
 and restores every staged link, leaving no `.repo-janitor-evicting.*` entry behind; a file below `--min-size`,
 a symlink, and everything under `registry/` of a git tree are never even classified, while a plain
 `registry/` directory outside any checkout still evicts (the veto is git-tree-keyed, not name-keyed); a
