@@ -46,10 +46,10 @@ explicit follow-up work, not part of this capability (see automated-researcher#3
 agentic-engineering#43).
 
 - **Flow:** researcher (or an engineer bot) labels an Issue `ready` → `implement-on-ready.yml` runs the
-  pinned Claude Code CLI (execution-tier `claude-sonnet-5`) against the issue, working on `agent/issue-<n>`,
+  Claude Code CLI (execution-tier alias `opus`) against the issue, working on `agent/issue-<n>`,
   and opens a PR with `Closes #<n>` → `review-on-pr.yml` runs `openai/codex-action` against the diff and
   submits a native APPROVE/REQUEST_CHANGES review as the codex engineer bot → on `changes_requested`, an
-  allowlisted mention comment on the PR fires `address-review.yml`, which re-dispatches the pinned CLI onto
+  allowlisted mention comment on the PR fires `address-review.yml`, which re-dispatches the Claude Code CLI onto
   the SAME PR branch to address the findings and pushes, which fires `synchronize` and re-runs
   `review-on-pr.yml` automatically → existing branch protection (required opposite-family approval) + the
   implement workflow's auto-merge step close the loop once a round comes back clean. `checks.yml` runs
@@ -175,7 +175,7 @@ agentic-engineering#43).
   `workflow_dispatch` — except while it carries `implementation-blocked`, where both paths are deliberately
   inert until one of the material transitions above happens (see the blocked-state bullet). Post-review
   fixes ride `address-review.yml`'s mention flow instead: an allowlisted
-  `@claude-code-engineer` comment on the PR re-dispatches the pinned CLI onto the same PR branch
+  `@claude-code-engineer` comment on the PR re-dispatches the Claude Code CLI onto the same PR branch
   (`.github/prompts/address-review.md`), gated to the researcher + the two engineer bots, same as
   implement-on-ready's allowlist. It never invokes the review itself — pushing a fix fires `synchronize`,
   which `review-on-pr.yml`'s own `cancel-in-progress` already handles.
@@ -193,7 +193,7 @@ agentic-engineering#43).
   "Shepherd"):** `senior-engineer.yml` is summoned by the `needs-senior-engineer` label landing on a PR — by
   the reconciler's round-budget trip, by an implementor asking for help, or by a human — plus
   `workflow_dispatch` (PR number) as the manual lever, same actor allowlist as the other actuators. It runs a
-  Fable-family agent (`claude-fable-5` — judgment-dense per model policy; these events are rare so per-event
+  Fable-family agent (`--model fable` — judgment-dense per model policy; these events are rare so per-event
   premium cost is acceptable) under a dedicated `senior-engineer-agent[bot]` App identity with `Contents: read`,
   `Pull requests: read-write`, `Issues: read-write` — it can comment and label but cannot push code, by
   construction. Its mandate, drawn straight from the 2026-07-11 supervised night's transcripts: (1) verify
@@ -303,6 +303,21 @@ agentic-engineering#43).
   check on `main`; `allow_auto_merge` is enabled repo-wide (what lets `implement-on-ready.yml`'s auto-merge
   step succeed); branch protection requires one approving review, satisfied by the codex engineer bot's
   native `APPROVE` from `review-on-pr.yml` — a human review is never the gate in this flow.
+- **Claude-side model/CLI tracking (automated-researcher#872):** the Claude legs are deliberately NOT
+  pinned the way the Codex reviewer below is — they pass `--model opus` (implementor, address-review) and
+  `--model fable` (senior-engineer, both triage-assess legs), aliases that resolve through the CLI's own
+  model table, because the researcher's standing policy is that pipeline workers always run the newest
+  model of their family. An alias only tracks the newest model if the CLI is current, so all six CLI
+  install sites share **`.github/scripts/install-claude-code.sh`**: install `@latest`, smoke-test a
+  one-turn `claude -p` through the same stream-json launch path that crashed in #384/#385 (a `--version`
+  check could not catch that class), and on failure fall back to a single known-good `FALLBACK_VERSION`
+  constant with a warning annotation naming the rejected version. Bumping that constant is a one-line PR
+  to the script — never a per-workflow edit again. Each leg records the resolved CLI version and the model
+  the API actually resolved its alias to in the job summary, so "which model did this run" stays
+  answerable after the fact. `.github/scripts/install_claude_code_smoke.sh` covers the fallback paths
+  offline (stub `npm`/`claude` on PATH, no network or API key). **LLM-judge pins inside experiments stay
+  exact model IDs** — they are instruments, not workers, and a judge that silently changes generation
+  breaks comparability.
 - **Reviewer pin rationale:** the Codex reviewer in `review-on-pr.yml` is pinned to `model: gpt-5.6-sol`,
   `effort: medium` — a deliberate choice, not a default left untouched. Bump the model or effort only in
   `review-on-pr.yml` itself, as its own conscious change (automated-researcher#394), never as a side effect

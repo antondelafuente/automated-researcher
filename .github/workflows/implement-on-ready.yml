@@ -253,19 +253,22 @@ jobs:
       # automated-researcher#384: claude-code-action auto-installs Claude Code on the runner with no
       # version pin, and that auto-install has landed on versions that crash at SDK launch before any API
       # call (opaque "SDK execution error", runs 29134553863/29134534809) — a known startup-crash class in
-      # upstream claude-code-action issues #947/#892/#804. The exact same invocation is verified to succeed
-      # (exit 0) on Claude Code v2.1.207, so pin to that version explicitly instead of trusting auto-install.
-      # ubuntu-latest ships Node.js/npm preinstalled, so no actions/setup-node step is needed here; if that
-      # ever stops being true, add actions/setup-node (pinned by full commit SHA) directly before this step.
-      # Bumping the pinned version later (once a newer release is verified) is a normal PR editing the
-      # version string below.
-      - name: Install pinned Claude Code
+      # upstream claude-code-action issues #947/#892/#804. #872 replaced the hard `@2.1.207` pin that
+      # answered it (copy-pasted into six workflow steps, and the reason every agent here stayed a model
+      # generation behind) with one shared installer: `@latest`, gated on a smoke test of that exact
+      # crashing launch path, falling back to a single known-good constant when the smoke fails. The
+      # `path` output contract is unchanged. ubuntu-latest ships Node.js/npm preinstalled, so no
+      # actions/setup-node step is needed here; if that ever stops being true, add actions/setup-node
+      # (pinned by full commit SHA) directly before this step.
+      - name: Install Claude Code (latest, known-good fallback)
         id: install_claude
         if: steps.loop_guard.outputs.verdict != 'inert'
-        run: |
-          set -euo pipefail
-          npm install -g @anthropic-ai/claude-code@2.1.207
-          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+        env:
+          # The smoke launches with the SAME alias the run step below uses, so it also proves the alias
+          # resolves on whatever CLI we just installed.
+          AAR_CLAUDE_SMOKE_MODEL: opus
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/install-claude-code.sh
 
       # automated-researcher#387: implement-on-ready died ~0.4s after SDK launch on every run under
       # anthropics/claude-code-action; debug PR #386 proved the raw pinned CLI (this exact invocation)
@@ -311,17 +314,24 @@ jobs:
           # `--permission-mode bypassPermissions` on the invocation below — not enabled preemptively.
           # -c (compact): stream-json input is line-delimited — pretty-printed (jq's default) multi-line
           # output here breaks the CLI's line parser ("Error parsing streaming input line", verified
-          # locally against the pinned 2.1.207 binary).
+          # locally against the Claude Code 2.1.207 binary).
           #
           # #531: read the prompt straight from the file render_prompt wrote — never round-tripped through
           # a step `env:` mapping (see that step), and `--rawfile` reads the file directly, so the prompt
           # never rides on jq's argv either.
           jq -nc --rawfile content "$RUNNER_TEMP/implement_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
-                --model claude-opus-5 \
+                --model opus \
                 --allowedTools Bash,Edit,Write,Read,Grep,Glob \
                 --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["opened","blocked"]},"pr_number":{"type":["integer","null"]},"block_reason":{"type":["string","null"]}}}' \
             | tee /tmp/claude_stream.jsonl
+
+          # #872: `--model` is an alias now (always the newest Opus), so the workflow file no longer answers
+          # "which model implemented this PR". Record what the API actually resolved it to on THIS run, next
+          # to the CLI version the installer already wrote to the same summary. `|| true` because head -n1
+          # closing the pipe early is a pipefail failure, not a missing model.
+          resolved_model=$(jq -r 'select(.type=="assistant") | .message.model // empty' /tmp/claude_stream.jsonl | head -n1 || true)
+          printf -- '- model: `%s` (requested alias `opus`)\n' "${resolved_model:-unknown}" >> "$GITHUB_STEP_SUMMARY"
 
           # design-review finding 1 (#387 doc): don't let a CLI run that exited 0 but produced no result
           # event / no structured_output on it fall through resolve_outputs' `// "blocked"` default, which

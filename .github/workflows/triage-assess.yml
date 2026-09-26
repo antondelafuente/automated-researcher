@@ -308,11 +308,16 @@ jobs:
             blind_untrusted_preamble=$(cat .github/prompts/triage-blind-assess-untrusted.md)
             adjudicate_untrusted_preamble=$(cat .github/prompts/triage-adjudicate-untrusted.md)
             validate_coverage_script=$(cat .github/triage/validate_coverage.sh)
+            # #872: the shared Claude Code installer rides along for exactly the same reason as the
+            # validator above — the model-bearing jobs below need to run it, and on the untrusted-author
+            # path they have no checkout of their own to read it from.
+            install_claude_script=$(cat .github/scripts/install-claude-code.sh)
             jq --arg rubric "$rubric_content" \
                --arg bpre "$blind_untrusted_preamble" \
                --arg apre "$adjudicate_untrusted_preamble" \
                --arg vscript "$validate_coverage_script" \
-               '. + {rubric: $rubric, blind_assess_untrusted_preamble: $bpre, adjudicate_untrusted_preamble: $apre, validate_coverage_script: $vscript}' \
+               --arg iscript "$install_claude_script" \
+               '. + {rubric: $rubric, blind_assess_untrusted_preamble: $bpre, adjudicate_untrusted_preamble: $apre, validate_coverage_script: $vscript, install_claude_code_script: $iscript}' \
                triage-packets.json > /tmp/packets_ext.json
             mv /tmp/packets_ext.json triage-packets.json
 
@@ -477,15 +482,27 @@ jobs:
             echo "<<<END_UNTRUSTED_TICKET_DATA>>>"
           } > "$RUNNER_TEMP/triage_fable_prompt.txt"
 
-      # Same pin rationale as implement-on-ready.yml/checks.yml (automated-researcher#384/#387): the
-      # claude-code-action wrapper's auto-install has a known startup-crash class, so the raw CLI is
-      # installed and invoked directly at this exact verified-good version.
-      - name: Install pinned Claude Code
-        id: install_claude
+      # #872, same artifact-not-checkout route the coverage validator above already takes: this job has no
+      # checkout at all on the untrusted-author path, so the shared installer is written from the packets
+      # artifact `gather` built while IT held the checkout. Grants no git history, same as the validator.
+      - name: Write Claude Code installer script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
         run: |
           set -euo pipefail
-          npm install -g @anthropic-ai/claude-code@2.1.207
-          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+          mkdir -p .github/scripts
+          jq -r '.install_claude_code_script' triage-packets.json > .github/scripts/install-claude-code.sh
+          chmod +x .github/scripts/install-claude-code.sh
+
+      # Same rationale as implement-on-ready.yml/checks.yml (automated-researcher#384/#387/#872): the
+      # claude-code-action wrapper's auto-install has a known startup-crash class, so the raw CLI is
+      # installed and invoked directly — at `@latest` behind a smoke test of that same crashing launch
+      # path, falling back to one shared known-good constant when the smoke fails.
+      - name: Install Claude Code (latest, known-good fallback)
+        id: install_claude
+        env:
+          AAR_CLAUDE_SMOKE_MODEL: fable
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/install-claude-code.sh
 
       - name: Run pinned Claude Code CLI (Fable blind assessor)
         id: run_claude
@@ -510,10 +527,15 @@ jobs:
           # rides on jq's argv either.
           jq -nc --rawfile content "$RUNNER_TEMP/triage_fable_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
-                --model claude-fable-5 \
+                --model fable \
                 "${TOOL_ARGS[@]}" \
                 --json-schema '{"type":"object","additionalProperties":false,"required":["assessments"],"properties":{"assessments":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","importance","reasoning"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"importance":{"enum":["low","med","high"]},"reasoning":{"type":"string"}}}}}}' \
             | tee /tmp/claude_stream.jsonl
+
+          # #872: `fable` is an alias (always the newest Fable), so record what the API resolved it to on
+          # THIS run next to the CLI version the installer already wrote to the same job summary.
+          resolved_model=$(jq -r 'select(.type=="assistant") | .message.model // empty' /tmp/claude_stream.jsonl | head -n1 || true)
+          printf -- '- model: `%s` (requested alias `fable`)\n' "${resolved_model:-unknown}" >> "$GITHUB_STEP_SUMMARY"
 
           structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
           if [ -z "$structured" ] || [ "$structured" = "null" ]; then
@@ -798,12 +820,22 @@ jobs:
             echo "<<<END_BLIND_ASSESSMENTS>>>"
           } > "$RUNNER_TEMP/triage_adjudicate_prompt.txt"
 
-      - name: Install pinned Claude Code
-        id: install_claude
+      # #872: same artifact-not-checkout route as the coverage validator this job already writes above —
+      # on the untrusted-author path there is no checkout to read the shared installer from.
+      - name: Write Claude Code installer script (untrusted author)
+        if: needs.gather.outputs.trusted_author != 'true'
         run: |
           set -euo pipefail
-          npm install -g @anthropic-ai/claude-code@2.1.207
-          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+          mkdir -p .github/scripts
+          jq -r '.install_claude_code_script' triage-packets.json > .github/scripts/install-claude-code.sh
+          chmod +x .github/scripts/install-claude-code.sh
+
+      - name: Install Claude Code (latest, known-good fallback)
+        id: install_claude
+        env:
+          AAR_CLAUDE_SMOKE_MODEL: fable
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/install-claude-code.sh
 
       - name: Run pinned Claude Code CLI (Fable sighted adjudication)
         id: run_claude
@@ -828,10 +860,15 @@ jobs:
           # rides on jq's argv either.
           jq -nc --rawfile content "$RUNNER_TEMP/triage_adjudicate_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
-                --model claude-fable-5 \
+                --model fable \
                 "${TOOL_ARGS[@]}" \
                 --json-schema '{"type":"object","additionalProperties":false,"required":["tickets"],"properties":{"tickets":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["number","verdict","proposed_body_edit","wave","notes"],"properties":{"number":{"type":"integer"},"verdict":{"enum":["DO","SKIP","ASK"]},"proposed_body_edit":{"type":["string","null"]},"wave":{"type":["integer","null"]},"notes":{"type":"string"}}}}}}' \
             | tee /tmp/claude_stream.jsonl
+
+          # #872: `fable` is an alias (always the newest Fable), so record what the API resolved it to on
+          # THIS run next to the CLI version the installer already wrote to the same job summary.
+          resolved_model=$(jq -r 'select(.type=="assistant") | .message.model // empty' /tmp/claude_stream.jsonl | head -n1 || true)
+          printf -- '- model: `%s` (requested alias `fable`)\n' "${resolved_model:-unknown}" >> "$GITHUB_STEP_SUMMARY"
 
           structured=$(jq -c 'select(.type=="result") | .structured_output // empty' /tmp/claude_stream.jsonl | tail -n1)
           if [ -z "$structured" ] || [ "$structured" = "null" ]; then

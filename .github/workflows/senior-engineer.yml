@@ -400,14 +400,17 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      # Same pin as every other CLI-running leg of this pipeline (automated-researcher#387/#388): the
-      # wrapper action's own bun/agent-SDK harness crashes at startup; the raw pinned CLI runs cleanly.
-      - name: Install pinned Claude Code
+      # Same shared installer as every other CLI-running leg of this pipeline
+      # (automated-researcher#384/#387/#388/#872): the wrapper action's own bun/agent-SDK harness crashes
+      # at startup, so the raw CLI is installed and invoked directly — `@latest` behind a launch-path smoke
+      # test with one shared known-good fallback constant. Runs BEFORE the PR-head checkout below, so the
+      # installer script is always the trusted base-branch copy, never the branch under adjudication.
+      - name: Install Claude Code (latest, known-good fallback)
         id: install_claude
-        run: |
-          set -euo pipefail
-          npm install -g @anthropic-ai/claude-code@2.1.207
-          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+        env:
+          AAR_CLAUDE_SMOKE_MODEL: fable
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/install-claude-code.sh
 
       # This is the ONLY checkout of the PR's own head branch content, happening after authorization is
       # already done from the trusted base branch checkout in the `resolve` job. The senior-engineer App
@@ -440,10 +443,15 @@ jobs:
           # never rides on any command's argv either.
           jq -nc --rawfile content "$RUNNER_TEMP/senior_engineer_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
-                --model claude-fable-5 \
+                --model fable \
                 --allowedTools Bash,Read,Grep,Glob \
                 --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["guided","escalated"]}}}' \
             | tee /tmp/claude_stream.jsonl
+
+          # #872: `fable` is an alias (always the newest Fable), so record what the API resolved it to on
+          # THIS run next to the CLI version the installer already wrote to the same job summary.
+          resolved_model=$(jq -r 'select(.type=="assistant") | .message.model // empty' /tmp/claude_stream.jsonl | head -n1 || true)
+          printf -- '- model: `%s` (requested alias `fable`)\n' "${resolved_model:-unknown}" >> "$GITHUB_STEP_SUMMARY"
 
           # Same validation as every other CLI-running leg (implement-on-ready.yml design-review finding 1):
           # don't let a CLI run that exited 0 but produced no result event / no structured_output fall

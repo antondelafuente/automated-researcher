@@ -128,14 +128,17 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
 
-      # Same pin as implement-on-ready.yml (automated-researcher#387/#388) — the wrapper action's own
-      # bun/agent-SDK harness crashes at startup; the raw pinned CLI is verified to run cleanly instead.
-      - name: Install pinned Claude Code
+      # Same shared installer as implement-on-ready.yml (automated-researcher#384/#387/#388/#872) — the
+      # wrapper action's own bun/agent-SDK harness crashes at startup, so the raw CLI is installed and
+      # invoked directly: `@latest` behind a launch-path smoke test, with one shared known-good fallback
+      # constant. This runs BEFORE the PR-head checkout below, so the installer script is always the
+      # trusted base-branch copy, never the branch under review.
+      - name: Install Claude Code (latest, known-good fallback)
         id: install_claude
-        run: |
-          set -euo pipefail
-          npm install -g @anthropic-ai/claude-code@2.1.207
-          echo "path=$(command -v claude)" >> "$GITHUB_OUTPUT"
+        env:
+          AAR_CLAUDE_SMOKE_MODEL: opus
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: .github/scripts/install-claude-code.sh
 
       # This is the ONLY checkout of the PR's own head branch content, and it happens AFTER authorization
       # and prompt rendering are both done from the trusted base branch — the agent's working tree is the
@@ -175,10 +178,15 @@ jobs:
           # never rides on any command's argv either.
           jq -nc --rawfile content "$RUNNER_TEMP/address_review_prompt.txt" '{"type":"user","message":{"role":"user","content":$content}}' \
             | "$CLAUDE_BIN" -p --input-format stream-json --output-format stream-json --verbose \
-                --model claude-opus-5 \
+                --model opus \
                 --allowedTools Bash,Edit,Write,Read,Grep,Glob \
                 --json-schema '{"type":"object","required":["status"],"properties":{"status":{"type":"string","enum":["addressed","blocked"]}}}' \
             | tee /tmp/claude_stream.jsonl
+
+          # #872: same record-what-ran line as implement-on-ready.yml — the alias means the workflow file
+          # no longer answers which model addressed this round.
+          resolved_model=$(jq -r 'select(.type=="assistant") | .message.model // empty' /tmp/claude_stream.jsonl | head -n1 || true)
+          printf -- '- model: `%s` (requested alias `opus`)\n' "${resolved_model:-unknown}" >> "$GITHUB_STEP_SUMMARY"
 
           # Same validation as implement-on-ready.yml (design-review finding 1 there): don't let a CLI run
           # that exited 0 but produced no result event / no structured_output fall through silently.

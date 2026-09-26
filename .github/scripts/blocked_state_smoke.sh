@@ -317,7 +317,7 @@ else
   }
   assert_step_guarded "Render implementor prompt"
   assert_step_guarded "Mint claude engineer App token"
-  assert_step_guarded "Install pinned Claude Code"
+  assert_step_guarded "Install Claude Code (latest, known-good fallback)"
   assert_step_guarded "Configure implementor git identity"
   assert_step_guarded "Run pinned Claude Code CLI (implementor)"
   assert_step_guarded "Resolve job outputs"
