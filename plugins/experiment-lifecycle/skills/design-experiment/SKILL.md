@@ -43,6 +43,10 @@ by **`launch-experiment`** (Step 4).
 
 ## The posture — together, with taste (the researcher steers hardest here)
 
+- **Start from the researcher's current interpretation.** Before proposing, read the researcher's recorded
+  interpretation of the prior results this design builds on, if the instance keeps one (the instance's project index
+  names where). Design around what they count as a finding; don't re-propose a contrast they have called
+  uninformative. It records their view, not data: the registry records remain the evidence.
 - **Propose with a recommendation, not a neutral menu.** Surface the load-bearing choices + tradeoffs, give your taste
   on each, and **clear the design with the researcher before launch.** This is where their input is heaviest.
 - **Labor is free.** Estimates you give the researcher quote three currencies only — dollars,
