@@ -634,5 +634,48 @@ else
 fi
 rm -rf "$T"
 
+# #886 (cases 48-50): candidates are enumerated by `git ls-files`, not a `find` walk of the whole tree that
+# then fed every file — gitignored node_modules/ included — through per-file bash forks (~10 min of a ~20-min
+# viz-page publish). git is only the ENUMERATOR; the ignore verdict is still check-ignore in the staging
+# worktree (cases 44-46 above), and check_excluded_claim still gets the per-file list (case 23 above).
+echo "[smoke] case 48: a 20k-file gitignored subtree -> PASS with --skip-ignored in seconds, reported as ONE collapsed directory line, not file-by-file"
+T=$(mktemp_d); make_repo_with_gitignore "$T" 'node_modules/'
+printf 'page\n' > "$T/reg/note/page48.html"
+mkdir -p "$T/reg/note/node_modules"
+for _d in $(seq 1 200); do mkdir "$T/reg/note/node_modules/p$_d"; done
+( cd "$T/reg/note/node_modules" && for _d in $(seq 1 200); do seq 1 100 | sed "s|^|p$_d/|; s|\$|.js|"; done | xargs touch )
+_start=$SECONDS
+if run_dry "$T/reg/note" --skip-ignored; then
+  _secs=$((SECONDS - _start))
+  _lines="$(printf '%s\n' "$LAST_ERR" | grep -c 'reg/note/node_modules/' || true)"
+  case "$LAST_ERR" in *"reg/note/node_modules/  (20000 ignored files"*)
+      if [ "$_lines" -eq 1 ]; then pass "20k ignored files reported as one collapsed line"; else fail "ignored tree printed on $_lines lines, not one collapsed line"; fi;;
+    *) fail "no collapsed ignored-directory line for node_modules/: $(printf '%s\n' "$LAST_ERR" | head -n 5)";; esac
+  if [ "$_secs" -lt 30 ]; then pass "20k-file ignored subtree dry-run finished in ${_secs}s"; else fail "20k-file ignored subtree dry-run took ${_secs}s (>= 30s — enumeration is walking the ignored tree file-by-file again)"; fi
+else fail "dry-run with a large ignored subtree BLOCKED: $(printf '%s\n' "$LAST_ERR" | tail -n 3)"; fi
+rm -rf "$T"
+
+echo "[smoke] case 49: --only reaches its file through an IN-TREE symlinked dir (git lists nothing for such a pathspec, exit 0) -> still staged via the find fallback, not silently dropped"
+T=$(mktemp_d); make_repo "$T"
+mkdir -p "$T/reg/note/real49"
+printf 'via alias\n' > "$T/reg/note/real49/f49.md"
+ln -s real49 "$T/reg/note/alias49"
+if run_dry "$T/reg/note" --only alias49/f49.md; then pass "a path git cannot enumerate falls back to find and still stages";
+else fail "file reached through an in-tree symlinked dir was not staged (git's empty listing taken as the set): $LAST_ERR"; fi
+rm -rf "$T"
+
+echo "[smoke] case 50: an unreadable directory under the record dir -> BLOCK on enumeration (git only WARNS and lists nothing inside it; a short candidate set must not pass)"
+T=$(mktemp_d); make_repo "$T"
+printf 'notes\n' > "$T/reg/note/note50.md"
+mkdir -p "$T/reg/note/locked50"
+printf 'secret-ish\n' > "$T/reg/note/locked50/inside.md"
+chmod 000 "$T/reg/note/locked50"
+if [ "$(id -u)" = 0 ]; then
+  pass "skipped as root (mode 000 does not stop root, so the directory is readable)"
+elif run_dry "$T/reg/note"; then fail "an unreadable directory was silently skipped by enumeration and the gate PASSED"; else
+  case "$LAST_ERR" in *"could not enumerate"*) pass "an unreadable directory fails enumeration closed";;
+    *) fail "blocked, but not on enumeration: $LAST_ERR";; esac; fi
+chmod 755 "$T/reg/note/locked50"; rm -rf "$T"
+
 if [ "$FAILS" -eq 0 ]; then echo "[smoke] log-experiment secret-scan: ALL PASS"; exit 0; else
   echo "[smoke] log-experiment secret-scan: $FAILS FAILURE(S)" >&2; exit 1; fi

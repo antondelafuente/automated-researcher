@@ -792,7 +792,7 @@ is_trivial_ignore() {
 # closed behavior EXACTLY when no staged counterpart shares the basename (the original scenario: a doc claims
 # committed, the file is staged nowhere) — that path still has no --skip-ignored escape.
 check_excluded_claim() {
-  local claim_file bn hit f staged_path is_staged
+  local claim_file bn hit f staged_path is_staged l
   local -r COMMIT_WORDS='\bcommitted\b|\bcommit\b|in the registry|in this dir'
   local -r NEGATION_RE=' not |n'"'"'t '
   local -a staged_paths=()
@@ -802,11 +802,26 @@ check_excluded_claim() {
   staged_paths_into "$WT_PARENT/scan-claim-staged" "$REL"
   while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
     < "$WT_PARENT/scan-claim-staged"
+  # #886: one grep pass per claim file over ALL excluded basenames (`-F -f`), not two grep execs per excluded
+  # file — a record dir with a large ignored subtree hands this tens of thousands of paths. Each excluded
+  # file's own hit is then the subset of those few candidate lines naming its basename (case-insensitively,
+  # as `grep -i` matched it, and outside the `N:` line-number prefix), checked with builtins.
+  local bns="$WT_PARENT/scan-claim-basenames" lines="$WT_PARENT/scan-claim-lines" line lbn
+  local -a claim_lines=()
+  for f in "$@"; do printf '%s\n' "${f##*/}"; done | LC_ALL=C sort -u > "$bns"
   for claim_file in "$DIR/RESULTS.md" "$DIR/ARTIFACT_MANIFEST.md"; do
     [ -f "$claim_file" ] || continue
+    { grep -niF -f "$bns" -- "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE"; } > "$lines" || true
+    claim_lines=()
+    while IFS= read -r line; do claim_lines+=("$line"); done < "$lines"
+    [ "${#claim_lines[@]}" -gt 0 ] || continue
     for f in "$@"; do
-      bn="$(basename "$f")"
-      if hit="$(grep -niF -- "$bn" "$claim_file" 2>/dev/null | grep -iE -- "$COMMIT_WORDS" | grep -viE -- "$NEGATION_RE")"; then
+      bn="${f##*/}"; lbn="${bn,,}"; hit=""
+      for line in "${claim_lines[@]}"; do
+        l="${line#*:}"
+        [[ "${l,,}" == *"$lbn"* ]] && hit+="${hit:+$'\n'}$line"
+      done
+      if [ -n "$hit" ]; then
         is_staged=0
         for staged_path in "${staged_paths[@]}"; do
           [ "$(basename "$staged_path")" = "$bn" ] && { is_staged=1; break; }
@@ -824,7 +839,8 @@ check_excluded_claim() {
 # below reads the staged set). Reports any file under STAGE_PATHS that the staging worktree's ignore rules
 # excluded from the staged set — the list copy_stage_paths already computed, per-file (an ignored DIRECTORY is
 # enumerated as each file inside it, never collapsed to the directory's own basename, which would silently
-# miss every filename inside it against check_excluded_claim's per-file prose check below), covering an
+# miss every filename inside it against check_excluded_claim's per-file prose check below; only the PRINTED
+# report collapses a wholly-ignored tree to one line — see ignored_report, #886), covering an
 # ignored SYMLINK the same as a regular file, and carrying raw byte paths so a non-ASCII path is never
 # quoted into a mismatch. A silent exclusion is fine for a genuine R2-scale
 # artifact but not for a small pinned file sharing the ignored extension (the #340 incident) — BLOCK by
@@ -832,6 +848,47 @@ check_excluded_claim() {
 # is intentional. #331's check_excluded_claim reuses this SAME excluded-file list (rather than re-deriving it
 # with a second present-vs-staged diff) to catch the one thing --skip-ignored must never wave through: a doc
 # claiming an excluded file is committed.
+# ignored_report <excluded-file>...: the PRINTED half of check_ignored_files (#886). A wholly-ignored tree is
+# one line — `site/node_modules/  (33995 ignored files, e.g. site/node_modules/a/index.js)` — instead of every
+# file inside it, which buried the report under thousands of node_modules lines. A directory collapses only
+# when NOTHING under it is staged (ancestors of every staged file, from copy_stage_paths' stage-kept list, are
+# off-limits) and never above a path the caller asked to stage, so it can only ever stand for files that all
+# dropped. A directory holding a single excluded file prints that file instead. Display only: check_excluded_claim
+# still receives the full per-file list, which the #331 claim check needs (smoke case 23).
+ignored_report() {
+  local p d top key pd
+  local -A blocked=() count=() first=() memo=()
+  local -a order=()
+  # Every ancestor of a staged file and of a STAGE_PATH is off-limits. A chain is marked whole, so the walk
+  # stops at the first already-marked dir.
+  local -a marks=()
+  while IFS= read -r -d '' p; do marks+=("$p"); done < "$WT_PARENT/stage-kept"
+  for p in "${marks[@]}" "${STAGE_PATHS[@]}"; do
+    d="$p"
+    while [[ "$d" == */* ]]; do d="${d%/*}"; [ -n "${blocked["$d"]:-}" ] && break; blocked["$d"]=1; done
+  done
+  for p in "$@"; do
+    top=""
+    if [[ "$p" == */* ]]; then
+      pd="${p%/*}"
+      if [ -n "${memo["$pd"]+set}" ]; then top="${memo["$pd"]}"; else
+        d="$p"
+        while [[ "$d" == */* ]]; do d="${d%/*}"; [ -n "${blocked["$d"]:-}" ] && break; top="$d"; done
+        memo["$pd"]="$top"
+      fi
+    fi
+    key="$p"; [ -z "$top" ] || key="$top/"
+    if [ -z "${count["$key"]+set}" ]; then order+=("$key"); count["$key"]=0; first["$key"]="$p"; fi
+    count["$key"]=$(( count["$key"] + 1 ))
+  done
+  for key in "${order[@]}"; do
+    if [ "${count["$key"]}" -gt 1 ]; then
+      printf '  %s  (%d ignored files, e.g. %s)\n' "$key" "${count["$key"]}" "${first["$key"]}"
+    else
+      printf '  %s\n' "${first["$key"]}"
+    fi
+  done
+}
 check_ignored_files() {
   local path; local -a hits=()
   for path in "${IGNORED_UNDER_STAGE[@]}"; do
@@ -840,7 +897,7 @@ check_ignored_files() {
   done
   [ "${#hits[@]}" -eq 0 ] && return 0
   note "gitignored file(s) under $REL were NOT staged (excluded by a .gitignore rule):"
-  printf '  %s\n' "${hits[@]}" >&2
+  ignored_report "${hits[@]}" >&2
   check_excluded_claim "${hits[@]}"
   if [ "$SKIP_IGNORED" = 1 ]; then
     note "--skip-ignored: proceeding anyway (acknowledged)"
@@ -887,10 +944,50 @@ root_of() {
   for r in "${ROOT_RELS[@]}"; do path_contains "$r" "$p" && { printf '%s' "$r"; return 0; }; done
   return 1
 }
+# cand_enum_find <out> <abs-path>...: every regular file and symlink under the given paths, repo-relative,
+# NUL-delimited, byte-sorted. Absolute paths so find never reads a leading '-' as an option. `-P` (find's
+# default) NEVER follows a symlink, so a symlinked file or dir is listed as ITSELF and copied verbatim:
+# --only stages exactly the path you name (#586) and symlink_scan still wholesale-BLOCKs it (#416).
+cand_enum_find() {
+  local out="$1" p; shift
+  find "$@" \( -type f -o -type l \) -print0 \
+    | while IFS= read -r -d '' p; do printf '%s\0' "${p#"$REPO_ROOT/"}"; done \
+    | LC_ALL=C sort -z > "$out" || die "could not enumerate the files under $REL to stage"
+}
+# cand_enum_git <out> <repo-relative-path>...: the same set cand_enum_find would list, from `git ls-files`
+# (#886). Returns 1 — the caller falls back to `find` — on any git failure OR any stderr output, since an
+# unreadable directory is only a warning to ls-files (exit 0, its files silently missing) where `find` exits
+# non-zero. `--literal-pathspecs` so a path with glob characters names only itself. Untracked entries exist
+# by construction, except that a nested repo git does not descend into is listed as `dir/`; tracked entries
+# are filtered to what is present locally (a deleted or sparse-skipped path is in the index, not on disk),
+# and a tracked DIRECTORY is a submodule. Both directory kinds are expanded with `find`, exactly as the walk
+# used to see them. Only the tracked list is looped over in bash, with builtins — no fork per file.
+cand_enum_git() {
+  local out="$1" p rc; shift
+  local -a expand=()
+  git -C "$REPO_ROOT" --literal-pathspecs ls-files -z --others -- "$@" > "$out.others" 2> "$out.err" || return 1
+  [ ! -s "$out.err" ] || return 1
+  git -C "$REPO_ROOT" --literal-pathspecs ls-files -z --cached -- "$@" > "$out.cached" 2> "$out.err" || return 1
+  [ ! -s "$out.err" ] || return 1
+  rc=0; grep -zv '/$' "$out.others" > "$out" || rc=$?
+  [ "$rc" -le 1 ] || die "internal: could not filter the untracked-file list under $REL (grep exit $rc)"
+  rc=0; grep -z '/$' "$out.others" > "$out.nested" || rc=$?
+  [ "$rc" -le 1 ] || die "internal: could not filter the untracked-file list under $REL (grep exit $rc)"
+  while IFS= read -r -d '' p; do expand+=("$REPO_ROOT/${p%/}"); done < "$out.nested"
+  while IFS= read -r -d '' p; do
+    if [ -L "$REPO_ROOT/$p" ] || [ -f "$REPO_ROOT/$p" ]; then printf '%s\0' "$p"
+    elif [ -d "$REPO_ROOT/$p" ]; then expand+=("$REPO_ROOT/$p"); fi
+  done < "$out.cached" >> "$out"
+  if [ "${#expand[@]}" -gt 0 ]; then
+    cand_enum_find "$out.expand" "${expand[@]}"
+    cat "$out.expand" >> "$out"
+  fi
+}
 copy_stage_paths() {
-  local cand ign copy rules resolved rc=0 p d
+  local cand ign copy rules resolved kept rc=0 p d
   cand="$WT_PARENT/stage-candidates"; ign="$WT_PARENT/stage-ignored"
   copy="$WT_PARENT/stage-copy"; rules="$WT_PARENT/stage-rules"; resolved="$WT_PARENT/stage-resolved"
+  kept="$WT_PARENT/stage-kept"
   # A staged path that no longer exists LOCALLY is not an error here (#823 review P1): under mirror
   # semantics a --page-source-only path naming a file deleted from the page source is precisely a deletion,
   # and the clear-then-copy below plus the index's memory of the base tree are what turn it into one. It
@@ -920,19 +1017,49 @@ copy_stage_paths() {
     case "$m" in ""|"."|/*|*"/../"*|*"/..") die "internal: refusing to mirror-clear an unbounded staged path ('$m')" ;; esac
     rm -rf -- "${WT:?}/${m:?}" || die "could not clear the staged page-source path $m in the worktree (mirror semantics need it emptied before the copy)"
   done
-  # Absolute roots (so find never reads a leading '-' in a path as an option), stripped back to the
-  # repo-root-relative form check-ignore, `git add` and the guard's printed list all use. `-P` (find's
-  # default) NEVER follows a symlink, so a symlinked file or dir is listed as ITSELF and copied verbatim
-  # below: --only stages exactly the path you name (#586) and symlink_scan still wholesale-BLOCKs it (#416).
+  # Candidates are enumerated by GIT, not `find` (#886): `find` walked every file under the root, gitignored
+  # trees included, and fed each one through per-file bash loops that forked `dirname`/`root_of` — measured on
+  # a viz-page `site/` publish at 49,559 files enumerated (33,995 under node_modules/) to stage 7,866, roughly
+  # ten minutes of a twenty-minute publish across two dry-runs. `git ls-files --cached --others` (no
+  # --exclude-standard, so ignored files are listed too) lists the same file set from git's own C walk.
+  # It is the ENUMERATOR only, never the judge: the input repo's rule and index state can differ from the
+  # staging worktree's (a `git add -f`'d file is tracked here but not in $WT), so the ignore verdict stays
+  # phase 2's check-ignore inside $WT (#670) and ignored files still reach it — and IGNORED_UNDER_STAGE —
+  # one by one, which check_excluded_claim needs.
+  # cand_enum_git refuses (returns 1 → the old `find` walk below) every root git cannot enumerate faithfully,
+  # because each such case is a SILENTLY SHORT list, never an error: a pathspec reaching through an in-tree
+  # symlinked dir, or into a nested repo, lists nothing with exit 0; an unreadable directory is a stderr
+  # warning with exit 0. A nested repo or submodule INSIDE a root is listed as one directory entry, which is
+  # handed to `find` too, so the candidate set stays the exact set `find` produced.
   # Only regular files and symlinks are listed — git can stage nothing else, and an empty directory is not
   # representable in a commit. NUL-delimited throughout for the same path-safety reason secret_scan reads
-  # paths raw; `LC_ALL=C sort -z` makes both the copy and the guard's printed list deterministic byte order.
+  # paths raw; `LC_ALL=C sort -zu` makes both the copy and the guard's printed list deterministic byte order
+  # (and folds an unmerged path's several index stages into one).
   # `if`, not a bare call: with every staged path gone locally (an all-deletions mirror) `roots` is empty and
   # a bare `find` would fall back to walking the CURRENT DIRECTORY — enumerating the whole repo as candidates.
+  local -a git_rels=() find_roots=()
   if [ "${#roots[@]}" -gt 0 ]; then
-    find "${roots[@]}" \( -type f -o -type l \) -print0 \
-      | while IFS= read -r -d '' p; do printf '%s\0' "${p#"$REPO_ROOT/"}"; done \
-      | LC_ALL=C sort -z > "$cand" || die "could not enumerate the files under $REL to stage"
+    local top phys_repo want
+    top="$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)" || top=""
+    phys_repo="$(realpath -e -- "$REPO_ROOT" 2>/dev/null)" || phys_repo=""
+    for p in "${roots[@]}"; do
+      p="${p#"$REPO_ROOT/"}"; d="$(dirname -- "$p")"
+      want="$phys_repo"; [ "$d" = "." ] || want="$phys_repo/$d"
+      if [ -n "$top" ] && [ -n "$phys_repo" ] && [ "$(realpath -e -- "$REPO_ROOT/$d" 2>/dev/null)" = "$want" ] \
+          && [ "$(git -C "$REPO_ROOT/$d" rev-parse --show-toplevel 2>/dev/null)" = "$top" ]; then
+        git_rels+=("$p")
+      else
+        find_roots+=("$REPO_ROOT/$p")
+      fi
+    done
+    if [ "${#git_rels[@]}" -gt 0 ] && ! cand_enum_git "$cand.git" "${git_rels[@]}"; then
+      for p in "${git_rels[@]}"; do find_roots+=("$REPO_ROOT/$p"); done
+      : > "$cand.git"
+    fi
+    [ -f "$cand.git" ] || : > "$cand.git"
+    : > "$cand.find"
+    [ "${#find_roots[@]}" -eq 0 ] || cand_enum_find "$cand.find" "${find_roots[@]}"
+    cat "$cand.git" "$cand.find" | LC_ALL=C sort -zu > "$cand" || die "could not enumerate the files under $REL to stage"
   else
     : > "$cand"
   fi
@@ -945,42 +1072,51 @@ copy_stage_paths() {
   # inside the root or out, which is the stronger rule this script has always applied.
   #
   # BELT-AND-BRACES, deliberately: no current input reaches this check, and that is the point of having it.
-  # It holds without depending on the two properties that keep today's staged set contained — `find -P`
-  # never following a symlink (so an in-tree symlink is enumerated as ITSELF rather than descended into,
-  # leaving symlink_scan to BLOCK it), and assert_physical_parent vetting every path NAMED on the command
-  # line before enumeration. Those two are the guards that fire in practice (#820 round 3 was the second one
+  # It holds without depending on the two properties that keep today's staged set contained — the enumeration
+  # (`git ls-files`, or `find -P`) never following a symlink (so an in-tree symlink is enumerated as ITSELF
+  # rather than descended into, leaving symlink_scan to BLOCK it), and assert_physical_parent vetting every
+  # path NAMED on the command line before enumeration. Those two are the guards that fire in practice (#820 round 3 was the second one
   # missing); this one is what keeps the invariant true if a later change enumerates differently, and the
   # failure mode it guards is silent: `cp -P --parents` materializes a kernel-resolved out-of-tree file as
   # ordinary committed content, with no symlink left in the staged set for symlink_scan to see. The cost is
   # one batched `realpath` over the staged set's UNIQUE parent dirs (not one exec per file), before any
   # bytes move. Offenders are reported ALL at once, since the useful output is the full list, not the first.
-  local -A phys_root=() dir_real=()
-  local r pr pdir
+  # Judged per unique parent DIR (#886), which is the same verdict: the roots are directories and every
+  # candidate lies strictly inside one, so a file and its parent dir always share a root. The unique dirs come
+  # from one sed+sort pass (the "./" prefix makes a top-level file's parent come out as ".", as dirname's
+  # does), and the file list is walked only to NAME offenders once a bad dir exists.
+  local -A phys_root=() bad_dir=()
+  local r pr pdir real
   for r in "${ROOT_RELS[@]}"; do
     phys_root["$r"]="$(realpath -e -- "$REPO_ROOT/$r" 2>/dev/null)" \
       || die "internal: cannot physically resolve the staging root $r"
   done
-  local -a cand_list=() cand_dirs=() res_list=() offenders=()
-  while IFS= read -r -d '' p; do
-    cand_list+=("$p")
-    pdir="$(dirname -- "$p")"
-    [ -n "${dir_real["$pdir"]:-}" ] || { dir_real["$pdir"]="pending"; cand_dirs+=("$pdir"); }
-  done < "$cand"
+  local -a cand_dirs=() res_list=() offenders=()
+  LC_ALL=C sed -z -e 's|^|./|' -e 's|/[^/]*$||' "$cand" | LC_ALL=C sort -zu > "$resolved.dirs" \
+    || die "could not list the directories to stage under $REL"
+  while IFS= read -r -d '' p; do cand_dirs+=("$p"); done < "$resolved.dirs"
   if [ "${#cand_dirs[@]}" -gt 0 ]; then
-    printf '%s\0' "${cand_dirs[@]}" | ( cd "$REPO_ROOT" && xargs -0 -r realpath -z -m -- ) > "$resolved" \
+    ( cd "$REPO_ROOT" && xargs -0 -r realpath -z -m -- ) < "$resolved.dirs" > "$resolved" \
       || die "could not resolve the real paths of the directories to stage under $REL"
     while IFS= read -r -d '' p; do res_list+=("$p"); done < "$resolved"
     [ "${#cand_dirs[@]}" -eq "${#res_list[@]}" ] \
       || die "internal: resolved ${#res_list[@]} real path(s) for ${#cand_dirs[@]} staged directory/ies — refusing to stage without a real path for every one of them"
     local i
-    for i in "${!cand_dirs[@]}"; do dir_real["${cand_dirs[$i]}"]="${res_list[$i]}"; done
+    for i in "${!cand_dirs[@]}"; do
+      pdir="${cand_dirs[$i]}"; [ "$pdir" = "." ] || pdir="${pdir#./}"
+      real="${res_list[$i]}"; pr=""
+      for r in "${ROOT_RELS[@]}"; do path_contains "$r" "$pdir" && { pr="${phys_root["$r"]}"; break; }; done
+      # No containing root means the candidate WAS its root (a root that is itself a symlink): its parent
+      # is outside by definition, which the per-file check flagged too.
+      if [ -z "$pr" ] || { [ "$real" != "$pr" ] && [ "${real#"$pr"/}" = "$real" ]; }; then bad_dir["$pdir"]="$real"; fi
+    done
   fi
-  for p in "${cand_list[@]}"; do
-    r="$(root_of "$p")" || die "internal: staged path '$p' belongs to no staging root (${ROOT_RELS[*]})"
-    pr="${phys_root["$r"]}"
-    pdir="${dir_real["$(dirname -- "$p")"]}"
-    [ "$pdir" = "$pr" ] || [ "${pdir#"$pr"/}" != "$pdir" ] || offenders+=("$p (its parent dir really is $pdir)")
-  done
+  if [ "${#bad_dir[@]}" -gt 0 ]; then
+    while IFS= read -r -d '' p; do
+      case "$p" in */*) pdir="${p%/*}" ;; *) pdir="." ;; esac
+      [ -z "${bad_dir["$pdir"]+set}" ] || offenders+=("$p (its parent dir really is ${bad_dir["$pdir"]})")
+    done < "$cand"
+  fi
   if [ "${#offenders[@]}" -gt 0 ]; then
     echo "staged path(s) reached through a symlinked parent directory that leaves the tree they are staged from:" >&2
     printf '  %s\n' "${offenders[@]}" >&2
@@ -989,17 +1125,19 @@ copy_stage_paths() {
   # ---- phase 1: materialize the INPUT's own ignore rules, before any verdict is computed -----------------
   # Every `.gitignore` the copy would bring in that can affect a staged path: the ones under the roots (in
   # $cand already), plus the ancestor chain from each root's parent up to $REL — with --only, `$REL/.gitignore`
-  # governs `$REL/sub/x` but is not itself under the `$REL/sub/x` root, so find never lists it. A `.gitignore`
-  # elsewhere under $DIR (a sibling dir no root descends into) cannot affect any staged path — gitignore rules
+  # governs `$REL/sub/x` but is not itself under the `$REL/sub/x` root, so the enumeration never lists it. A
+  # `.gitignore` elsewhere under $DIR (a sibling dir no root descends into) cannot affect any staged path — gitignore rules
   # only ever apply to their own directory and below — so leaving it uncopied keeps --only's walk narrow
   # without changing a single verdict. Rules ABOVE $REL are the base worktree's own and are already in place;
   # $DIR does not contain them, so the old blanket copy did not override them either.
   local -A is_rule=()
   local -a rule_paths=()
+  rc=0; grep -z '\(^\|/\)\.gitignore$' "$cand" > "$rules.cand" || rc=$?
+  [ "$rc" -le 1 ] || die "internal: could not list the input's .gitignore files under $REL (grep exit $rc)"
+  rc=0
   while IFS= read -r -d '' p; do
-    [ "${p##*/}" = ".gitignore" ] || continue
     [ -n "${is_rule["$p"]:-}" ] || { is_rule["$p"]=1; rule_paths+=("$p"); }
-  done < "$cand"
+  done < "$rules.cand"
   local sroot
   for p in "${STAGE_PATHS[@]}"; do
     sroot="$(root_of "$p")" || die "internal: staged path '$p' belongs to no staging root (${ROOT_RELS[*]})"
@@ -1028,12 +1166,15 @@ copy_stage_paths() {
   # latter rather than staging against an empty excluded-file list the #340 guard would then read as clean.
   git -C "$WT" check-ignore -z --stdin < "$cand" > "$ign" || rc=$?
   [ "$rc" -le 1 ] || die "internal: git check-ignore failed in the staging worktree (exit $rc) — refusing to stage without a trustworthy gitignore verdict"
-  local -A ignored=()
-  while IFS= read -r -d '' p; do ignored["$p"]=1; IGNORED_UNDER_STAGE+=("$p"); done < "$ign"
+  while IFS= read -r -d '' p; do IGNORED_UNDER_STAGE+=("$p"); done < "$ign"
   # ---- phase 3: copy the rest (the rule files are already in place, so they are skipped here) ------------
-  while IFS= read -r -d '' p; do
-    if [ -z "${ignored["$p"]:-}" ] && [ -z "${is_rule["$p"]:-}" ]; then printf '%s\0' "$p"; fi
-  done < "$cand" > "$copy"
+  # Set differences over the byte-sorted lists (#886) rather than a per-file bash loop. $kept (candidates
+  # minus ignored) is kept for check_ignored_files, which collapses its printed report against it.
+  LC_ALL=C sort -zu "$ign" > "$ign.sorted" || die "internal: could not sort the ignored-file list"
+  printf '%s\0' "${rule_paths[@]}" | LC_ALL=C sort -zu > "$rules.sorted" || die "internal: could not sort the .gitignore list"
+  [ "${#rule_paths[@]}" -gt 0 ] || : > "$rules.sorted"
+  LC_ALL=C comm -z -23 "$cand" "$ign.sorted" > "$kept" || die "internal: could not compute the set of files to stage under $REL"
+  LC_ALL=C comm -z -23 "$kept" "$rules.sorted" > "$copy" || die "internal: could not compute the set of files to stage under $REL"
   # `cp --parents` recreates each file's directory chain under $WT; -P keeps a symlink a symlink (never
   # dereferenced — see above). xargs batches, so this is a handful of execs, not one per file.
   ( cd "$REPO_ROOT" && xargs -0 -r cp -P --parents -t "$WT" -- ) < "$copy" \
