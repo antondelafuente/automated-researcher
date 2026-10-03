@@ -220,14 +220,29 @@ validate_supervision_mode(){
 }
 
 # designer_session is an ADDRESS, not free text (automated-researcher#796): whatever it holds is handed to a
-# session-addressed message primitive as a single argument (`SendMessage <name>`), so a value carrying
-# whitespace/newlines is not one address — it is a caller pasting a description ("claude-rc, the RC host") or a
-# multi-token tmux target where a harness session name belongs, and it would silently address the wrong thing
-# or nothing at all. The NAME itself stays opaque (instances own their harness's naming), with exactly one
-# reserved literal — `record-only`, "no addressable designer session; the record inbox is the channel."
+# session-addressed message primitive as a single argument (`SendMessage <name>`), so a value that is not ONE
+# line is not one address. The NAME itself stays opaque (instances own their harness's naming), with exactly
+# one reserved literal — `record-only`, "no addressable designer session; the record inbox is the channel."
+# Single interior spaces are allowed deliberately (automated-researcher#879): a Remote Control bridge session
+# is auto-retitled seconds after start, and that title ("Non-COT Timmy model organism") is the name ListAgents
+# lists and SendMessage resolves — the pre-#879 whitespace ban made the only working address unbindable.
+# Tabs, newlines, and leading/trailing/doubled spaces stay refused: no listing prints a name like that.
 validate_designer_session(){
+  local ws_re=$'[\t\n\r\v\f]'
+  if [[ "$1" =~ $ws_re ]] || [[ "$1" == " "* ]] || [[ "$1" == *" " ]] || [[ "$1" == *"  "* ]]; then
+    die "invalid --designer-session '$1' (must be ONE harness session name exactly as the self-identity listing prints it — Claude Code: ListAgents' 'This session is …' line, single interior spaces allowed — or the literal 'record-only')"
+  fi
+}
+
+# The designer-side binds (`checkpoint --designer-session`, `verify-bootstrap --designer-session`) also refuse a
+# Remote Control bridge's harness id (automated-researcher#879): `bridge-cse-…` is listed only until the bridge
+# session is auto-retitled (observed: one second after the launcher read it), after which SendMessage to it
+# fails "No agent named … is reachable" and every executor push silently degrades to record-only polling.
+# Refusing it here is what fails a dead push channel at DISPATCH, not at close. `start` stays permissive: the
+# executor binds the brief's seed verbatim, and the designer's verify-bootstrap is the gate that catches it.
+reject_designer_harness_id(){
   case "$1" in
-    *[[:space:]]*) die "invalid --designer-session '$1' (must be a single whitespace-free harness session name — the address a session-addressed message primitive takes, e.g. SendMessage <name> — or the literal 'record-only')";;
+    cse_*|bridge-cse-*) die "invalid --designer-session '$1' (a Remote Control bridge's harness id, NOT a SendMessage address — the session is auto-renamed after start and the id stops resolving, #879; re-run ListAgents and use the name its 'This session is …' line prints now, or 'record-only')";;
   esac
 }
 
@@ -618,7 +633,7 @@ cmd_update(){
       --supervision-mode) require_val --supervision-mode "${2:-}"; validate_supervision_mode "$2"; supervision_mode=$2; shift 2;;
       --question-route)   require_val --question-route "${2:-}";   question_route=$2;       shift 2;;
       --terminal-route)   require_val --terminal-route "${2:-}";   terminal_route=$2;        shift 2;;
-      --designer-session) require_val --designer-session "${2:-}"; validate_designer_session "$2"; designer_session=$2; shift 2;;
+      --designer-session) require_val --designer-session "${2:-}"; validate_designer_session "$2"; reject_designer_harness_id "$2"; designer_session=$2; shift 2;;
       --look-again)       require_val --look-again "${2:-}";       look_again=$2;            shift 2;;
       *) die "update: unknown arg '$1'";;
     esac
@@ -1044,7 +1059,7 @@ cmd_verify_bootstrap(){
       --worktree)          require_val --worktree "${2:-}";          exp_worktree=$2; shift 2;;
       --question-route)    require_val --question-route "${2:-}";    exp_qroute=$2;   shift 2;;
       --terminal-route)    require_val --terminal-route "${2:-}";    exp_troute=$2;   shift 2;;
-      --designer-session)  require_val --designer-session "${2:-}";  validate_designer_session "$2"; exp_dsession=$2; shift 2;;
+      --designer-session)  require_val --designer-session "${2:-}";  validate_designer_session "$2"; reject_designer_harness_id "$2"; exp_dsession=$2; shift 2;;
       --timeout-sec)       require_val --timeout-sec "${2:-}";       timeout_sec=$2;  shift 2;;
       --poll-interval-sec) require_val --poll-interval-sec "${2:-}"; poll_sec=$2;      shift 2;;
       *) die "verify-bootstrap: unknown arg '$1'";;

@@ -119,12 +119,27 @@ no run context received it, ruled as designer-of-record and consumed the questio
 supervising the run found the inbox already cleared. Two designers-of-record by construction; same ruling
 both times only by luck.
 
+**The address is the name the listing prints for you NOW — not a harness id (automated-researcher#879).**
+Claude Code's `ListAgents` opens with "This session is `<name>` [ref] — the name other sessions use to message
+it": bind that `<name>` exactly, spaces included, without the `[ref]` (`SendMessage` resolves the bare name; a
+ref is only for disambiguating a name a listing shows twice). A Remote Control bridge's `cse_*` /
+`bridge-cse-*` id is **not** that address, even when the listing briefly shows it: a bridge session is
+auto-retitled seconds after start, and the id stops resolving. Real incidents (em-finance-dose-1 2026-09-30;
+neel-condliar-swap-1 2026-10-03): the launcher bound `bridge-cse-…-63`, the session became "Non-COT Timmy
+model organism" one second later, and every executor `SendMessage` failed "No agent named … is reachable" — the
+close report stayed record-only and a blocking question reached the designer only because the researcher
+pasted panes. `bind-designer` refuses a `cse_*`/`bridge-cse-*` value: if your self line still shows one, the
+retitle has not landed yet — re-run `ListAgents` after your next tool round and bind what it prints then.
+
 Then write it into the record's seed line — **a scripted edit, not a hand-edit and not a `sed` one-liner**
 (the RGBH1 launcher hand-edited the designing family's `DESIGN.md`/`START.md` to move the role):
 
 ```
-scripts/launch_record.sh bind-designer <path to registry/<exp>/START.md> <your harness session name>
+scripts/launch_record.sh bind-designer <path to registry/<exp>/START.md> "<your harness session name>"
 ```
+
+(Quote the name: a retitled bridge's name has spaces. The script shell-quotes it in the brief's
+`--designer-session` command lines so the executor's `start` receives it as one argument.)
 
 It rewrites the single `**Designer-of-record:**` line (and any remaining `<designer_session>` placeholder),
 fails closed if that line is missing or ambiguous, and is idempotent. Commit it path-scoped on the run
@@ -276,13 +291,26 @@ its own watcher. Before falling into the healthy zero-turn wait loop, run
 ```
 run_supervision_record.sh verify-bootstrap <run-id> --executor-family <claude|codex>
   --supervision-mode <expected mode> --worktree <expected path> --question-route <expected route>
-  --terminal-route <expected route> --designer-session <your harness session name, or record-only>
+  --terminal-route <expected route> --designer-session "<your harness session name, or record-only>"
 ```
 
 and treat a non-zero exit (missing record, a mismatched field, or a timeout) as `needs-attention`, not a
 normal wait — reported against the executor you already named. `--designer-session` is matched EXACTLY
 against what the executor bound from Step 2's seed line, which is what makes the handoff *verified* rather
-than asserted. That poll is bounded but can run to its full default 300s or fail, so it must never be what
+than asserted.
+
+**That value is a fresh resolvability check, not a copy of Step 2 (automated-researcher#879).** Immediately
+before running `verify-bootstrap`, re-run `ListAgents` and pass the name its "This session is …" line prints
+*now* — the address the harness itself says other sessions reach you at — never the name you remember
+binding. If you were retitled since Step 2 (a Remote Control bridge auto-renames after start), the receipt
+fails fast on a `designer_session mismatch`: the executor's push channel is dead, so fix it *at dispatch*,
+not at close — `run_supervision_record.sh checkpoint <run-id> --designer-session "<current name>"`, then re-run
+`verify-bootstrap` with the same current name. `verify-bootstrap` and `checkpoint` both refuse a
+`cse_*`/`bridge-cse-*` harness id outright. If no stable name resolves (the listing still shows only a bridge
+id, or this substrate has none), rebind the reserved `record-only` instead, say so loudly in your launch
+report, and own the `has-question` polling — never let the run proceed on an address you have not just seen
+listed. (You cannot test-send to yourself — the listing marks a message to your own name as a message to
+yourself — so the self line is the check.) That poll is bounded but can run to its full default 300s or fail, so it must never be what
 the executor announcement waits on.
 
 ## Step 7 — Arm BOTH supervision layers (#292, #342, #658)

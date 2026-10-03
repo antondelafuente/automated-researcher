@@ -28,6 +28,13 @@
 #       one seed line must match. Atomic (tmp + mv, mode preserved) and idempotent (a re-run with the same
 #       name is a no-op). The reserved literal `record-only` is accepted verbatim — it is the honest value
 #       for a substrate with no addressable session (automated-researcher#796).
+#       The name is the one the harness's self-identity listing prints NOW (Claude Code: ListAgents' "This
+#       session is …" line), spaces included — never a Remote Control bridge's `cse_*`/`bridge-cse-*` id, which
+#       is refused. Incident (automated-researcher#879, em-finance-dose-1 2026-09-30, recurring
+#       neel-condliar-swap-1 2026-10-03): the launcher bound `bridge-cse-…-63`, the bridge session was
+#       auto-retitled "Non-COT Timmy model organism" one second later, and every executor SendMessage to the
+#       bound id failed "No agent named … is reachable" — the close report and a blocking question reached the
+#       designer only by polling / a researcher pasting panes.
 #
 # NOT THIS SCRIPT'S JOB: the record is only the SEED. The address OF RECORD is the run-supervision record's
 # `designer_session` field, which the executor binds at `start` and the launcher verifies with
@@ -64,7 +71,7 @@ LOCK_RE='^#{1,6}[[:space:]]*Presentation[[:space:]]*\(locked with the researcher
 # brief, or what THIS script could itself have written from it", down to refusing an address `bind-designer`
 # would have refused as an argument.
 PY_TRANSFORM=$(cat <<'PY'
-import os, re, sys, tempfile
+import os, re, shlex, sys, tempfile
 
 SEED_RE = re.compile(r"^\s*[-*]\s+\*\*Designer-of-record:\*\*")
 ADDR_RE = re.compile(r"harness session name\s+\*\*`([^`]*)`\*\*")
@@ -81,9 +88,19 @@ def check_name(name, where):
     legitimate bind output can never be WIDER than what bind-designer is able to write."""
     if not name:
         fail("empty session name (%s)" % where)
-    if re.search(r"\s", name):
-        fail("session name must not contain whitespace: '%s' (%s) — this is the harness's own session NAME "
-             "(Claude Code: what ListAgents shows), not a description" % (name, where))
+    # Single spaces are allowed ON PURPOSE (automated-researcher#879): a Remote Control bridge session is
+    # auto-retitled seconds after start, and the title it gets ("Non-COT Timmy model organism") is the name
+    # ListAgents lists and SendMessage resolves. Anything else that is whitespace — a tab, a newline, a
+    # leading/trailing or doubled space — is never part of a name the listing prints, so it stays refused.
+    if re.search(r"[^\S ]", name) or name != name.strip() or "  " in name:
+        fail("session name must be ONE line with only single interior spaces: '%s' (%s) — this is the "
+             "harness's own session NAME exactly as its self-identity listing prints it (Claude Code: "
+             "ListAgents' 'This session is …' line), not a description" % (name, where))
+    if name.startswith(("cse_", "bridge-cse-")):
+        fail("'%s' (%s) is a Remote Control bridge's harness id, NOT a SendMessage address: the bridge "
+             "session is auto-renamed seconds after start and the id stops resolving (automated-researcher#879). "
+             "Re-run ListAgents and bind the name its 'This session is …' line prints now, or bind "
+             "record-only" % (name, where))
     if name.startswith("<"):
         fail("'%s' is still a placeholder (%s) — resolve your OWN harness session name by lookup "
              "(automated-researcher#796), never a guessed or example name" % (name, where))
@@ -122,12 +139,17 @@ def bind(text, name, path):
         indent = re.match(r"^\s*", line).group(0)
         lines[i] = "%s- **Designer-of-record:** the launching session, %s" % (indent, replacement)
 
-    updated = "\n".join(lines).replace("<designer_session>", name)
+    # In a `--designer-session` argument slot the name is shell-quoted, so a spaced bridge title (#879) stays
+    # ONE argument when the executor copies the command. shlex.quote leaves an all-safe name ("launcher-3")
+    # byte-identical, so briefs bound before #879 still recompute exactly under preflight.
+    arg = shlex.quote(name)
+    updated = "\n".join(lines).replace("--designer-session <designer_session>", "--designer-session " + arg)
+    updated = updated.replace("<designer_session>", name)
     if prev and prev != name:
         # narrow on purpose: only the argument slot, never a free-text occurrence of the old name
         updated = re.sub(
-            r"(--designer-session[ \t]+)" + re.escape(prev) + r"(?![\w.-])",
-            lambda m: m.group(1) + name,
+            r"(--designer-session[ \t]+)(?:" + re.escape(shlex.quote(prev)) + r"|" + re.escape(prev) + r")(?![\w.-])",
+            lambda m: m.group(1) + arg,
             updated,
         )
     return updated, lines[i]

@@ -18,10 +18,11 @@
 # --session-handle is omitted, an explicit handle still winning verbatim but WARNED when it isn't this
 # session's own, `checkpoint` never deriving, and the unset/failing/empty/multi-line seam cases binding
 # nothing without ever failing the run's first action. Also covers #796's designer address: the
-# designer_session field (bind at start/checkpoint, getter, status line, whitespace rejected because the
-# value is an ADDRESS handed to a message primitive, the reserved `record-only` literal, legacy records
+# designer_session field (bind at start/checkpoint, getter, status line, non-name whitespace rejected because
+# the value is an ADDRESS handed to a message primitive, the reserved `record-only` literal, legacy records
 # reading as absent) and verify-bootstrap's now-required --designer-session (match, fail-fast mismatch,
-# timeout while unbound, missing-arg rejected).
+# timeout while unbound, missing-arg rejected). And #879: a retitled Remote Control bridge's spaced name binds
+# and round-trips, while its pre-rename `bridge-cse-*`/`cse_*` harness id is refused on the designer side.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -576,13 +577,31 @@ run start ds2 --designer-session record-only >/dev/null
 run start ds3 >/dev/null
 if dsession ds3 >/dev/null 2>&1; then no designer-session-absent-failclosed; else ok designer-session-absent-failclosed; fi
 if dsession nonesuch >/dev/null 2>&1; then no designer-session-missing-failclosed; else ok designer-session-missing-failclosed; fi
-# --- empty value rejected; a whitespace-carrying value rejected on BOTH start and checkpoint (it is an
-#     ADDRESS handed to a message primitive as one argument, not free text) ---
+# --- empty value rejected; a value that is not ONE listing-shaped name (tab, newline, leading/trailing or
+#     doubled space) rejected on BOTH start and checkpoint (it is an ADDRESS handed to a message primitive
+#     as one argument, not free text) ---
 if run checkpoint ds3 --designer-session "" >/dev/null 2>&1; then no designer-session-empty-rejected; else ok designer-session-empty-rejected; fi
-if run checkpoint ds3 --designer-session "claude-rc, the RC host" >/dev/null 2>&1; then no designer-session-whitespace-rejected; else ok designer-session-whitespace-rejected; fi
-if run start ds4 --designer-session "two words" >/dev/null 2>&1; then no designer-session-whitespace-start-rejected; else ok designer-session-whitespace-start-rejected; fi
+if run checkpoint ds3 --designer-session $'two\twords' >/dev/null 2>&1; then no designer-session-tab-rejected; else ok designer-session-tab-rejected; fi
+if run checkpoint ds3 --designer-session $'two\nlines' >/dev/null 2>&1; then no designer-session-newline-rejected; else ok designer-session-newline-rejected; fi
+if run checkpoint ds3 --designer-session " leading" >/dev/null 2>&1; then no designer-session-leading-space-rejected; else ok designer-session-leading-space-rejected; fi
+if run checkpoint ds3 --designer-session "doubled  space" >/dev/null 2>&1; then no designer-session-double-space-rejected; else ok designer-session-double-space-rejected; fi
+if run start ds4 --designer-session "trailing " >/dev/null 2>&1; then no designer-session-whitespace-start-rejected; else ok designer-session-whitespace-start-rejected; fi
+# --- #879: a Remote Control bridge's harness id is refused on the DESIGNER-side bind (checkpoint) — it stops
+#     resolving the moment the bridge session is auto-retitled — while `start` binds the seed verbatim and
+#     leaves catching it to verify-bootstrap ---
+if run checkpoint ds3 --designer-session "bridge-cse-01wvumyeywqqpwqfsyruwvhe-63" >/dev/null 2>"$TMP/ds3.err"; then no designer-session-bridge-id-checkpoint-rejected; else ok designer-session-bridge-id-checkpoint-rejected; fi
+grep -q "harness id" "$TMP/ds3.err" && ok designer-session-bridge-id-message || no designer-session-bridge-id-message
+if run checkpoint ds3 --designer-session "cse_01wvumyeywqqpwqfsyruwvhe" >/dev/null 2>&1; then no designer-session-cse-id-checkpoint-rejected; else ok designer-session-cse-id-checkpoint-rejected; fi
 # the rejected binds left nothing behind
 if dsession ds3 >/dev/null 2>&1; then no designer-session-rejected-no-write; else ok designer-session-rejected-no-write; fi
+# --- #879: the retitled bridge name ListAgents actually lists carries single spaces — it binds, reads back
+#     verbatim, and is re-bindable over a harness id the executor bound from a stale seed ---
+run start ds6 --designer-session "bridge-cse-01wvumyeywqqpwqfsyruwvhe-63" >/dev/null \
+  && ok designer-session-start-binds-seed-verbatim || no designer-session-start-binds-seed-verbatim
+run checkpoint ds6 --designer-session "Non-COT Timmy model organism" >/dev/null
+[ "$(dsession ds6)" = "Non-COT Timmy model organism" ] && ok designer-session-spaced-title-rebind || no designer-session-spaced-title-rebind
+printf '%s\n' "$(run status ds6)" | grep -qx 'designer_session=Non-COT Timmy model organism' \
+  && ok status-designer-session-spaced || no status-designer-session-spaced
 # --- surplus arg rejected ---
 if run designer-session ds1 oops >/dev/null 2>&1; then no surplus-designersession-rejected; else ok surplus-designersession-rejected; fi
 # --- status surfaces it ---
@@ -621,7 +640,25 @@ grep -q "never reached the full expected state" "$TMP/vb10.out" && ok verify-boo
 if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x \
      --question-route record --terminal-route record >/dev/null 2>&1; then no verify-bootstrap-missing-dsession-arg-rejected; else ok verify-bootstrap-missing-dsession-arg-rejected; fi
 if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x \
-     --question-route record --terminal-route record --designer-session "two words" >/dev/null 2>&1; then no verify-bootstrap-bad-dsession-arg-rejected; else ok verify-bootstrap-bad-dsession-arg-rejected; fi
+     --question-route record --terminal-route record --designer-session $'two\nlines' >/dev/null 2>&1; then no verify-bootstrap-bad-dsession-arg-rejected; else ok verify-bootstrap-bad-dsession-arg-rejected; fi
+# #879: the dispatch-completion gate refuses to accept a bridge harness id as the expected address — a dead
+# push channel fails at dispatch, not silently at close
+if run verify-bootstrap vb1 --executor-family codex --supervision-mode controller-supervised --worktree /x \
+     --question-route record --terminal-route record --designer-session "bridge-cse-01vmtmjrtsaucxjaszfzgi6h-5e" \
+     --timeout-sec 0 >/dev/null 2>&1; then no verify-bootstrap-bridge-id-rejected; else ok verify-bootstrap-bridge-id-rejected; fi
+# #879: a spaced (retitled-bridge) designer name round-trips through verify-bootstrap's EXACT match
+run create vb11 --handoff /art/vb11/TEMP.md --executor-family codex --supervision-mode controller-supervised \
+  --worktree /ws/run/vb11 --question-route record --terminal-route record \
+  --designer-session "EM text screen experiment launch" --look-again "1111" >/dev/null
+if run verify-bootstrap vb11 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb11 --question-route record --terminal-route record \
+     --designer-session "EM text screen experiment launch" --timeout-sec 5 --poll-interval-sec 1 >/dev/null 2>&1; then
+  ok verify-bootstrap-spaced-dsession-pass; else no verify-bootstrap-spaced-dsession-pass; fi
+# ...and a stale pre-retitle bind vs the current name is a fail-fast mismatch, not a pass
+if run verify-bootstrap vb11 --executor-family codex --supervision-mode controller-supervised \
+     --worktree /ws/run/vb11 --question-route record --terminal-route record \
+     --designer-session "EM text screen experiment" --timeout-sec 5 --poll-interval-sec 1 >/dev/null 2>&1; then
+  no verify-bootstrap-spaced-dsession-mismatch; else ok verify-bootstrap-spaced-dsession-mismatch; fi
 
 # ===== #673: derive the session handle at `start` from the instance's self-identity seam =====
 # The incident class: a hand-written `tmux:<name>` handle made self-reap refuse AND the janitor report-only,
