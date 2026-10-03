@@ -37,9 +37,11 @@ cites `DESIGN.md § <heading>`, that citation is the authoritative statement; th
 - **Designer-of-record:** <who — the designing agent/role>, harness session name **`<designer_session>`**.
   <!-- Written by the LAUNCHING session at launch, not by the designer at design time (the launcher may be a
        different session, even a different family): `launch-experiment`'s
-       `launch_record.sh bind-designer <this file> <name>` fills it from that session's OWN harness session
-       name (Claude Code: the name `ListAgents` shows for it) — never an assumed tmux/fleet name, and never a
-       hand-edit. Left as the placeholder until then. -->
+       `launch_record.sh bind-designer <this file> "<name>"` fills it from that session's OWN harness session
+       name (Claude Code: the name `ListAgents`' "This session is …" line prints for it, spaces included) —
+       never an assumed tmux/fleet name, never a Remote Control bridge's `cse_*`/`bridge-cse-*` id (it stops
+       resolving once the bridge session is auto-retitled, automated-researcher#879), and never a hand-edit.
+       Left as the placeholder until then. -->
 - **Bind it on the run-supervision record at `start`:** `--designer-session <designer_session>` (the launching
   session's `verify-bootstrap` refuses to call the launch complete until this matches).
 - **This line is the SEED; the record is the address of record.** The designer re-binds `designer_session` with
